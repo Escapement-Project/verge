@@ -24,6 +24,41 @@ const DATA_IN: u8 = 4;
 /// Larger than any report the ROM sends, so a read never truncates one.
 const READ_BUFFER: usize = 256;
 
+/// A command packet's header: tag, flags, a reserved byte, and the number of parameters.
+const HEADER: usize = 4;
+/// The flag that says a data phase follows, with its length the second parameter.
+const HAS_DATA_PHASE: u8 = 1;
+const GENERIC_RESPONSE: u8 = 0xA0;
+const READ_MEMORY_RESPONSE: u8 = 0xA3;
+const GET_PROPERTY_RESPONSE: u8 = 0xA7;
+/// Response tags McuBoot's client knows but has no parser for: it panics on them.
+const UNPARSED_RESPONSES: [u8; 2] = [0xB0, 0xB3];
+
+/// Refuses a command packet McuBoot's client (rblhost 0.2.0) would panic on rather than reject:
+/// one that is not its header and its parameters exactly, or has no status; a data phase, or a
+/// generic response, without the second parameter it reads; a successful GetProperty response
+/// with no value; a ReadMemory response with no data phase, which is how the ROM aborts one
+/// (UM11126 8.4); or a tag it has no parser for.
+fn check_command(packet: &[u8]) -> Result<(), CommunicationError> {
+    let [tag, flags, _, count, ..] = *packet else {
+        return Err(CommunicationError::InvalidData);
+    };
+    let count = usize::from(count);
+    let success = packet.get(4..8) == Some([0; 4].as_slice());
+    let refused = packet.len() != HEADER + 4 * count
+        || count < 1
+        || (flags & HAS_DATA_PHASE != 0 && count < 2)
+        || (tag == GENERIC_RESPONSE && count < 2)
+        || (tag == GET_PROPERTY_RESPONSE && success && count < 2)
+        || (tag == READ_MEMORY_RESPONSE && flags & HAS_DATA_PHASE == 0)
+        || UNPARSED_RESPONSES.contains(&tag);
+    if refused {
+        Err(CommunicationError::InvalidData)
+    } else {
+        Ok(())
+    }
+}
+
 /// The two calls the transport makes on a HID device: hidapi's, or a test's.
 pub trait HidPipe {
     /// Writes one report, its id first. Returns the bytes written.
@@ -135,9 +170,11 @@ impl<P: HidPipe> Protocol for HidRom<P> {
         if len == 0 {
             return Err(CommunicationError::Aborted);
         }
-        rest.get(..len)
-            .map(<[u8]>::to_vec)
-            .ok_or(CommunicationError::InvalidData)
+        let packet = rest.get(..len).ok_or(CommunicationError::InvalidData)?;
+        if kind == COMMAND {
+            check_command(packet)?;
+        }
+        Ok(packet.to_vec())
     }
 }
 
@@ -261,6 +298,124 @@ mod tests {
             hid.read_packet_raw(DATA),
             Err(CommunicationError::Timeout)
         ));
+    }
+
+    /// The second review's proof: a command report whose length field says 4. McuBoot reads a
+    /// command packet's status at bytes 4 to 8 and its parameters from byte 8, so it panicked.
+    #[test]
+    fn a_short_command_report_is_an_error_not_a_panic() {
+        for reply in [
+            "03 00 04 00 a7 00 00 01",
+            "03 00 07 00 a7 00 00 01 00 00 00",
+        ] {
+            let mut boot = rom(
+                &["01 00 0c 00 07 00 00 02 01 00 00 00 00 00 00 00"],
+                &[reply],
+            );
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::isp::rom_version(&mut boot)
+            }));
+            assert!(
+                matches!(result, Ok(Err(CommunicationError::InvalidData))),
+                "{reply}: {:?}",
+                result.map_err(|_| "McuBoot panicked")
+            );
+        }
+        // A data report carries any length, and is handed over as it is.
+        let mut hid = HidRom::new(
+            Script {
+                reads: RefCell::new([bytes("04 00 04 00 01 02 03 04")].into()),
+                ..Script::default()
+            },
+            "test".into(),
+            Duration::from_secs(1),
+        );
+        assert_eq!(hid.read_packet_raw(DATA).unwrap(), [1, 2, 3, 4]);
+    }
+
+    /// The third review's proof, with the cases it lists and two more found in rblhost's
+    /// parsers: command reports of eight bytes or more that McuBoot panics on. Each must come
+    /// back as an error, as R3's shorter reports do.
+    #[test]
+    fn no_command_report_makes_mcuboot_panic() {
+        let get_property = "01 00 0c 00 07 00 00 02 01 00 00 00 00 00 00 00";
+        let read_memory = "01 00 10 00 03 00 00 03 00 04 00 20 10 00 00 00 00 00 00 00";
+        let mut answered = Vec::new();
+        for (what, write, reply) in [
+            // The data-phase flag, and no parameter for the data phase's length.
+            (
+                "data phase, no length",
+                get_property,
+                "03 00 08 00 a7 01 00 00 00 00 00 00",
+            ),
+            // A generic response with no parameter after its status.
+            (
+                "generic, no parameter",
+                get_property,
+                "03 00 08 00 a0 00 00 00 00 00 00 00",
+            ),
+            // UM11126 8.4: the ROM aborts ReadMemory's data phase by sending its response without
+            // the data-phase flag.
+            (
+                "read memory, data phase aborted",
+                read_memory,
+                "03 00 0c 00 a3 00 00 02 01 00 00 00 10 00 00 00",
+            ),
+            // A successful GetProperty response with no value: the property's parser reads one.
+            (
+                "get property, no value",
+                get_property,
+                "03 00 08 00 a7 00 00 01 00 00 00 00",
+            ),
+            // A tag McuBoot knows and has no parser for.
+            (
+                "flash read resource",
+                get_property,
+                "03 00 08 00 b0 00 00 01 00 00 00 00",
+            ),
+            // The same three again, each with a parameter count that matches its length, so that
+            // only the rule for its own case refuses it.
+            (
+                "data phase, status only",
+                read_memory,
+                "03 00 08 00 a3 01 00 01 00 00 00 00",
+            ),
+            (
+                "generic, status only",
+                get_property,
+                "03 00 08 00 a0 00 00 01 00 00 00 00",
+            ),
+            // A count that says two parameters, in a packet with room for one.
+            (
+                "generic, count longer than the packet",
+                get_property,
+                "03 00 08 00 a0 00 00 02 00 00 00 00",
+            ),
+            // A header with no status: McuBoot reads it from bytes 4 to 8.
+            ("no status", get_property, "03 00 04 00 a7 00 00 00"),
+        ] {
+            let mut boot = rom(&[write], &[reply]);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if write == read_memory {
+                    boot.read_memory(0x2000_0400, 0x10, 0).map(|_| ())
+                } else {
+                    crate::isp::rom_version(&mut boot).map(|_| ())
+                }
+            }));
+            match result {
+                Ok(Err(CommunicationError::InvalidData)) => {}
+                Ok(other) => answered.push(format!("{what}: {other:?}")),
+                Err(_) => answered.push(format!("{what}: McuBoot panicked")),
+            }
+        }
+        assert!(answered.is_empty(), "{answered:#?}");
+        // A failed GetProperty carries only its status, and McuBoot reports that status.
+        let mut boot = rom(&[get_property], &["03 00 08 00 a7 00 00 01 3c 28 00 00"]);
+        let failed = crate::isp::rom_version(&mut boot);
+        assert!(
+            matches!(failed, Err(CommunicationError::UnexpectedStatus(_, 10300))),
+            "{failed:?}"
+        );
     }
 
     #[test]
