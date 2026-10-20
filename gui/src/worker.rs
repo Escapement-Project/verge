@@ -1,15 +1,18 @@
 //! USB work on a thread of its own: the window sends requests and drains events each frame.
 
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use std::io::Write as _;
 use std::path::PathBuf;
 
-use verge_core::batch::{Armed, Batch, Entry, Filter, Observer, Record, Status, Tally};
+use verge_core::batch::{
+    Armed, Batch, Entry, Filter, Observer, Record, Status, Tally, open_record,
+};
 use verge_core::progress::{Cancel, Progress, Step};
 use verge_core::release::{GitHub, Http, Release};
-use verge_core::source::{self, LoadError, Source};
+use verge_core::source::{self, LoadError, Loaded, Source};
 use verge_core::update::{self, Outcome, Timing, UpdateError};
 use verge_core::{Bus, Unit, detect};
 
@@ -103,12 +106,79 @@ impl Progress for Forward<'_> {
     }
 }
 
+/// A load's progress, sent from the thread that loads. Once `stop` is set the load has been left
+/// to finish on its own, and what it says would land on whatever the window shows next.
+struct Relay {
+    events: Sender<Event>,
+    stop: Cancel,
+}
+
+impl Relay {
+    fn send(&self, event: Event) {
+        if !self.stop.is_cancelled() {
+            let _ = self.events.send(event);
+        }
+    }
+}
+
+impl Progress for Relay {
+    fn plan(&mut self, steps: &[Step]) {
+        self.send(Event::Plan(steps.to_vec()));
+    }
+    fn start(&mut self, step: Step, total: u64) {
+        self.send(Event::Start { step, total });
+    }
+    fn advance(&mut self, done: u64) {
+        self.send(Event::Advance(done));
+    }
+    fn note(&mut self, text: &str) {
+        self.send(Event::Note(text.to_owned()));
+    }
+}
+
+/// Loads an image on a thread of its own, so that `stop` ends the wait at once. A download that
+/// has stalled is left to its timeouts; nothing has touched USB yet. `None` when stopped.
+fn load_stoppable<H: Http + Clone + Send + 'static>(
+    github: &GitHub<H>,
+    source: &Source,
+    unit: Option<&Unit>,
+    force: bool,
+    forward: &Forward<'_>,
+    stop: &Cancel,
+) -> Result<Option<Loaded>, LoadError> {
+    let (done, result) = channel();
+    let (github, source, unit) = (github.clone(), source.clone(), unit.cloned());
+    let mut relay = Relay {
+        events: forward.events.clone(),
+        stop: stop.clone(),
+    };
+    let thread = std::thread::Builder::new()
+        .name("load".into())
+        .spawn(move || {
+            let loaded = source::load(&source, &github, unit.as_ref(), force, &mut relay);
+            let _ = done.send(loaded);
+        })
+        .expect("the load thread starts");
+    loop {
+        match result.recv_timeout(Duration::from_millis(50)) {
+            Ok(loaded) => return loaded.map(Some),
+            Err(RecvTimeoutError::Timeout) if stop.is_cancelled() => return Ok(None),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => match thread.join() {
+                Err(panic) => std::panic::resume_unwind(panic),
+                Ok(()) => unreachable!("the load thread sends its result before it ends"),
+            },
+        }
+    }
+}
+
 fn load_error(error: &LoadError) -> JobError {
     let advice = match error {
         LoadError::AlreadyRuns { .. } | LoadError::Newer { .. } => {
             Some("Tick Install anyway to flash it regardless.")
         }
         LoadError::NoStock { .. } => Some("Install NXP's LinkServer, or pick the image as a file."),
+        LoadError::OtherBoard { .. } => Some("Pick STOCK to put NXP's image on it instead."),
         _ => None,
     };
     JobError {
@@ -132,6 +202,7 @@ fn update_error(error: &UpdateError) -> JobError {
             ),
             false,
         ),
+        UpdateError::Ambiguous { .. } => (Some("Look at what is attached now."), false),
         UpdateError::NoBootloader(_) | UpdateError::OursEntry(_) | UpdateError::StockEntry(_) => {
             (Some("Use the ISP jumper instead."), false)
         }
@@ -144,7 +215,7 @@ fn update_error(error: &UpdateError) -> JobError {
     }
 }
 
-fn install<B: Bus, H: Http>(
+fn install<B: Bus, H: Http + Clone + Send + 'static>(
     bus: &B,
     github: &GitHub<H>,
     unit: &Unit,
@@ -153,8 +224,13 @@ fn install<B: Bus, H: Http>(
     cancel: &Cancel,
     progress: &mut Forward<'_>,
 ) -> Result<Outcome, JobError> {
-    let loaded = source::load(source, github, Some(unit), force, progress)
-        .map_err(|error| load_error(&error))?;
+    let loaded = load_stoppable(github, source, Some(unit), force, progress, cancel)
+        .map_err(|error| load_error(&error))?
+        .ok_or_else(|| JobError {
+            message: "cancelled before anything was flashed".into(),
+            advice: None,
+            left_in_isp: false,
+        })?;
     progress.send(Event::Loaded(loaded.name.clone()));
     tracing::info!("installing {}", loaded.name);
     update::install(
@@ -233,7 +309,7 @@ fn state<B: Bus>(batch: &Batch<'_, B>) -> BatchState {
     clippy::too_many_arguments,
     reason = "the request's fields, passed through"
 )]
-fn run_batch<B: Bus, H: Http>(
+fn run_batch<B: Bus, H: Http + Clone + Send + 'static>(
     bus: &B,
     github: &GitHub<H>,
     forward: &mut Forward<'_>,
@@ -244,9 +320,14 @@ fn run_batch<B: Bus, H: Http>(
     stop: &Cancel,
     cancel: &Cancel,
 ) -> Result<Tally, String> {
-    let loaded = source::load(source, github, None, true, forward).map_err(|e| e.to_string())?;
-    let file = std::fs::File::create(record)
-        .map_err(|e| format!("creating the record file {}: {e}", record.display()))?;
+    let Some(loaded) =
+        load_stoppable(github, source, None, true, forward, stop).map_err(|e| e.to_string())?
+    else {
+        tracing::info!("stopped before the batch was armed");
+        return Ok(Tally::default());
+    };
+    let file = open_record(record)
+        .map_err(|e| format!("opening the record file {}: {e}", record.display()))?;
     forward.send(Event::BatchArmed {
         name: loaded.name.clone(),
         filter: filter.describe(),
@@ -271,19 +352,21 @@ fn run_batch<B: Bus, H: Http>(
         record: std::io::BufWriter::new(file),
     };
     let mut shown = None;
-    while !batch.finished() {
-        batch.step(&mut observer).map_err(|e| e.to_string())?;
+    let mut stepped = Ok(());
+    while !batch.finished() && stepped.is_ok() {
+        stepped = batch.step(&mut observer);
         let now = state(&batch);
         if shown.as_ref() != Some(&now) {
             observer.forward.send(Event::BatchState(now.clone()));
             shown = Some(now);
         }
     }
-    batch.close();
+    batch.close(&mut observer);
+    stepped.map_err(|e| e.to_string())?;
     Ok(batch.tally())
 }
 
-fn serve<B: Bus, H: Http>(
+fn serve<B: Bus, H: Http + Clone + Send + 'static>(
     bus: &B,
     github: &GitHub<H>,
     requests: &Receiver<Request>,
@@ -354,7 +437,7 @@ impl Worker {
     pub fn spawn<B, H>(bus: B, github: GitHub<H>, repaint: impl Fn() + Send + 'static) -> Worker
     where
         B: Bus + Send + 'static,
-        H: Http + Send + 'static,
+        H: Http + Clone + Send + 'static,
     {
         let (request_tx, request_rx) = channel();
         let (event_tx, event_rx) = channel();

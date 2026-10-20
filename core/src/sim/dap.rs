@@ -13,7 +13,7 @@ const COMMAND_TIME: Duration = Duration::from_micros(250);
 pub struct SimDap {
     world: Arc<Mutex<World>>,
     unit: usize,
-    instance: String,
+    generation: u64,
     /// Replies on the bulk IN endpoint, oldest first. An earlier host's leftovers come first.
     pending: VecDeque<Vec<u8>>,
 }
@@ -22,13 +22,13 @@ impl SimDap {
     pub(super) fn new(
         world: Arc<Mutex<World>>,
         unit: usize,
-        instance: String,
+        generation: u64,
         stale: Vec<Vec<u8>>,
     ) -> SimDap {
         SimDap {
             world,
             unit,
-            instance,
+            generation,
             pending: stale.into(),
         }
     }
@@ -75,14 +75,17 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
         },
         [dap::VENDOR_IDENTIFY] => match &firmware {
             SimFirmware::Ours { build } => {
+                let board = world.units[unit].board;
+                let format = if board.is_some() {
+                    3
+                } else {
+                    world.ours.1.format
+                };
                 let mut reply = vec![dap::VENDOR_IDENTIFY];
                 reply.extend_from_slice(dap::IDENTIFY_MAGIC);
-                reply.extend_from_slice(&[
-                    world.ours.1.format,
-                    world.ours.1.flags,
-                    build.len() as u8,
-                ]);
+                reply.extend_from_slice(&[format, world.ours.1.flags, build.len() as u8]);
                 reply.extend_from_slice(build.as_bytes());
+                reply.extend(board);
                 reply
             }
             _ => vec![dap::ID_DAP_INVALID],
@@ -100,8 +103,9 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
             _ => vec![dap::ID_DAP_INVALID],
         },
         [dap::DAP_DISCONNECT] => vec![dap::DAP_DISCONNECT, dap::DAP_OK],
-        [dap::DAP_HOST_STATUS, 0 | 1, 0 | 1] => {
+        [dap::DAP_HOST_STATUS, 0 | 1, on @ (0 | 1)] => {
             world.units[unit].host_status += 1;
+            world.units[unit].leds_on = *on == 1;
             vec![dap::DAP_HOST_STATUS, dap::DAP_OK]
         }
         _ => vec![dap::ID_DAP_INVALID],
@@ -111,7 +115,7 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
 impl SimDap {
     fn live(&self, world: &mut World) -> Result<(), LinkError> {
         world.settle();
-        if world.is_current(self.unit, &self.instance) {
+        if world.is_current(self.unit, self.generation) {
             Ok(())
         } else {
             Err(LinkError::Disconnected)

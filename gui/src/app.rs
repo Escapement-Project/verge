@@ -415,6 +415,15 @@ impl UpdaterApp {
                     job.notes.push(note);
                 }
             }
+            // The worker reports its own death this way, whatever it was doing.
+            Event::Finished(Err(error))
+                if self.job.is_none() && self.batch.as_ref().is_some_and(BatchRun::running) =>
+            {
+                if let Some(run) = &mut self.batch {
+                    run.handle(Event::BatchEnded(Err(error.message)), now);
+                }
+                self.rescan();
+            }
             Event::Finished(result) => {
                 if let Some(mut job) = self.job.take() {
                     if let Some(current) = job.current.take() {
@@ -512,7 +521,7 @@ impl UpdaterApp {
             }
             Some(_) => {}
         }
-        match self.choice {
+        let action = match self.choice {
             Choice::Release => match &self.release {
                 None => blocked("Looking up releases", String::new()),
                 Some(Err(error)) => blocked("No release", error.clone()),
@@ -563,7 +572,16 @@ impl UpdaterApp {
                     }
                 }
             },
+        };
+        if let Action::Ready { source, .. } = &action
+            && let Err(error) = source::check_board(Some(unit), source)
+        {
+            return blocked(
+                "Not for this board",
+                format!("{} Pick STOCK for that.", sentence(&error.to_string())),
+            );
         }
+        action
     }
 
     fn start(&mut self, unit: Box<Unit>, source: Source, now: f64) {

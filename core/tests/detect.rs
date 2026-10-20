@@ -2,7 +2,8 @@
 //! identities.
 
 use serde_json::Value;
-use verge_core::detect::{Guess, State};
+use verge_core::dap::Ours;
+use verge_core::detect::{Guess, Hardware, State};
 use verge_core::sim::{SimBus, SimFirmware};
 use verge_core::version::StockVersion;
 use verge_core::{Firmware, Path, detect, offer};
@@ -183,4 +184,63 @@ fn ours_is_told_from_stock_by_the_identify_reply_alone() {
     let units = detect(&bus).unwrap();
     let build = units[0].build().unwrap();
     assert_eq!(build.variant.as_deref(), Some("armwire"));
+}
+
+/// LinkServer's Readme: `MCU-LINK [Pro|MR|on-board|<board>] (r<RRR>) CMSIS-DAP V<V>.<BBB>`. The
+/// first row is the string recorded from the bench's stock unit.
+#[test]
+fn stocks_product_string_names_the_board() {
+    let other = |name: &str| Hardware::Other(name.to_owned());
+    for (product, board) in [
+        ("MCU-LINK (r0FB) CMSIS-DAP V3.172", Hardware::McuLink),
+        (
+            "MCU-LINK Pro (r1E2) CMSIS-DAP V3.172",
+            other("an MCU-Link Pro"),
+        ),
+        (
+            "MCU-LINK MR (r0C3) CMSIS-DAP V3.172",
+            other("an MCU-Link MR"),
+        ),
+        (
+            "MCU-LINK on-board (r0E7) CMSIS-DAP V3.122",
+            other("an on-board MCU-Link"),
+        ),
+        (
+            "MCU-LINK FRDM-MCXN947 (r0E7) CMSIS-DAP V3.172",
+            other("the MCU-Link on a FRDM-MCXN947"),
+        ),
+        // Not the Readme's form, so nothing is known.
+        ("MCU-LINK CMSIS-DAP V2.245", Hardware::Unknown),
+        ("MCU-Link Verge CMSIS-DAP", Hardware::Unknown),
+    ] {
+        assert_eq!(Hardware::from_stock_product(product), board, "{product}");
+    }
+}
+
+#[test]
+fn each_unit_says_which_board_it_is() {
+    let bus = SimBus::default();
+    let plain_ours = bus.add_ours("v0.3.0");
+    let pro_ours = bus.add_ours("v0.3.0");
+    bus.set_board(pro_ours, Ours::BOARD_MCU_LINK_PRO);
+    let on_board_ours = bus.add_ours("v0.3.0");
+    bus.set_board(on_board_ours, Ours::BOARD_ON_BOARD);
+    let pro_stock = bus.add_stock("3.172");
+    bus.set_board(pro_stock, Ours::BOARD_MCU_LINK_PRO);
+    bus.add_stock("3.172");
+    bus.add_bootloader(false);
+    let boards: Vec<Hardware> = detect(&bus).unwrap().iter().map(|u| u.hardware()).collect();
+    assert_eq!(
+        boards,
+        [
+            // Format 2, as recorded: built only for the plain board.
+            Hardware::McuLink,
+            Hardware::Other("an MCU-Link Pro".into()),
+            Hardware::Other("an on-board MCU-Link".into()),
+            Hardware::Other("an MCU-Link Pro".into()),
+            Hardware::McuLink,
+            Hardware::Unknown,
+        ]
+    );
+    let _ = plain_ours;
 }

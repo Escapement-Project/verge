@@ -16,8 +16,10 @@ pub struct UsbDevice {
     /// The physical port, stable while the unit stays plugged into it, `None` where the platform
     /// does not say.
     pub location: Option<String>,
-    /// This enumeration of the device. It changes when the device leaves the bus and comes back,
-    /// even on the same port.
+    /// The device while it stays on the bus. On Linux and macOS it changes whenever the device
+    /// leaves the bus and comes back. On Windows it is the device instance ID's devnode, which a
+    /// device that comes back keeps: by its serial number, or by its port without one. There a
+    /// return is seen only as a change of ID, or by looking while the device is gone.
     pub instance: String,
     pub serial: Option<String>,
     pub manufacturer: Option<String>,

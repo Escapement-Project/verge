@@ -62,6 +62,10 @@ pub enum UpdateError {
         "the unit did not come back within {0:?} of the reset. If it stays away, fit the ISP jumper and flash it again"
     )]
     NoReturn(Duration),
+    #[error(
+        "{count} units appeared while the tool waited for this one, and they report no USB port to tell them apart"
+    )]
+    Ambiguous { count: usize },
     #[error("cancelled")]
     Cancelled,
 }
@@ -125,10 +129,24 @@ fn wait_until<B: Bus, T>(
     }
 }
 
-fn same_port(a: &UsbDevice, b: &UsbDevice) -> bool {
-    match (&a.location, &b.location) {
-        (Some(a), Some(b)) => a == b,
-        _ => true,
+/// Whether `device` is on the port `of` was on. A device that reports no port is on none.
+fn on_port_of(device: &UsbDevice, of: &UsbDevice) -> bool {
+    device.location.is_some() && device.location == of.location
+}
+
+/// The device among `new` that is the unit `of` once was: the one on its port, or where `of`
+/// reported no port, the only one.
+fn the_one(new: &[&UsbDevice], of: &UsbDevice) -> Option<Result<UsbDevice, UpdateError>> {
+    match (&of.location, new) {
+        (Some(_), _) => new
+            .iter()
+            .find(|d| on_port_of(d, of))
+            .map(|d| Ok((*d).clone())),
+        (None, []) => None,
+        (None, [one]) => Some(Ok((*one).clone())),
+        (None, several) => Some(Err(UpdateError::Ambiguous {
+            count: several.len(),
+        })),
     }
 }
 
@@ -141,6 +159,7 @@ pub fn enter_bootloader<B: Bus>(
     cancel: &Cancel,
 ) -> Result<UsbDevice, UpdateError> {
     let all = detect::detect(bus)?;
+    let before: Vec<String> = all.iter().map(|u| u.device.instance.clone()).collect();
     let offer = paths::offer(unit, &all);
     let path = offer
         .paths
@@ -185,12 +204,13 @@ pub fn enter_bootloader<B: Bus>(
 
     progress.start(Step::WaitForBootloader, 0);
     let found = wait_until(bus, timing, timing.bootloader_appears, cancel, |devices| {
-        devices
+        let new: Vec<&UsbDevice> = devices
             .iter()
-            .find(|d| d.role() == Some(Role::Bootloader) && same_port(d, &unit.device))
-            .cloned()
+            .filter(|d| d.role() == Some(Role::Bootloader) && !before.contains(&d.instance))
+            .collect();
+        the_one(&new, &unit.device)
     })?;
-    found.ok_or(UpdateError::NoBootloader(timing.bootloader_appears))
+    found.ok_or(UpdateError::NoBootloader(timing.bootloader_appears))?
 }
 
 /// The one unit in ISP mode, or why there is not exactly one.
@@ -267,6 +287,13 @@ pub fn flash_bootloader<B: Bus>(
         bus.sleep(timing.poll * 2);
     };
     tracing::info!("bootloader {} answers", info.version);
+    // Opening took retries, during which the bus can change. Nothing has been written yet.
+    let answering = only_bootloader(&bus.devices()?)?;
+    if answering.instance != rom.instance {
+        return Err(UpdateError::Refused(format!(
+            "the unit in ISP mode changed while the tool connected to it ({rom} then {answering}), so nothing was flashed. Check what is attached and flash it again"
+        )));
+    }
 
     isp::program(&mut boot, image, &info, progress, cancel)?;
     progress.start(Step::Reset, 0);
@@ -286,15 +313,32 @@ pub fn wait_for_return<B: Bus>(
     progress.start(Step::WaitForFirmware, 0);
     let rom = &flashed.rom;
     // A unit can leave and come back between two looks at the bus, so its leaving is not waited
-    // for: any instance on the ROM's port that was not there before the reset is the unit.
+    // for: any instance on the ROM's port that was not there before the reset is the unit. On
+    // Windows a bootloader that comes back to the same port keeps its instance, so there it is
+    // the unit only once it has been seen gone.
+    let mut gone = false;
     let back = wait_until(bus, timing, timing.firmware_returns, cancel, |devices| {
-        devices
+        if !devices.iter().any(|d| d.instance == rom.instance) {
+            gone = true;
+        }
+        let new: Vec<&UsbDevice> = devices
             .iter()
-            .find(|d| same_port(d, rom) && !flashed.before.contains(&d.instance))
-            .cloned()
+            .filter(|d| d.role().is_some())
+            .filter(|d| {
+                !flashed.before.contains(&d.instance) || (gone && d.instance == rom.instance)
+            })
+            .collect();
+        the_one(&new, rom)
     })?;
-    let Some(device) = back else {
-        return Err(UpdateError::NoReturn(timing.firmware_returns));
+    let device = match back {
+        Some(found) => found?,
+        None if !gone && bus.devices()?.iter().any(|d| d.instance == rom.instance) => {
+            progress.note(
+                "The bootloader was not seen to leave the bus after the reset, so it either restarted too quickly to see or did not restart. Either way the unit is in ISP mode with the image flashed and verified.",
+            );
+            return Ok(Outcome::JumperStillFitted);
+        }
+        None => return Err(UpdateError::NoReturn(timing.firmware_returns)),
     };
     match device.role() {
         Some(Role::Bootloader) => Ok(Outcome::JumperStillFitted),

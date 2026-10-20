@@ -245,7 +245,12 @@ fn a_batch_updates_each_unit_as_it_arrives_and_records_it() {
         ))
         .stdout(predicate::str::contains("1-3      CJ"))
         .stdout(predicate::str::contains("1-3      blinking"))
-        .stdout(predicate::str::contains("SKIPPED: needs the ISP jumper"));
+        .stdout(predicate::str::contains("SKIPPED: needs the ISP jumper"))
+        // The batch ends with the third update, so the last unit is not left blinking.
+        .stdout(predicate::str::contains(
+            "1-5      done: unplug it when you like",
+        ))
+        .stdout(predicate::str::contains("1-5      blinking").not());
     let text = std::fs::read_to_string(&record).unwrap();
     std::fs::remove_file(&record).unwrap();
     let results: Vec<String> = text
@@ -295,4 +300,71 @@ fn ours_any_takes_ours_as_stock_below_takes_stock() {
         .stderr(predicate::str::contains(
             "every full MCU-Link running ours or in ISP mode, attached from now on?",
         ));
+}
+
+fn record_results(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let json: serde_json::Value = serde_json::from_str(line).unwrap();
+            format!(
+                "{} {}",
+                json["port"].as_str().unwrap(),
+                json["result"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
+/// A record file named twice keeps the first batch's lines.
+#[test]
+fn a_second_batch_adds_to_the_record_file() {
+    let record = temp_record("append");
+    for _ in 0..2 {
+        tool("arrivals")
+            .args(["batch", "--yes", "--count", "1", "--record"])
+            .arg(&record)
+            .assert()
+            .success();
+    }
+    let results = record_results(&record);
+    std::fs::remove_file(&record).unwrap();
+    assert_eq!(
+        results,
+        ["1-1 updated", "1-2 waiting", "1-1 updated", "1-2 waiting"]
+    );
+}
+
+#[test]
+fn a_batch_taking_units_in_isp_mode_without_asking_still_warns() {
+    let record = temp_record("isp-yes");
+    tool("isp")
+        .args([
+            "batch",
+            "--take",
+            "isp",
+            "--include-attached",
+            "--yes",
+            "--count",
+            "1",
+            "--record",
+        ])
+        .arg(&record)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode.",
+        ));
+    std::fs::remove_file(&record).unwrap();
+}
+
+#[test]
+fn ours_is_refused_for_a_pro() {
+    tool("pro")
+        .args(["update", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("the unit is an MCU-Link Pro"))
+        .stderr(predicate::str::contains("with --stock"));
 }

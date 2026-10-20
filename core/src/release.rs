@@ -6,19 +6,21 @@
 //! - exactly one asset whose name ends in `.s19`: the image, as `objcopy -O srec` writes it;
 //! - an asset named the same with `.minisig` appended: a minisign signature of the image, made
 //!   with the key whose public half is [`RELEASE_KEY`], whose trusted comment names the image as
-//!   `file:<name>`;
+//!   `file:<name>` and the release as `tag:<tag>`;
 //! - an asset named the same with `.sha256` appended, holding the image's SHA-256 in hex, as
 //!   `sha256sum` writes it (`<hex>  <name>`). A file name after the hash, if present, must be the
 //!   image's.
 //!
 //! The release's tag is the version: a probe built at that tag reports the same string.
 //!
-//! The signature is what makes an image ours. The trusted comment is signed with it, so naming
-//! the file there stops a validly signed image being published again as another release. The
-//! checksum file and the SHA-256 GitHub keeps of every asset (`digest`) are checked as well.
+//! The signature is what makes an image ours. The trusted comment is signed with it. Naming the
+//! file there stops a signed image being published under another name, and naming the tag stops
+//! an old image being published again as a newer release, under its own name. The checksum file
+//! and the SHA-256 GitHub keeps of every asset (`digest`) are checked as well.
 
 use std::fmt;
 use std::str::FromStr;
+use std::time::Duration;
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -76,6 +78,8 @@ impl fmt::Display for Repo {
 pub enum HttpError {
     #[error("HTTP {status} from {url}")]
     Status { status: u16, url: String },
+    #[error("{url} stalled: no answer in time to {phase}. Check the network and try again")]
+    Timeout { url: String, phase: String },
     #[error("{0}")]
     Transport(String),
 }
@@ -85,34 +89,77 @@ pub trait Http {
     fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, HttpError>;
 }
 
+/// How long each part of a request may take before it fails as stalled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timeouts {
+    /// Looking up the host, and connecting to it with TLS.
+    pub connect: Duration,
+    /// Sending the request, and receiving the reply's headers.
+    pub response: Duration,
+    /// Receiving the whole body.
+    pub body: Duration,
+}
+
+impl Default for Timeouts {
+    fn default() -> Timeouts {
+        Timeouts {
+            connect: Duration::from_secs(15),
+            response: Duration::from_secs(30),
+            // An image is about 250 KB, so this allows a link of a few KB/s.
+            body: Duration::from_secs(60),
+        }
+    }
+}
+
 /// HTTPS through `ureq`.
+#[derive(Clone)]
 pub struct Ureq(ureq::Agent);
+
+impl Ureq {
+    #[must_use]
+    pub fn new(timeouts: Timeouts) -> Ureq {
+        let config = ureq::Agent::config_builder()
+            .timeout_resolve(Some(timeouts.connect))
+            .timeout_connect(Some(timeouts.connect))
+            .timeout_send_request(Some(timeouts.response))
+            .timeout_recv_response(Some(timeouts.response))
+            .timeout_recv_body(Some(timeouts.body))
+            .build();
+        Ureq(config.into())
+    }
+}
 
 impl Default for Ureq {
     fn default() -> Ureq {
-        Ureq(ureq::Agent::new_with_defaults())
+        Ureq::new(Timeouts::default())
     }
 }
 
 impl Http for Ureq {
     fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, HttpError> {
+        let failed = |error: ureq::Error| match error {
+            ureq::Error::StatusCode(status) => HttpError::Status {
+                status,
+                url: url.to_owned(),
+            },
+            ureq::Error::Timeout(phase) => HttpError::Timeout {
+                url: url.to_owned(),
+                phase: phase.to_string(),
+            },
+            other => HttpError::Transport(other.to_string()),
+        };
         let mut request = self.0.get(url);
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
-        match request.call() {
-            Ok(mut response) => response
-                .body_mut()
-                .with_config()
-                .limit(DOWNLOAD_LIMIT)
-                .read_to_vec()
-                .map_err(|error| HttpError::Transport(error.to_string())),
-            Err(ureq::Error::StatusCode(status)) => Err(HttpError::Status {
-                status,
-                url: url.to_owned(),
-            }),
-            Err(error) => Err(HttpError::Transport(error.to_string())),
-        }
+        request
+            .call()
+            .map_err(failed)?
+            .body_mut()
+            .with_config()
+            .limit(DOWNLOAD_LIMIT)
+            .read_to_vec()
+            .map_err(failed)
     }
 }
 
@@ -184,6 +231,16 @@ pub enum ReleaseError {
         "{name}'s trusted comment does not name the image it signs, as file:{image}. Nothing was flashed"
     )]
     SignatureNamesNothing { name: String, image: String },
+    #[error("{name} was signed for release {signed}, not {tag}. Nothing was flashed")]
+    SignatureForAnotherRelease {
+        name: String,
+        signed: String,
+        tag: String,
+    },
+    #[error(
+        "{name}'s trusted comment does not name the release it was signed for, as tag:{tag}. Nothing was flashed"
+    )]
+    SignatureNamesNoRelease { name: String, tag: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -255,6 +312,7 @@ pub fn release_key() -> Option<minisign_verify::PublicKey> {
 }
 
 /// A repository's releases. Public releases need no token.
+#[derive(Clone)]
 pub struct GitHub<H> {
     http: H,
     repo: Repo,
@@ -372,6 +430,7 @@ impl<H: Http> GitHub<H> {
             &release.signature.name,
             &signature,
             &release.image.name,
+            &release.tag,
             &bytes,
         )?;
         let got = hex::encode(Sha256::digest(&bytes));
@@ -453,12 +512,13 @@ fn conventional(release: ApiRelease) -> Result<Release, ReleaseError> {
 }
 
 /// Checks that `signature`, the contents of the asset `name`, is `key`'s signature of `image`, and
-/// that its trusted comment names the image as `file:<image_name>`.
+/// that its trusted comment names the image as `file:<image_name>` and the release as `tag:<tag>`.
 pub fn verify_signature(
     key: &minisign_verify::PublicKey,
     name: &str,
     signature: &[u8],
     image_name: &str,
+    tag: &str,
     image: &[u8],
 ) -> Result<(), ReleaseError> {
     let bad_file = |reason: String| ReleaseError::BadSignatureFile {
@@ -482,20 +542,38 @@ pub fn verify_signature(
             },
         })?;
     // Verified above, so the comment is what the key's holder signed.
-    let named = decoded
-        .trusted_comment()
-        .split_whitespace()
-        .find_map(|word| word.strip_prefix("file:"));
-    match named {
-        Some(named) if named == image_name => Ok(()),
-        Some(named) => Err(ReleaseError::SignatureNamesAnother {
+    let comment = decoded.trusted_comment();
+    let field = |prefix: &str| {
+        comment
+            .split_whitespace()
+            .find_map(|word| word.strip_prefix(prefix))
+    };
+    match field("file:") {
+        Some(named) if named == image_name => {}
+        Some(named) => {
+            return Err(ReleaseError::SignatureNamesAnother {
+                name: name.to_owned(),
+                named: named.to_owned(),
+                image: image_name.to_owned(),
+            });
+        }
+        None => {
+            return Err(ReleaseError::SignatureNamesNothing {
+                name: name.to_owned(),
+                image: image_name.to_owned(),
+            });
+        }
+    }
+    match field("tag:") {
+        Some(signed) if signed == tag => Ok(()),
+        Some(signed) => Err(ReleaseError::SignatureForAnotherRelease {
             name: name.to_owned(),
-            named: named.to_owned(),
-            image: image_name.to_owned(),
+            signed: signed.to_owned(),
+            tag: tag.to_owned(),
         }),
-        None => Err(ReleaseError::SignatureNamesNothing {
+        None => Err(ReleaseError::SignatureNamesNoRelease {
             name: name.to_owned(),
-            image: image_name.to_owned(),
+            tag: tag.to_owned(),
         }),
     }
 }
@@ -523,4 +601,20 @@ pub fn parse_checksum(bytes: &[u8], name: &str, image: &str) -> Result<String, R
         }
     }
     Ok(digest.to_ascii_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_client_bounds_every_wait() {
+        let defaults = Timeouts::default();
+        let set = Ureq::default().0.config().timeouts();
+        assert_eq!(set.resolve, Some(defaults.connect));
+        assert_eq!(set.connect, Some(defaults.connect));
+        assert_eq!(set.send_request, Some(defaults.response));
+        assert_eq!(set.recv_response, Some(defaults.response));
+        assert_eq!(set.recv_body, Some(defaults.body));
+    }
 }

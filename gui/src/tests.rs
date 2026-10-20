@@ -31,11 +31,19 @@ fn sim_app(bus: SimBus, stock_dirs: Vec<PathBuf>) -> UpdaterApp {
     let http = SimHttp::new(repo());
     http.publish_ours("v0.3.0");
     let key = http.public_key();
-    let worker = Worker::spawn(
+    app_on(
         bus,
         GitHub::new(http, repo(), None).with_key(Some(key)),
-        || {},
-    );
+        stock_dirs,
+    )
+}
+
+/// A window on `bus`, with releases from `github`.
+fn app_on<H>(bus: SimBus, github: GitHub<H>, stock_dirs: Vec<PathBuf>) -> UpdaterApp
+where
+    H: verge_core::release::Http + Clone + Send + 'static,
+{
+    let worker = Worker::spawn(bus, github, || {});
     UpdaterApp::new(
         Box::new(worker),
         Log::default(),
@@ -477,7 +485,7 @@ fn pictures() {
                       serial: &str,
                       before: &str,
                       after: Option<&str>,
-                      result: &'static str,
+                      result: verge_core::batch::Settled,
                       reason: Option<&str>| {
             Event::BatchRecord(Box::new(Record {
                 time: "2026-10-20T14:26:08Z".into(),
@@ -496,7 +504,7 @@ fn pictures() {
             "QK7RM2VTX8D41",
             "stock V3.172",
             Some("ours, build v0.3.0"),
-            "updated",
+            verge_core::batch::Settled::Updated,
             None,
         ));
         manual.queued.push_back(record(
@@ -504,10 +512,10 @@ fn pictures() {
             "CJ3E7AC4F5",
             "ours, build v0.3.0",
             None,
-            "current",
+            verge_core::batch::Settled::Current,
             None,
         ));
-        manual.queued.push_back(record("1-4", "QK7RM2VTX8D45", "stock V3.108", None, "skipped", Some("needs the ISP jumper. Stock V3.108 has no jumper-free update. NXP added it in V3.122.")));
+        manual.queued.push_back(record("1-4", "QK7RM2VTX8D45", "stock V3.108", None, verge_core::batch::Settled::Skipped, Some("needs the ISP jumper. Stock V3.108 has no jumper-free update. NXP added it in V3.122.")));
         manual.queued.push_back(Event::BatchStarting("1-2".into()));
         manual.queued.push_back(Event::Start {
             step: Step::Write,
@@ -714,4 +722,205 @@ fn a_batch_needs_something_to_take() {
     h.step();
     h.get_by_label("CANNOT ARM");
     h.get_by_label_contains("Tick at least one kind of unit");
+}
+
+/// Review: the worker's panic report is `Event::Finished`, which only a single update reads.
+#[test]
+fn a_worker_that_dies_during_a_batch_lets_the_window_close() {
+    let (app, backend) = manual_app("ours", true);
+    let mut h = harness(app);
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "BATCH");
+    press(&mut h, "ARM BATCH");
+    press(&mut h, "CONFIRM");
+    request_close(&mut h);
+    assert!(root_commands(&h).contains(&ViewportCommand::CancelClose));
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::Finished(Err(crate::worker::JobError {
+            message: "the USB worker stopped unexpectedly: boom".into(),
+            advice: None,
+            left_in_isp: true,
+        })));
+    for _ in 0..5 {
+        h.step();
+    }
+    assert!(
+        !h.state().busy(),
+        "the window still holds itself open for a batch whose worker is gone"
+    );
+}
+
+/// The simulated GitHub, except that a download hangs until the test lets it go, or for a
+/// minute: far longer than any test here waits in frames.
+#[derive(Clone)]
+struct Stalled {
+    http: SimHttp,
+    release: verge_core::Cancel,
+}
+
+/// Lets a stalled download go when the test ends, passed or not, so that the worker it holds can
+/// be joined. Declared after the harness, it is dropped before it.
+struct Free(verge_core::Cancel);
+
+impl Drop for Free {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+impl verge_core::release::Http for Stalled {
+    fn get(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<Vec<u8>, verge_core::release::HttpError> {
+        if url.contains("/releases/download/") {
+            let started = std::time::Instant::now();
+            while !self.release.is_cancelled() && started.elapsed() < Duration::from_secs(60) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        self.http.get(url, headers)
+    }
+}
+
+fn stalled_app() -> (UpdaterApp, verge_core::Cancel) {
+    let http = SimHttp::new(repo());
+    http.publish_ours("v0.3.0");
+    let release = verge_core::Cancel::new();
+    let key = http.public_key();
+    let stalled = Stalled {
+        http,
+        release: release.clone(),
+    };
+    let app = app_on(
+        SimBus::scenario("ours").unwrap(),
+        GitHub::new(stalled, repo(), None).with_key(Some(key)),
+        vec![],
+    );
+    (app, release)
+}
+
+/// STOP while the batch's image is still downloading ends the batch: nothing has touched USB.
+#[test]
+fn stop_ends_a_batch_still_loading_its_image() {
+    let (app, release) = stalled_app();
+    let mut h = harness(app);
+    let _free = Free(release);
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "BATCH");
+    press(&mut h, "ARM BATCH");
+    press(&mut h, "CONFIRM");
+    h.run_steps(5);
+    h.get_by_label_contains("loading the image");
+    assert!(h.state().busy());
+    press(&mut h, "STOP");
+    until(&mut h, "ENDED");
+    assert!(!h.state().busy());
+}
+
+/// Closing the window while the batch's image is still downloading closes it.
+#[test]
+fn the_window_closes_while_a_batch_loads_its_image() {
+    let (app, release) = stalled_app();
+    let mut h = harness(app);
+    let _free = Free(release);
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "BATCH");
+    press(&mut h, "ARM BATCH");
+    press(&mut h, "CONFIRM");
+    h.run_steps(5);
+    request_close(&mut h);
+    assert!(root_commands(&h).contains(&ViewportCommand::CancelClose));
+    let mut closed = false;
+    for _ in 0..400 {
+        h.step();
+        if root_commands(&h).contains(&ViewportCommand::Close) {
+            closed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        closed,
+        "the window did not close while the image was loading"
+    );
+}
+
+/// The window shows nothing to press for an image of ours on a Pro, only stock.
+#[test]
+fn ours_is_not_offered_for_a_pro() {
+    let mut h = harness(sim_app(SimBus::scenario("pro").unwrap(), vec![]));
+    until(&mut h, "NOT FOR THIS BOARD");
+    h.get_by_label_contains("The unit is an MCU-Link Pro");
+}
+
+/// The worker adds a batch's lines to a record file that has some already.
+#[test]
+fn a_batch_adds_to_an_existing_record_file() {
+    use crate::worker::{Backend, Request};
+    use verge_core::batch::{Board, Filter, OursFilter, StockFilter};
+    let dir = record_dir("append");
+    let record = dir.join("record.jsonl");
+    std::fs::write(&record, "{\"from\":\"an earlier batch\"}\n").unwrap();
+    let http = SimHttp::new(repo());
+    http.publish_ours("v0.3.0");
+    let key = http.public_key();
+    let mut worker = Worker::spawn(
+        SimBus::scenario("arrivals").unwrap(),
+        GitHub::new(http, repo(), None).with_key(Some(key)),
+        || {},
+    );
+    worker.send(Request::Batch {
+        source: verge_core::Source::Release(None),
+        filter: Filter {
+            board: Board::McuLink,
+            stock: StockFilter::Any,
+            ours: OursFilter::Older,
+            bootloaders: false,
+            attached: false,
+        },
+        limit: Some(1),
+        record: record.clone(),
+        stop: verge_core::Cancel::new(),
+        cancel: verge_core::Cancel::new(),
+    });
+    let mut ended = None;
+    for _ in 0..2000 {
+        match worker.try_recv() {
+            Some(Event::BatchEnded(result)) => {
+                ended = Some(result);
+                break;
+            }
+            Some(_) => {}
+            None => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    assert!(matches!(ended, Some(Ok(_))), "{ended:?}");
+    let text = std::fs::read_to_string(&record).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "{\"from\":\"an earlier batch\"}");
+    assert_eq!(lines.len(), 3, "{text}");
+}
+
+/// CANCEL while a single update's image is still downloading ends it at once, with nothing
+/// flashed.
+#[test]
+fn cancel_ends_an_update_still_loading_its_image() {
+    let (app, release) = stalled_app();
+    let mut h = harness(app);
+    let _free = Free(release);
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "CONFIRM");
+    h.run_steps(5);
+    assert!(h.state().busy());
+    press(&mut h, "CANCEL");
+    until(&mut h, "FAILED");
+    h.get_by_label_contains("cancelled before anything was flashed");
+    assert!(!h.state().busy());
 }

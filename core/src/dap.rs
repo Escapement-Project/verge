@@ -146,11 +146,13 @@ pub fn read_identity(link: &mut dyn DapLink) -> Result<Identity, DapError> {
 /// Ours, as its identify reply describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ours {
-    /// The reply's format version: 2 carries flags and the build string.
+    /// The reply's format version: 2 carries flags and the build string, 3 the board as well.
     pub format: u8,
     pub flags: u8,
     /// `git describe` of the image; empty before format 2.
     pub build: String,
+    /// The board byte, from format 3 on: [`Ours::BOARD_MCU_LINK`] or another board.
+    pub board: Option<u8>,
 }
 
 impl Ours {
@@ -160,6 +162,11 @@ impl Ours {
     pub const FLAG_SWD_CODEGEN: u8 = 1 << 3;
     pub const FLAG_OSCAN1_ENTER: u8 = 1 << 4;
     pub const FLAG_JTAG_CODEGEN: u8 = 1 << 5;
+
+    /// The board byte's values (`BOARD_*` in the firmware's `src/board_pins.h`).
+    pub const BOARD_MCU_LINK: u8 = 0;
+    pub const BOARD_MCU_LINK_PRO: u8 = 1;
+    pub const BOARD_ON_BOARD: u8 = 2;
 
     /// The capability flags by name, for display.
     #[must_use]
@@ -207,15 +214,23 @@ pub fn parse_identify(reply: &[u8]) -> Result<Option<Ours>, DapError> {
             format,
             flags: 0,
             build: String::new(),
+            board: None,
         }));
     }
     let flags = *body.get(6).ok_or_else(short)?;
     let len = usize::from(*body.get(7).ok_or_else(short)?);
     let build = body.get(8..8 + len).ok_or_else(short)?;
+    // A reply read over v1 HID is padded to the report, so a format 2 image has a byte here too.
+    let board = if format >= 3 {
+        Some(*body.get(8 + len).ok_or_else(short)?)
+    } else {
+        None
+    };
     Ok(Some(Ours {
         format,
         flags,
         build: String::from_utf8_lossy(build).into_owned(),
+        board,
     }))
 }
 
@@ -346,6 +361,32 @@ mod tests {
                 "generated JTAG"
             ]
         );
+    }
+
+    fn identify_reply(format: u8, build: &str, tail: &[u8]) -> Vec<u8> {
+        let mut reply = vec![0x82];
+        reply.extend_from_slice(b"CJTAG");
+        reply.extend_from_slice(&[format, 61, build.len() as u8]);
+        reply.extend_from_slice(build.as_bytes());
+        reply.extend_from_slice(tail);
+        reply
+    }
+
+    #[test]
+    fn the_board_byte_is_read_from_format_3_on() {
+        let pro = parse_identify(&identify_reply(3, "v0.3.0", &[Ours::BOARD_MCU_LINK_PRO]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(pro.board, Some(Ours::BOARD_MCU_LINK_PRO));
+        // A format 2 reply read over v1 HID carries padding after the build string.
+        let padded = parse_identify(&identify_reply(2, "14d05d4", &[1, 0, 0, 0]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(padded.board, None);
+        assert!(matches!(
+            parse_identify(&identify_reply(3, "v0.3.0", &[])),
+            Err(DapError::Short { command: 0x82, .. })
+        ));
     }
 
     #[test]

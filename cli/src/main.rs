@@ -12,7 +12,7 @@ use tracing_subscriber::filter::{EnvFilter, filter_fn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use verge_core::batch::{
-    Armed, Batch, Board, Entry, Filter, Observer, OursFilter, Record, StockFilter,
+    Armed, Batch, Board, Entry, Filter, Observer, OursFilter, Record, StockFilter, open_record,
 };
 use verge_core::detect::{Guess, State};
 use verge_core::image::{Image, PAGE};
@@ -393,6 +393,7 @@ fn load<H: Http>(
             bail!("{error}. Pass --force to install the release anyway")
         }
         Err(error @ LoadError::NoStock { .. }) => bail!("{error} with --stock DIR"),
+        Err(error @ LoadError::OtherBoard { .. }) => bail!("{error} with --stock"),
         Err(LoadError::Release(error)) => Err(anyhow::Error::new(error))
             .with_context(|| format!("looking up releases of ours in {}", github.repo())),
         Err(error) => Err(error.into()),
@@ -569,11 +570,15 @@ impl Observer for BatchOutput {
         indicatif_println!(
             "{:<8} {serial}  {firmware}  {}{seconds}{reason}",
             record.port,
-            record.result.to_uppercase()
+            record.result.as_str().to_uppercase()
         );
-        // The units Batch::blink lights.
-        if matches!(record.result, "updated" | "current") {
-            indicatif_println!("{:<8} blinking: unplug it when you like", record.port);
+    }
+
+    fn unplug(&mut self, port: &str, blinking: bool) {
+        if blinking {
+            indicatif_println!("{port:<8} blinking: unplug it when you like");
+        } else {
+            indicatif_println!("{port:<8} done: unplug it when you like");
         }
     }
 
@@ -629,6 +634,10 @@ fn batch<B: Bus, H: Http>(
         }
         Err(error) => return Err(error.into()),
     };
+    if stop.is_cancelled() {
+        indicatif_println!("Stopped before the batch was armed. Nothing was flashed.");
+        return Ok(());
+    }
     log_image(&image);
     let path = args.record.clone().unwrap_or_else(|| {
         let stamp = humantime::format_rfc3339_seconds(std::time::SystemTime::now())
@@ -642,10 +651,13 @@ fn batch<B: Bus, H: Http>(
     );
     if filter.bootloaders {
         question = format!("{ISP_IDENTITY_WARNING} {question}");
+        if args.yes {
+            tracing::warn!("{ISP_IDENTITY_WARNING} Taking units in ISP mode, as --yes says.");
+        }
     }
     confirm(&question, args.yes)?;
-    let file = std::fs::File::create(&path)
-        .with_context(|| format!("creating the record file {}", path.display()))?;
+    let file = open_record(&path)
+        .with_context(|| format!("opening the record file {}", path.display()))?;
     let mut output = BatchOutput {
         bars: Bars::default(),
         record: std::io::BufWriter::new(file),
@@ -777,7 +789,9 @@ fn explain(error: UpdateError) -> anyhow::Error {
         UpdateError::Isp(_) | UpdateError::Cancelled | UpdateError::RomSilent { .. } => Some(
             "The unit may be in ISP mode with a partial image. `verge flash` flashes it again.",
         ),
-        UpdateError::NoReturn(_) => Some("`verge list` shows what is attached now."),
+        UpdateError::NoReturn(_) | UpdateError::Ambiguous { .. } => {
+            Some("`verge list` shows what is attached now.")
+        }
         _ => None,
     };
     match next {

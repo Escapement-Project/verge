@@ -51,6 +51,51 @@ pub enum State {
     MiniBootloader,
 }
 
+/// Which board a unit is, as far as what it reports says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Hardware {
+    /// The plain MCU-Link, the only board ours is built for.
+    McuLink,
+    /// Another board with an LPC55S69 MCU-Link on it, named for a person to read.
+    Other(String),
+    /// Nothing says which: a unit in ISP mode, or a firmware that does not report it.
+    Unknown,
+}
+
+impl Hardware {
+    /// The board in stock's USB product string, which LinkServer's Readme gives as
+    /// `MCU-LINK [Pro|MR|on-board|<board>] (r<RRR>) CMSIS-DAP V<V>.<BBB>`. The plain board has
+    /// nothing between `MCU-LINK` and `(r`.
+    #[must_use]
+    pub fn from_stock_product(product: &str) -> Hardware {
+        let Some((board, _)) = product
+            .strip_prefix("MCU-LINK ")
+            .and_then(|rest| rest.split_once("(r"))
+        else {
+            return Hardware::Unknown;
+        };
+        match board.trim() {
+            "" => Hardware::McuLink,
+            "Pro" => Hardware::Other("an MCU-Link Pro".into()),
+            "MR" => Hardware::Other("an MCU-Link MR".into()),
+            "on-board" => Hardware::Other("an on-board MCU-Link".into()),
+            name => Hardware::Other(format!("the MCU-Link on a {name}")),
+        }
+    }
+
+    /// The board ours reports in its identify reply. Images before format 3 were built only for
+    /// the plain board.
+    #[must_use]
+    pub fn from_ours(ours: &Ours) -> Hardware {
+        match ours.board {
+            None | Some(Ours::BOARD_MCU_LINK) => Hardware::McuLink,
+            Some(Ours::BOARD_MCU_LINK_PRO) => Hardware::Other("an MCU-Link Pro".into()),
+            Some(Ours::BOARD_ON_BOARD) => Hardware::Other("an on-board MCU-Link".into()),
+            Some(other) => Hardware::Other(format!("board {other}, which this tool does not know")),
+        }
+    }
+}
+
 /// One attached MCU-Link.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unit {
@@ -84,6 +129,25 @@ impl Unit {
     #[must_use]
     pub fn is_bootloader(&self) -> bool {
         self.state == State::Bootloader
+    }
+
+    /// Which board this is. Every LPC55S69 bootloader looks alike, so a unit in ISP mode is
+    /// [`Hardware::Unknown`].
+    #[must_use]
+    pub fn hardware(&self) -> Hardware {
+        match &self.state {
+            State::Probe {
+                firmware: Firmware::Ours(ours),
+                ..
+            } => Hardware::from_ours(ours),
+            State::Probe { .. } | State::Unreadable { .. } => self
+                .device
+                .product
+                .as_deref()
+                .map_or(Hardware::Unknown, Hardware::from_stock_product),
+            State::Bootloader => Hardware::Unknown,
+            State::MiniBootloader => Hardware::Other("an MCU-Link mini".into()),
+        }
     }
 }
 

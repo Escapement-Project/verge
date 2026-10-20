@@ -1,24 +1,28 @@
 //! Batches on the simulated bench, with units plugged in and out over simulated time. Every run
 //! is bounded in the bus's time; none takes real time to time out.
 
+use std::cell::{Cell, RefCell};
 use std::time::Duration;
 
-use verge_core::Cancel;
 use verge_core::batch::{
-    Armed, Batch, Board, Entry, Filter, Observer, OursFilter, Record, Status, StockFilter, Verdict,
-    judge,
+    Armed, Batch, Board, Entry, Filter, Observer, OursFilter, Record, Settled, Status, StockFilter,
+    Verdict, judge,
 };
+use verge_core::bus::{BusError, UsbDevice};
+use verge_core::dap::Ours;
 use verge_core::progress::Progress;
-use verge_core::sim::{SimBus, SimFirmware, firmware_image};
+use verge_core::sim::{SimBus, SimDap, SimFirmware, SimRom, firmware_image};
 use verge_core::source::ImageVersion;
 use verge_core::update::Timing;
 use verge_core::version::StockVersion;
+use verge_core::{Bus, Cancel};
 
 #[derive(Default)]
 struct Seen {
     records: Vec<Record>,
     started: Vec<String>,
     pauses: Vec<Option<String>>,
+    unplugs: Vec<(String, bool)>,
 }
 
 impl Progress for Seen {}
@@ -30,8 +34,63 @@ impl Observer for Seen {
     fn record(&mut self, record: &Record) {
         self.records.push(record.clone());
     }
+    fn unplug(&mut self, port: &str, blinking: bool) {
+        self.unplugs.push((port.to_owned(), blinking));
+    }
     fn paused(&mut self, reason: Option<&str>) {
         self.pauses.push(reason.map(str::to_owned));
+    }
+}
+
+/// The simulated bench with hooks: on every `open_dap`, and a say in whether `devices` fails.
+struct Hooked<'a> {
+    bus: &'a SimBus,
+    /// When each `open_dap` came, in the bus's time, and on which instance.
+    opened: RefCell<Vec<(Duration, String)>>,
+    on_open: Box<dyn Fn(&UsbDevice) + 'a>,
+    fail: Box<dyn Fn() -> bool + 'a>,
+}
+
+impl<'a> Hooked<'a> {
+    fn new(bus: &'a SimBus) -> Hooked<'a> {
+        Hooked {
+            bus,
+            opened: RefCell::new(Vec::new()),
+            on_open: Box::new(|_| {}),
+            fail: Box::new(|| false),
+        }
+    }
+}
+
+impl Bus for Hooked<'_> {
+    type Dap = SimDap;
+    type Isp = SimRom;
+
+    fn devices(&self) -> Result<Vec<UsbDevice>, BusError> {
+        if (self.fail)() {
+            return Err(BusError::Enumerate("the test's bus failed".into()));
+        }
+        self.bus.devices()
+    }
+
+    fn open_dap(&self, device: &UsbDevice) -> Result<SimDap, BusError> {
+        self.opened
+            .borrow_mut()
+            .push((self.bus.now(), device.instance.clone()));
+        (self.on_open)(device);
+        self.bus.open_dap(device)
+    }
+
+    fn open_isp(&self, device: &UsbDevice) -> Result<SimRom, BusError> {
+        self.bus.open_isp(device)
+    }
+
+    fn now(&self) -> Duration {
+        self.bus.now()
+    }
+
+    fn sleep(&self, duration: Duration) {
+        self.bus.sleep(duration);
     }
 }
 
@@ -65,7 +124,7 @@ fn filter() -> Filter {
     }
 }
 
-fn arm(bus: &SimBus, filter: Filter, limit: Option<usize>) -> Batch<'_, SimBus> {
+fn arm<B: Bus>(bus: &B, filter: Filter, limit: Option<usize>) -> Batch<'_, B> {
     Batch::arm(
         bus,
         release(),
@@ -78,14 +137,13 @@ fn arm(bus: &SimBus, filter: Filter, limit: Option<usize>) -> Batch<'_, SimBus> 
 }
 
 /// Steps until the bus's clock reaches `until`, or the batch finishes.
-fn drive(batch: &mut Batch<'_, SimBus>, bus: &SimBus, seen: &mut Seen, until: Duration) {
-    use verge_core::Bus;
+fn drive<B: Bus>(batch: &mut Batch<'_, B>, bus: &SimBus, seen: &mut Seen, until: Duration) {
     while bus.now() < until && !batch.finished() {
         batch.step(seen).unwrap();
     }
 }
 
-fn status(batch: &Batch<'_, SimBus>, port: &str) -> Status {
+fn status<B: Bus>(batch: &Batch<'_, B>, port: &str) -> Status {
     batch
         .entries()
         .iter()
@@ -159,7 +217,7 @@ fn a_unit_back_with_its_jumper_fitted_is_not_taken_again() {
         "flashed again"
     );
     assert_eq!(seen.records.len(), 1);
-    assert_eq!(seen.records[0].result, "jumper-fitted");
+    assert_eq!(seen.records[0].result, Settled::JumperFitted);
     assert!(
         batch.paused().unwrap().contains("jumper fitted"),
         "{:?}",
@@ -191,7 +249,7 @@ fn a_failure_does_not_stop_the_batch_and_its_bootloader_is_named() {
     let paused = batch.paused().unwrap();
     assert!(paused.contains("1-1 failed and is in ISP mode"), "{paused}");
     assert!(paused.contains("verge flash"), "{paused}");
-    assert_eq!(seen.records[0].result, "failed");
+    assert_eq!(seen.records[0].result, Settled::Failed);
     assert!(
         seen.records[0]
             .reason
@@ -217,7 +275,7 @@ fn a_unit_already_running_the_image_is_skipped_as_current() {
     drive(&mut batch, &bus, &mut seen, Duration::from_secs(10));
     assert_eq!(status(&batch, "1-1"), Status::Current);
     assert!(!bus.log().iter().any(|l| l.contains("control")));
-    assert_eq!(seen.records[0].result, "current");
+    assert_eq!(seen.records[0].result, Settled::Current);
     // It is as finished as an updated unit, so it blinks to be unplugged.
     assert!(bus.host_status_count(unit) > 0);
 }
@@ -429,4 +487,341 @@ fn ours_older_than_the_image_needs_an_image_of_ours() {
     assert_eq!(judge(old, &older, &release), Verdict::Take);
     assert_eq!(judge(current, &older, &release), Verdict::Current);
     assert_eq!(judge(current, &any, &release), Verdict::Current);
+}
+
+fn stock_probe(product: &str) -> verge_core::Unit {
+    use verge_core::bus::UsbDevice;
+    use verge_core::dap::Identity;
+    use verge_core::{Firmware, State};
+    verge_core::Unit {
+        device: UsbDevice {
+            vid: 0x1fc9,
+            pid: 0x0143,
+            location: Some("1-4".into()),
+            instance: "1".into(),
+            serial: Some("PROSERIAL".into()),
+            manufacturer: Some("NXP Semiconductors".into()),
+            product: Some(product.into()),
+            dap_v2: true,
+            hid: true,
+        },
+        state: State::Probe {
+            identity: Identity::default(),
+            firmware: Firmware::Stock {
+                version: Some(StockVersion {
+                    major: 3,
+                    minor: 172,
+                }),
+            },
+        },
+    }
+}
+
+/// LinkServer's Readme: one stock image for every LPC55S69 MCU-Link, product string
+/// `MCU-LINK [Pro|MR|on-board|<board>] (r<RRR>) CMSIS-DAP V<V>.<BBB>`. PRO.md: do not flash
+/// today's image on a Pro. The batch's board is "the full MCU-Link".
+#[test]
+fn a_batch_for_the_full_mculink_does_not_take_a_pro() {
+    for product in [
+        "MCU-LINK Pro (r1E2) CMSIS-DAP V3.172",
+        "MCU-LINK FRDM-MCXN947 (r0E7) CMSIS-DAP V3.172",
+    ] {
+        let verdict = judge(
+            &stock_probe(product),
+            &filter(),
+            &ImageVersion::Ours("v0.3.0".into()),
+        );
+        assert!(
+            matches!(verdict, Verdict::Skip(_)),
+            "{product}: {verdict:?}"
+        );
+    }
+}
+
+/// The update path waits `Timing::settle` after an enumeration before asking a unit what it runs.
+/// A batch asks an arrival at once, and a unit it could not ask is skipped until it leaves the bus.
+#[test]
+fn a_unit_not_ready_for_a_moment_after_arriving_is_still_updated() {
+    let bus = SimBus::default();
+    let mut batch = arm(&bus, filter(), None);
+    let mut seen = Seen::default();
+    batch.step(&mut seen).unwrap();
+    let a = bus.plug_in_later(Duration::from_secs(1), stock("3.172"));
+    // Not openable for its first moments on the bus.
+    bus.set_busy(a, true);
+    while bus.now() < Duration::from_millis(1300) {
+        batch.step(&mut seen).unwrap();
+    }
+    bus.set_busy(a, false);
+    drive(&mut batch, &bus, &mut seen, Duration::from_secs(60));
+    assert_eq!(status(&batch, "1-1"), Status::Updated, "{:?}", seen.records);
+}
+
+/// Ours reports its board from identify format 3, so a Pro running ours is not taken either.
+#[test]
+fn a_batch_does_not_take_ours_on_a_pro() {
+    let bus = SimBus::default();
+    let mut batch = arm(&bus, filter(), None);
+    let mut seen = Seen::default();
+    batch.step(&mut seen).unwrap();
+    let pro = bus.plug_in_later(Duration::from_secs(1), ours("14d05d4"));
+    bus.set_board(pro, Ours::BOARD_MCU_LINK_PRO);
+    let plain = bus.plug_in_later(Duration::from_secs(1), ours("14d05d4"));
+    bus.set_board(plain, Ours::BOARD_MCU_LINK);
+    drive(&mut batch, &bus, &mut seen, Duration::from_secs(30));
+    assert_eq!(
+        status(&batch, "1-1"),
+        Status::Skipped("an MCU-Link Pro, not a full MCU-Link".into())
+    );
+    assert_eq!(status(&batch, "1-2"), Status::Updated);
+    assert!(!bus.log().iter().any(|l| l.starts_with("1-1: control")));
+}
+
+/// The update path waits `Timing::settle` after an enumeration before it asks the unit anything,
+/// and a batch's arrival gets the same.
+#[test]
+fn an_arrival_is_not_opened_before_it_has_settled() {
+    let bus = SimBus::default();
+    let hooked = Hooked::new(&bus);
+    let mut batch = arm(&hooked, filter(), None);
+    let mut seen = Seen::default();
+    batch.step(&mut seen).unwrap();
+    bus.plug_in_later(Duration::from_secs(1), stock("3.172"));
+    drive(&mut batch, &bus, &mut seen, Duration::from_secs(30));
+    assert_eq!(status(&batch, "1-1"), Status::Updated);
+    let first_seen = batch.entries()[0].seen;
+    let (first_open, _) = hooked.opened.borrow()[0].clone();
+    assert!(
+        first_open >= first_seen + Timing::default().settle,
+        "opened at {first_open:?}, seen at {first_seen:?}"
+    );
+}
+
+/// An open that fails soon after the unit arrives is not final until it has failed for the
+/// settle time and a few polls more.
+#[test]
+fn an_arrival_that_cannot_be_opened_past_its_settle_time_is_still_updated() {
+    let bus = SimBus::default();
+    let mut batch = arm(&bus, filter(), None);
+    let mut seen = Seen::default();
+    batch.step(&mut seen).unwrap();
+    let a = bus.plug_in_later(Duration::from_secs(1), stock("3.172"));
+    bus.set_busy(a, true);
+    // Busy two polls past the settle time.
+    let timing = Timing::default();
+    let until = Duration::from_secs(1) + timing.settle + timing.poll * 2;
+    while bus.now() < until {
+        batch.step(&mut seen).unwrap();
+    }
+    assert!(batch.entries().is_empty(), "{:?}", batch.entries());
+    bus.set_busy(a, false);
+    drive(&mut batch, &bus, &mut seen, Duration::from_secs(60));
+    assert_eq!(status(&batch, "1-1"), Status::Updated, "{:?}", seen.records);
+}
+
+#[test]
+fn an_arrival_that_never_opens_is_skipped_once_its_grace_is_over() {
+    let bus = SimBus::default();
+    let mut batch = arm(&bus, filter(), None);
+    let mut seen = Seen::default();
+    batch.step(&mut seen).unwrap();
+    let a = bus.plug_in_later(Duration::from_secs(1), stock("3.172"));
+    bus.set_busy(a, true);
+    drive(&mut batch, &bus, &mut seen, Duration::from_secs(30));
+    assert_eq!(
+        status(&batch, "1-1"),
+        Status::Skipped("the tool could not ask what it runs: another program has it open".into())
+    );
+    assert_eq!(seen.records.len(), 1);
+    assert!(!bus.log().iter().any(|l| l.contains("DAP 8101")));
+}
+
+/// A stop that lands while the batch asks a unit, between taking it off the queue and starting
+/// its update, still keeps it out of its bootloader.
+#[test]
+fn a_stop_while_a_unit_is_asked_again_starts_no_update() {
+    let bus = SimBus::default();
+    let stop = Cancel::new();
+    let opens = Cell::new(0);
+    let mut hooked = Hooked::new(&bus);
+    hooked.on_open = Box::new(|_| {
+        opens.set(opens.get() + 1);
+        // The first open asks the arrival what it runs; the second asks again before its update.
+        if opens.get() == 2 {
+            stop.cancel();
+        }
+    });
+    let mut batch = Batch::arm(
+        &hooked,
+        release(),
+        filter(),
+        Timing::default(),
+        stop.clone(),
+        Cancel::new(),
+        None,
+    );
+    let mut seen = Seen::default();
+    batch.step(&mut seen).unwrap();
+    bus.plug_in_later(Duration::from_secs(1), stock("3.172"));
+    drive(&mut batch, &bus, &mut seen, Duration::from_secs(30));
+    assert!(batch.finished());
+    assert_eq!(opens.get(), 2);
+    assert!(!bus.log().iter().any(|l| l.contains("DAP 8101")));
+    assert_eq!(status(&batch, "1-1"), Status::Waiting);
+}
+
+/// Units still waiting when the batch ends get a line in the record saying so.
+#[test]
+fn units_still_waiting_when_the_batch_ends_are_recorded() {
+    let bus = SimBus::default();
+    let mut batch = arm(&bus, filter(), Some(1));
+    let mut seen = Seen::default();
+    bus.plug_in_later(Duration::from_secs(1), stock("3.172"));
+    bus.plug_in_later(Duration::from_secs(1), stock("3.172"));
+    batch.run_to_end(&mut seen).unwrap();
+    let results: Vec<(&str, Settled)> = seen
+        .records
+        .iter()
+        .map(|r| (r.port.as_str(), r.result))
+        .collect();
+    assert_eq!(
+        results,
+        [("1-1", Settled::Updated), ("1-2", Settled::Waiting)]
+    );
+    assert_eq!(
+        seen.records[1].reason.as_deref(),
+        Some("the batch stopped before its turn came")
+    );
+    // Closing again writes nothing more.
+    batch.close(&mut seen);
+    assert_eq!(seen.records.len(), 2);
+}
+
+/// The bus fails the look that follows an install. The install already ran, so it is recorded.
+#[test]
+fn a_bus_error_after_an_install_still_records_it() {
+    let bus = SimBus::default();
+    let back = Cell::new(false);
+    let mut hooked = Hooked::new(&bus);
+    // The unit comes back running ours; the look after the update has asked it fails, once.
+    hooked.on_open = Box::new(|device| {
+        if device
+            .product
+            .as_deref()
+            .is_some_and(|p| p.contains("Verge"))
+        {
+            back.set(true);
+        }
+    });
+    hooked.fail = Box::new(|| back.replace(false));
+    let mut batch = arm(&hooked, filter(), None);
+    let mut seen = Seen::default();
+    bus.plug_in_later(Duration::from_secs(1), stock("3.172"));
+    let error = batch.run_to_end(&mut seen).unwrap_err();
+    assert_eq!(error, BusError::Enumerate("the test's bus failed".into()));
+    assert_eq!(seen.records.len(), 1, "{:?}", seen.records);
+    assert_eq!(seen.records[0].result, Settled::Updated);
+    assert_eq!(
+        seen.records[0].firmware_after.as_deref(),
+        Some("ours, build v0.3.0")
+    );
+}
+
+/// The bus fails while a finished unit's LEDs are lit. The batch ends, and turns them off.
+#[test]
+fn a_bus_error_still_turns_the_leds_off() {
+    let bus = SimBus::default();
+    let unit = bus.plug_in_later(Duration::from_secs(1), stock("3.172"));
+    let mut hooked = Hooked::new(&bus);
+    hooked.fail = Box::new(|| bus.leds_on(unit));
+    let mut batch = arm(&hooked, filter(), None);
+    let mut seen = Seen::default();
+    assert!(batch.run_to_end(&mut seen).is_err());
+    assert_eq!(seen.records[0].result, Settled::Updated);
+    assert!(!bus.leds_on(unit), "the LEDs were left on");
+}
+
+/// A unit blinks only while the batch runs, so the last one under `--count` is not blinking.
+#[test]
+fn a_finished_unit_is_named_for_unplugging_and_blinks_only_while_the_batch_runs() {
+    let bus = SimBus::default();
+    let mut batch = arm(&bus, filter(), Some(2));
+    let mut seen = Seen::default();
+    batch.step(&mut seen).unwrap();
+    bus.plug_in_later(Duration::from_secs(1), ours("v0.3.0"));
+    bus.plug_in_later(Duration::from_secs(1), stock("3.172"));
+    bus.plug_in_later(Duration::from_secs(1), stock("3.172"));
+    batch.run_to_end(&mut seen).unwrap();
+    assert_eq!(
+        seen.unplugs,
+        [
+            ("1-1".to_owned(), true),
+            ("1-2".to_owned(), true),
+            ("1-3".to_owned(), false)
+        ]
+    );
+}
+
+/// The batch knows units by port, so a unit that reports none pauses it and is never taken.
+#[test]
+fn a_unit_with_no_port_pauses_the_batch() {
+    let bus = SimBus::default();
+    bus.set_locations(false);
+    let mut batch = arm(&bus, filter(), None);
+    let mut seen = Seen::default();
+    batch.step(&mut seen).unwrap();
+    let unit = bus.plug_in_later(Duration::from_secs(1), stock("3.172"));
+    drive(&mut batch, &bus, &mut seen, Duration::from_secs(30));
+    let paused = batch.paused().unwrap();
+    assert!(paused.contains("reports no USB port"), "{paused}");
+    assert!(batch.entries().is_empty());
+    assert!(!bus.log().iter().any(|l| l.contains("DAP 8101")));
+    bus.unplug(unit);
+    batch.step(&mut seen).unwrap();
+    assert_eq!(batch.paused(), None);
+}
+
+/// On Windows a unit that comes back keeps its instance, so the batch sees it leave only by
+/// looking while it is gone. One that is gone for a look is taken as new when it returns.
+#[test]
+fn where_a_unit_keeps_its_instance_it_is_new_once_it_was_seen_gone() {
+    let bus = SimBus::default();
+    bus.set_stable_instances(true);
+    let mut batch = arm(&bus, filter(), None);
+    let mut seen = Seen::default();
+    batch.step(&mut seen).unwrap();
+    let unit = bus.plug_in_later(Duration::from_secs(1), ours("v0.3.0"));
+    drive(&mut batch, &bus, &mut seen, Duration::from_secs(5));
+    assert_eq!(status(&batch, "1-1"), Status::Current);
+    bus.unplug(unit);
+    batch.step(&mut seen).unwrap();
+    assert!(batch.entries().is_empty());
+    bus.plug_back_later(Duration::from_millis(100), unit);
+    drive(&mut batch, &bus, &mut seen, Duration::from_secs(10));
+    assert_eq!(seen.records.len(), 2);
+    assert_eq!(status(&batch, "1-1"), Status::Current);
+}
+
+/// The jumper case where a bootloader that comes back keeps its instance, as on Windows.
+#[test]
+fn where_a_bootloader_keeps_its_instance_a_jumper_fitted_unit_is_still_seen() {
+    let bus = SimBus::default();
+    bus.set_stable_instances(true);
+    let mut batch = arm(
+        &bus,
+        Filter {
+            bootloaders: true,
+            ..filter()
+        },
+        None,
+    );
+    let mut seen = Seen::default();
+    batch.step(&mut seen).unwrap();
+    let unit = bus.plug_in_bootloader_later(Duration::from_secs(1));
+    drive(&mut batch, &bus, &mut seen, Duration::from_secs(30));
+    assert_eq!(status(&batch, "1-1"), Status::JumperFitted);
+    assert!(batch.paused().unwrap().contains("jumper fitted"));
+    bus.unplug(unit);
+    batch.step(&mut seen).unwrap();
+    assert_eq!(batch.paused(), None);
 }

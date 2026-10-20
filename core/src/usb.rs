@@ -3,8 +3,6 @@
 
 use std::time::{Duration, Instant};
 
-use mboot::protocols::ProtocolOpen;
-use mboot::protocols::usb::USBProtocol;
 use nusb::descriptors::TransferType;
 use nusb::transfer::{
     Buffer, Bulk, ControlOut, ControlType, Direction, In, Out, Recipient, TransferError,
@@ -13,6 +11,7 @@ use nusb::{DeviceInfo, ErrorKind, MaybeFuture};
 
 use crate::bus::{Bus, BusError, UsbDevice};
 use crate::dap::{DapLink, LinkError};
+use crate::hid::HidRom;
 use crate::ids;
 
 const USB_CLASS_HID: u8 = 0x03;
@@ -79,9 +78,54 @@ impl UsbBus {
     }
 }
 
+/// The hidraw node of `info`'s HID interface, matched through sysfs: the node's device directory
+/// sits under the USB device's own.
+#[cfg(target_os = "linux")]
+fn rom_path<'a>(
+    info: &DeviceInfo,
+    candidates: &[&'a hidapi::DeviceInfo],
+) -> Result<&'a std::ffi::CStr, String> {
+    use std::path::Path;
+    let usb = std::fs::canonicalize(info.sysfs_path())
+        .map_err(|error| format!("{}: {error}", info.sysfs_path().display()))?;
+    let theirs: Vec<&std::ffi::CStr> = candidates
+        .iter()
+        .map(|candidate| candidate.path())
+        .filter(|path| {
+            path.to_str()
+                .ok()
+                .and_then(|node| Path::new(node).file_name())
+                .and_then(|name| {
+                    std::fs::canonicalize(Path::new("/sys/class/hidraw").join(name)).ok()
+                })
+                .is_some_and(|hidraw| crate::hid::belongs_to(&hidraw, &usb))
+        })
+        .collect();
+    match theirs.as_slice() {
+        [path] => Ok(path),
+        [] => Err("its HID interface is not ready yet".into()),
+        several => Err(format!("{} HID interfaces belong to it", several.len())),
+    }
+}
+
+/// Elsewhere this takes the first device with the bootloader's ID, as NXP's client does. On
+/// Windows neither crate ties a HID device to its USB device. macOS could match hidapi's location
+/// ID to nusb's, which is not written yet. [`crate::update::flash_bootloader`] then checks that
+/// the bootloader that answered is still the only one, and the one it checked.
+#[cfg(not(target_os = "linux"))]
+fn rom_path<'a>(
+    _info: &DeviceInfo,
+    candidates: &[&'a hidapi::DeviceInfo],
+) -> Result<&'a std::ffi::CStr, String> {
+    candidates
+        .first()
+        .map(|candidate| candidate.path())
+        .ok_or_else(|| "its HID interface is not ready yet".into())
+}
+
 impl Bus for UsbBus {
     type Dap = NusbDap;
-    type Isp = USBProtocol;
+    type Isp = HidRom;
 
     fn devices(&self) -> Result<Vec<UsbDevice>, BusError> {
         Ok(nusb::list_devices()
@@ -158,17 +202,22 @@ impl Bus for UsbBus {
         Err(open_error("it has no CMSIS-DAP v2 bulk interface".into()))
     }
 
-    fn open_isp(&self, device: &UsbDevice) -> Result<USBProtocol, BusError> {
-        USBProtocol::open_with_options(
-            &format!("0x{:04x},0x{:04x}", device.vid, device.pid),
-            0,
-            ROM_TIMEOUT,
-            Duration::from_millis(1),
-        )
-        .map_err(|error| BusError::Open {
+    fn open_isp(&self, device: &UsbDevice) -> Result<HidRom, BusError> {
+        let open_error = |reason: String| BusError::Open {
             device: device.to_string(),
-            reason: error.to_string(),
-        })
+            reason,
+        };
+        let info = self.find(device)?;
+        let api = hidapi::HidApi::new().map_err(|error| open_error(error.to_string()))?;
+        let candidates: Vec<&hidapi::DeviceInfo> = api
+            .device_list()
+            .filter(|d| d.vendor_id() == device.vid && d.product_id() == device.pid)
+            .collect();
+        let path = rom_path(&info, &candidates).map_err(open_error)?;
+        let hid = api
+            .open_path(path)
+            .map_err(|error| open_error(error.to_string()))?;
+        Ok(HidRom::new(hid, device.to_string(), ROM_TIMEOUT))
     }
 
     fn now(&self) -> Duration {

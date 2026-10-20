@@ -57,6 +57,7 @@ pub struct SimRom {
     world: Arc<Mutex<World>>,
     unit: usize,
     instance: String,
+    generation: u64,
     replies: VecDeque<(u8, Vec<u8>)>,
     incoming: Option<Incoming>,
     /// Real time to sleep once the bench is unlocked, when the bench is paced.
@@ -76,14 +77,14 @@ fn io_error(text: &str) -> CommunicationError {
 }
 
 /// The bench, locked, provided this bootloader is still the one on the bus.
-fn lock<'a>(
-    world: &'a Mutex<World>,
+fn lock(
+    world: &Mutex<World>,
     unit: usize,
-    instance: &str,
-) -> Result<MutexGuard<'a, World>, CommunicationError> {
+    generation: u64,
+) -> Result<MutexGuard<'_, World>, CommunicationError> {
     let mut world = world.lock().expect("the bench lock is not poisoned");
     world.settle();
-    if world.is_current(unit, instance) {
+    if world.is_current(unit, generation) {
         Ok(world)
     } else {
         Err(io_error("the bootloader left the bus"))
@@ -91,11 +92,17 @@ fn lock<'a>(
 }
 
 impl SimRom {
-    pub(super) fn new(world: Arc<Mutex<World>>, unit: usize, instance: String) -> SimRom {
+    pub(super) fn new(
+        world: Arc<Mutex<World>>,
+        unit: usize,
+        instance: String,
+        generation: u64,
+    ) -> SimRom {
         SimRom {
             world,
             unit,
             instance,
+            generation,
             replies: VecDeque::new(),
             incoming: None,
             owed: Duration::ZERO,
@@ -121,7 +128,7 @@ impl SimRom {
             .map(|b| u32::from_le_bytes(*b))
             .collect();
         let param = |i: usize| params.get(i).copied().unwrap_or(0);
-        let mut world = lock(&self.world, self.unit, &self.instance)?;
+        let mut world = lock(&self.world, self.unit, self.generation)?;
         let location = world.units[self.unit].location.clone();
         world
             .log
@@ -248,7 +255,7 @@ impl SimRom {
         let take = payload.len().min(incoming.remaining);
         incoming.data.extend_from_slice(&payload[..take]);
         incoming.remaining -= take;
-        let mut world = lock(&self.world, self.unit, &self.instance)?;
+        let mut world = lock(&self.world, self.unit, self.generation)?;
         self.owed += world.advance(PACKET_TIME);
         if self.incoming.as_ref().is_some_and(|i| i.remaining == 0) {
             let Incoming { address, data, .. } = self.incoming.take().expect("checked above");
@@ -304,7 +311,7 @@ impl Protocol for SimRom {
     }
 
     fn read_packet_raw(&mut self, packet_code: u8) -> Result<Vec<u8>, CommunicationError> {
-        drop(lock(&self.world, self.unit, &self.instance)?);
+        drop(lock(&self.world, self.unit, self.generation)?);
         match self.replies.pop_front() {
             Some((code, payload)) if code == packet_code => Ok(payload),
             Some(_) => Err(CommunicationError::InvalidPacketReceived),

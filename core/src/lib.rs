@@ -8,6 +8,7 @@ pub mod batch;
 pub mod bus;
 pub mod dap;
 pub mod detect;
+pub mod hid;
 pub mod ids;
 pub mod image;
 pub mod isp;

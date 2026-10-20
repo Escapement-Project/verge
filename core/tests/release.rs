@@ -10,7 +10,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use verge_core::progress::Quiet;
 use verge_core::release::{
-    GitHub, Http, HttpError, ReleaseError, Repo, parse_checksum, verify_signature,
+    GitHub, Http, HttpError, ReleaseError, Repo, Timeouts, Ureq, parse_checksum, verify_signature,
 };
 use verge_core::sim::http::{SimAsset, SimHttp, SimKey, SimRelease};
 use verge_core::sim::{SimBus, SimFirmware, firmware_image, firmware_srecord};
@@ -110,6 +110,9 @@ fn a_recorded_checksum_file_matches_githubs_digest() {
 /// A signature the minisign command-line tool made, with its default trusted comment
 /// (`timestamp:…\tfile:test\tprehashed`), from the documentation of minisign-verify 0.3.0
 /// (`src/lib.rs`, lines 20 to 30). It is not made by the code under test.
+///
+/// It verifies, and its comment names the file, so the only check left to refuse it is the last:
+/// a default comment names no release.
 #[test]
 fn a_signature_made_by_the_minisign_tool_verifies() {
     let key = minisign_verify::PublicKey::from_base64(
@@ -121,13 +124,29 @@ RUQf6LRCGA9i559r3g7V1qNyJDApGip8MfqcadIgT9CuhV3EMhHoN1mGTkUidF/z7SrlQgXdy8ofjb7b
 trusted comment: timestamp:1633700835\tfile:test\tprehashed
 wLMDjy9FLAuxZ3q4NlEvkgtyhrr0gtTu6KC4KBJdITbbOeAi1zBIYo0v4iTgt8jJpIidRJnp94ABQkJAgAooBQ==
 ";
-    verify_signature(&key, "test.minisig", signature.as_bytes(), "test", b"test").unwrap();
+    let check = |image_name: &str, image: &[u8]| {
+        verify_signature(
+            &key,
+            "test.minisig",
+            signature.as_bytes(),
+            image_name,
+            "v1.0.0",
+            image,
+        )
+    };
+    assert_eq!(
+        check("test", b"test"),
+        Err(ReleaseError::SignatureNamesNoRelease {
+            name: "test.minisig".into(),
+            tag: "v1.0.0".into()
+        })
+    );
     assert!(matches!(
-        verify_signature(&key, "test.minisig", signature.as_bytes(), "test", b"tesT"),
+        check("test", b"tesT"),
         Err(ReleaseError::BadSignature { .. })
     ));
     assert!(matches!(
-        verify_signature(&key, "test.minisig", signature.as_bytes(), "other", b"test"),
+        check("other", b"test"),
         Err(ReleaseError::SignatureNamesAnother { .. })
     ));
 }
@@ -152,6 +171,11 @@ fn sums(bytes: &[u8]) -> SimAsset {
 
 fn signed(key: &SimKey, bytes: &[u8], comment: &str) -> SimAsset {
     key.sign(&format!("{IMAGE}.minisig"), bytes, comment)
+}
+
+/// The trusted comment the release workflow signs v0.3.0's image with.
+fn comment() -> String {
+    format!("file:{IMAGE} tag:v0.3.0")
 }
 
 /// Publishes v0.3.0 with these assets, and returns what downloading it gives.
@@ -220,7 +244,7 @@ fn an_image_changed_after_signing_is_refused_though_its_checksums_agree() {
     let http = SimHttp::new(repo());
     let signed_bytes = image_bytes("v0.3.0");
     let other = image_bytes("v9.9.9");
-    let signature = signed(http.key(), &signed_bytes, &format!("file:{IMAGE}"));
+    let signature = signed(http.key(), &signed_bytes, &comment());
     let error = download(
         &http,
         vec![SimAsset::new(IMAGE, other.clone()), sums(&other), signature],
@@ -242,7 +266,7 @@ fn a_signature_by_another_key_is_refused() {
         vec![
             SimAsset::new(IMAGE, bytes.clone()),
             sums(&bytes),
-            signed(&stranger, &bytes, &format!("file:{IMAGE}")),
+            signed(&stranger, &bytes, &comment()),
         ],
     )
     .unwrap_err();
@@ -265,7 +289,11 @@ fn a_signature_of_another_file_is_refused() {
         vec![
             SimAsset::new(IMAGE, bytes.clone()),
             sums(&bytes),
-            signed(http.key(), &bytes, "file:mculink-verge-v0.2.0.s19"),
+            signed(
+                http.key(),
+                &bytes,
+                "file:mculink-verge-v0.2.0.s19 tag:v0.3.0",
+            ),
         ],
     )
     .unwrap_err();
@@ -284,7 +312,7 @@ fn a_signature_of_another_file_is_refused() {
         vec![
             SimAsset::new(IMAGE, bytes.clone()),
             sums(&bytes),
-            signed(http.key(), &bytes, "timestamp:1"),
+            signed(http.key(), &bytes, "timestamp:1 tag:v0.3.0"),
         ],
     )
     .unwrap_err();
@@ -336,7 +364,7 @@ fn an_image_that_does_not_match_its_checksum_is_refused() {
         vec![
             SimAsset::new(IMAGE, bytes.clone()),
             sums(&image_bytes("v0.2.0")),
-            signed(http.key(), &bytes, &format!("file:{IMAGE}")),
+            signed(http.key(), &bytes, &comment()),
         ],
     )
     .unwrap_err();
@@ -356,11 +384,7 @@ fn an_image_that_does_not_match_githubs_digest_is_refused() {
     };
     let error = download(
         &http,
-        vec![
-            image,
-            sums(&bytes),
-            signed(http.key(), &bytes, &format!("file:{IMAGE}")),
-        ],
+        vec![image, sums(&bytes), signed(http.key(), &bytes, &comment())],
     )
     .unwrap_err();
     assert!(
@@ -411,7 +435,7 @@ fn releases_that_break_the_convention_are_refused() {
                 &format!("{IMAGE}.sha256"),
                 format!("{digest}  something-else.s19\n").into_bytes(),
             ),
-            signed(http.key(), &bytes, &format!("file:{IMAGE}")),
+            signed(http.key(), &bytes, &comment()),
         ],
     )
     .unwrap_err();
@@ -459,7 +483,7 @@ fn a_bad_signature_flashes_nothing() {
         assets: vec![
             SimAsset::new(IMAGE, bytes.clone()),
             sums(&bytes),
-            signed(&SimKey::generate(), &bytes, &format!("file:{IMAGE}")),
+            signed(&SimKey::generate(), &bytes, &comment()),
         ],
     });
     let bus = SimBus::scenario("ours").unwrap();
@@ -521,4 +545,171 @@ fn from_release_to_running() {
         back.build().unwrap().compare(&release.tag),
         Relation::UpToDate
     );
+}
+
+/// release.rs: "naming the file there stops a validly signed image being published again as
+/// another release". Re-publish v0.2.0's three signed assets as release v0.9.0.
+#[test]
+fn an_old_signed_image_republished_under_a_newer_tag_is_refused() {
+    let http = SimHttp::new(repo());
+    http.publish_ours("v0.5.0");
+    let old = http.ours_assets("v0.2.0");
+    http.publish(SimRelease {
+        tag: "v0.9.0".into(),
+        prerelease: false,
+        assets: old,
+    });
+    let bus = SimBus::default();
+    bus.add_ours("v0.5.0");
+    let unit = detect(&bus).unwrap().remove(0);
+    let loaded = source::load(
+        &Source::Release(None),
+        &github(&http),
+        Some(&unit),
+        false,
+        &mut Quiet,
+    );
+    match loaded {
+        Ok(loaded) => {
+            let is_old = loaded.image.chunks
+                == firmware_image(&SimFirmware::Ours {
+                    build: "v0.2.0".into(),
+                })
+                .chunks;
+            panic!(
+                "installed as {:?}, {}; image is v0.2.0's: {is_old}",
+                loaded.version, loaded.name
+            );
+        }
+        Err(LoadError::Release(ReleaseError::SignatureForAnotherRelease {
+            signed, tag, ..
+        })) => {
+            assert_eq!((signed.as_str(), tag.as_str()), ("v0.2.0", "v0.9.0"));
+        }
+        Err(other) => panic!("refused, but not for its tag: {other}"),
+    }
+}
+
+/// The two ways a trusted comment can fail to name the release: another tag, and none.
+#[test]
+fn a_signature_for_another_release_or_none_is_refused() {
+    let bytes = image_bytes("v0.3.0");
+    for (signed_comment, expected) in [
+        (
+            format!("file:{IMAGE} tag:v0.2.0"),
+            ReleaseError::SignatureForAnotherRelease {
+                name: format!("{IMAGE}.minisig"),
+                signed: "v0.2.0".into(),
+                tag: "v0.3.0".into(),
+            },
+        ),
+        (
+            format!("file:{IMAGE}"),
+            ReleaseError::SignatureNamesNoRelease {
+                name: format!("{IMAGE}.minisig"),
+                tag: "v0.3.0".into(),
+            },
+        ),
+    ] {
+        let http = SimHttp::new(repo());
+        let error = download(
+            &http,
+            vec![
+                SimAsset::new(IMAGE, bytes.clone()),
+                sums(&bytes),
+                signed(http.key(), &bytes, &signed_comment),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(error, expected, "{signed_comment}");
+    }
+}
+
+/// A server on this machine that takes one request and stalls: before its reply, or partway
+/// through the body. It holds the connection for five seconds, which bounds a test without
+/// timeouts.
+fn stalling_server(headers: bool) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/image.s19", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 1024];
+        let _ = stream.read(&mut request);
+        if headers {
+            let _ =
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\nS0030000FC\n");
+        }
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    });
+    url
+}
+
+/// HTTP timeouts are real time, so this test is bounded in real time.
+#[test]
+fn a_stalled_request_fails_with_a_message() {
+    use std::time::{Duration, Instant};
+    let http = Ureq::new(Timeouts {
+        connect: Duration::from_secs(2),
+        response: Duration::from_millis(300),
+        body: Duration::from_millis(300),
+    });
+    for (headers, phase) in [(false, "receive response"), (true, "receive body")] {
+        let url = stalling_server(headers);
+        let started = Instant::now();
+        let error = http.get(&url, &[]).unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{phase}: took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            error,
+            HttpError::Timeout {
+                url: url.clone(),
+                phase: phase.into()
+            }
+        );
+        assert!(error.to_string().contains("stalled"), "{error}");
+    }
+}
+
+/// Ours is built for the plain MCU-Link. A release or a file is refused for a unit that says it
+/// is another board before anything is downloaded; stock's own image is not.
+#[test]
+fn an_image_of_ours_is_refused_for_another_board() {
+    let http = SimHttp::new(repo());
+    http.publish_ours("v0.3.0");
+    let bus = SimBus::scenario("pro").unwrap();
+    let unit = detect(&bus).unwrap().remove(0);
+    let file = std::env::temp_dir().join(format!("verge-pro-{}.s19", std::process::id()));
+    std::fs::write(&file, image_bytes("v0.3.0")).unwrap();
+    for source in [Source::Release(None), Source::File(file.clone())] {
+        let result = source::load(&source, &github(&http), Some(&unit), false, &mut Quiet);
+        let Err(LoadError::OtherBoard { board }) = &result else {
+            panic!("{source:?}: {result:?}");
+        };
+        assert_eq!(board, "an MCU-Link Pro");
+    }
+    assert!(http.requests().is_empty(), "{:?}", http.requests());
+
+    let dir = std::env::temp_dir().join(format!("verge-pro-stock-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("MCU-LINK_CMSIS-DAP_V3_172.s19"),
+        firmware_srecord(&SimFirmware::Stock {
+            version: verge_core::version::StockVersion::parse("3.172").unwrap(),
+        }),
+    )
+    .unwrap();
+    let stock = source::load(
+        &Source::Stock(Some(dir.clone())),
+        &github(&http),
+        Some(&unit),
+        false,
+        &mut Quiet,
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+    std::fs::remove_file(&file).unwrap();
+    assert!(stock.is_ok(), "{stock:?}");
 }

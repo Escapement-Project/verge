@@ -133,6 +133,9 @@ pub struct SimUnit {
     pub flash: BTreeMap<u32, Vec<u8>>,
     pub mode: Mode,
     pub instance: Option<String>,
+    /// Which enumeration this is, unique on the bench. A handle opened on an earlier one is
+    /// dead, as a real one is, even where the instance comes back the same.
+    pub generation: u64,
     /// The ISP jumper is fitted, so every reset comes back as the bootloader.
     pub jumper: bool,
     /// Another program holds the CMSIS-DAP interface.
@@ -147,6 +150,12 @@ pub struct SimUnit {
     pub fail_writes: bool,
     /// How many `DAP_HostStatus` commands it has answered: how often its LEDs were set.
     pub host_status: u32,
+    /// Whether the last `DAP_HostStatus` turned its LEDs on.
+    pub leds_on: bool,
+    /// The board, which stock names in its product string and ours in a format 3 identify
+    /// reply. `None` is the plain MCU-Link as recorded: stock's recorded string, and ours
+    /// answering in format 2.
+    pub board: Option<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -192,7 +201,7 @@ pub(crate) struct World {
     pub now: Duration,
     /// Real time per simulated second, so that a demonstration can be watched.
     pace: Option<f64>,
-    next_instance: u32,
+    next_generation: u64,
     pub units: Vec<SimUnit>,
     events: Vec<(Duration, usize, Event)>,
     pub log: Vec<String>,
@@ -201,6 +210,11 @@ pub(crate) struct World {
     /// The most LPC55S69 bootloaders that were ever on the bus at once.
     pub max_bootloaders: usize,
     pub boot_after_reset: Duration,
+    /// Whether devices report the port they are on, as every platform the tool knows does.
+    locations: bool,
+    /// Whether a device that comes back keeps its instance, as a Windows device instance ID
+    /// does: by serial number, or by port for a device without one.
+    stable_instances: bool,
 }
 
 impl World {
@@ -220,7 +234,7 @@ impl World {
         World {
             now: Duration::ZERO,
             pace: None,
-            next_instance: 1,
+            next_generation: 1,
             units: Vec::new(),
             events: Vec::new(),
             log: Vec::new(),
@@ -228,14 +242,26 @@ impl World {
             stock: stock.dap_info,
             max_bootloaders: 0,
             boot_after_reset: Duration::from_millis(1000),
+            locations: true,
+            stable_instances: false,
         }
     }
 
     fn enumerate(&mut self, unit: usize) {
-        let instance = format!("sim-{}", self.next_instance);
-        self.next_instance += 1;
+        let generation = self.next_generation;
+        self.next_generation += 1;
+        let u = &self.units[unit];
+        let instance = match (&u.mode, self.stable_instances) {
+            (_, false) => format!("sim-{generation}"),
+            (Mode::Firmware(SimFirmware::Ours { .. }), true) => {
+                format!("sim-0143-{}", u.ours_serial)
+            }
+            (Mode::Firmware(_), true) => format!("sim-0143-{}", u.stock_serial),
+            (Mode::Bootloader | Mode::Silent, true) => format!("sim-rom-{}", u.location),
+        };
         let u = &mut self.units[unit];
         u.instance = Some(instance);
+        u.generation = generation;
         self.log
             .push(format!("{}: enumerates as {:?}", u.location, u.mode));
         let bootloaders = self
@@ -328,8 +354,8 @@ impl World {
         self.pace.map_or(Duration::ZERO, |pace| by.mul_f64(pace))
     }
 
-    pub fn is_current(&self, unit: usize, instance: &str) -> bool {
-        self.units[unit].instance.as_deref() == Some(instance)
+    pub fn is_current(&self, unit: usize, generation: u64) -> bool {
+        self.units[unit].instance.is_some() && self.units[unit].generation == generation
     }
 
     fn device(&self, unit: usize) -> Option<UsbDevice> {
@@ -352,7 +378,7 @@ impl World {
             Mode::Firmware(SimFirmware::Stock { version }) => (
                 Some(u.stock_serial.clone()),
                 Some(self.stock.vendor.clone()),
-                Some(format!("MCU-LINK (r0FB) CMSIS-DAP V{version}")),
+                Some(stock_product(u.board, *version)),
                 true,
                 true,
             ),
@@ -374,7 +400,7 @@ impl World {
         Some(UsbDevice {
             vid,
             pid,
-            location: Some(u.location.clone()),
+            location: self.locations.then(|| u.location.clone()),
             instance,
             serial,
             manufacturer,
@@ -389,6 +415,17 @@ impl World {
             .iter()
             .position(|u| u.instance.as_deref() == Some(device.instance.as_str()))
     }
+}
+
+/// Stock's USB product string on `board`, in the form LinkServer's Readme gives. The Pro's and
+/// the on-board hardware revisions are made up.
+fn stock_product(board: Option<u8>, version: StockVersion) -> String {
+    let board = match board {
+        None | Some(crate::dap::Ours::BOARD_MCU_LINK) => "(r0FB)",
+        Some(crate::dap::Ours::BOARD_MCU_LINK_PRO) => "Pro (r1E2)",
+        Some(_) => "FRDM-MCXN947 (r0E7)",
+    };
+    format!("MCU-LINK {board} CMSIS-DAP V{version}")
 }
 
 /// The firmware a unit's flash boots, if any: a vector table that points into programmed flash,
@@ -454,6 +491,7 @@ pub const SCENARIOS: &[(&str, &str)] = &[
         "arrivals",
         "an empty bench where five units are plugged in over ten seconds, for a batch",
     ),
+    ("pro", "one MCU-Link Pro running stock V3.172"),
 ];
 
 impl SimBus {
@@ -489,6 +527,7 @@ impl SimBus {
             flash,
             mode: Mode::Silent,
             instance: None,
+            generation: 0,
             jumper: false,
             busy: false,
             mini: false,
@@ -496,6 +535,8 @@ impl SimBus {
             plugged: true,
             fail_writes: false,
             host_status: 0,
+            leds_on: false,
+            board: None,
         });
         world.units[index].mode = mode;
         if world.units[index].mode != Mode::Silent {
@@ -591,6 +632,28 @@ impl SimBus {
         self.world().units[unit].host_status
     }
 
+    /// Whether the last `DAP_HostStatus` a unit answered turned its LEDs on.
+    #[must_use]
+    pub fn leds_on(&self, unit: usize) -> bool {
+        self.world().units[unit].leds_on
+    }
+
+    /// Makes a unit a board other than the plain MCU-Link, by the board byte ours reports.
+    pub fn set_board(&self, unit: usize, board: u8) {
+        self.world().units[unit].board = Some(board);
+    }
+
+    /// Makes every device report no port, as on a platform that does not say.
+    pub fn set_locations(&self, on: bool) {
+        self.world().locations = on;
+    }
+
+    /// Makes a device that comes back keep its instance, as on Windows. Applies from the next
+    /// enumeration.
+    pub fn set_stable_instances(&self, on: bool) {
+        self.world().stable_instances = on;
+    }
+
     /// The most bootloaders that were ever on the bus at once.
     #[must_use]
     pub fn max_bootloaders(&self) -> usize {
@@ -675,6 +738,10 @@ impl SimBus {
                 bus.plug_in_later(Duration::from_secs(5), stock("3.108"));
                 bus.plug_in_later(Duration::from_secs(8), ours("14d05d4"));
             }
+            "pro" => {
+                let unit = bus.add_stock("3.172");
+                bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK_PRO);
+            }
             _ => return None,
         }
         Some(bus)
@@ -738,12 +805,8 @@ impl Bus for SimBus {
             });
         }
         let stale = std::mem::take(&mut world.units[unit].stale_replies);
-        Ok(SimDap::new(
-            self.world.clone(),
-            unit,
-            device.instance.clone(),
-            stale,
-        ))
+        let generation = world.units[unit].generation;
+        Ok(SimDap::new(self.world.clone(), unit, generation, stale))
     }
 
     fn open_isp(&self, device: &UsbDevice) -> Result<SimRom, BusError> {
@@ -758,10 +821,12 @@ impl Bus for SimBus {
                 reason: "it is not in ISP mode".into(),
             });
         }
+        let generation = world.units[unit].generation;
         Ok(SimRom::new(
             self.world.clone(),
             unit,
             device.instance.clone(),
+            generation,
         ))
     }
 

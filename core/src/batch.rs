@@ -4,7 +4,8 @@
 //! Every LPC55S69 bootloader enumerates alike, so the batch starts a unit only while no bootloader
 //! is on the bus: anything in ISP mode that is not the unit being flashed pauses it, and so does a
 //! mini. Units are tracked by port, as a single update finds its unit again, and each is taken at
-//! most once until it leaves the bus.
+//! most once until it leaves the bus. A unit that reports no port cannot be followed, so it
+//! pauses the batch too.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -15,7 +16,7 @@ use serde::Serialize;
 
 use crate::bus::{Bus, BusError, UsbDevice};
 use crate::dap;
-use crate::detect::{self, Firmware, State, Unit};
+use crate::detect::{self, Firmware, Hardware, State, Unit};
 use crate::ids::Role;
 use crate::image::Image;
 use crate::paths::{self, Path};
@@ -24,20 +25,26 @@ use crate::source::ImageVersion;
 use crate::update::{self, Outcome, Timing};
 use crate::version::{Build, Relation, StockVersion};
 
+/// Polls past [`Timing::settle`] that a new probe may fail to open before the batch skips it.
+const OPEN_GRACE_POLLS: u32 = 4;
+
 /// The board a batch takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum Board {
-    /// The full MCU-Link: a probe at `1fc9:0143`, or in ISP mode a bootloader at `1fc9:0021`.
+    /// The plain MCU-Link, as its firmware reports it.
     McuLink,
 }
 
 impl Board {
-    /// Whether `unit` is this board. The MCU-Link Pro joins here once its support lands; its USB
-    /// identity is not known yet, so nothing here guesses it.
+    /// Whether `unit` is this board. A unit in ISP mode cannot say which board it is, so it
+    /// passes; the question that arms a batch taking such units says so. The MCU-Link Pro joins
+    /// here once its support lands.
     #[must_use]
     pub fn takes(self, unit: &Unit) -> bool {
         match self {
-            Board::McuLink => matches!(unit.device.role(), Some(Role::Probe | Role::Bootloader)),
+            Board::McuLink => {
+                unit.state == State::Bootloader || unit.hardware() == Hardware::McuLink
+            }
         }
     }
 }
@@ -132,10 +139,22 @@ pub enum Verdict {
 /// Whether the batch takes `unit`.
 #[must_use]
 pub fn judge(unit: &Unit, filter: &Filter, version: &ImageVersion) -> Verdict {
+    match &unit.state {
+        State::MiniBootloader => {
+            return Verdict::Skip("an MCU-Link mini, a different board".into());
+        }
+        State::Unreadable { reason, .. } => {
+            return Verdict::Skip(format!("the tool could not ask what it runs: {reason}"));
+        }
+        State::Bootloader | State::Probe { .. } => {}
+    }
     if !filter.board.takes(unit) {
-        return Verdict::Skip(match unit.state {
-            State::MiniBootloader => "an MCU-Link mini, a different board".into(),
-            _ => format!("not a {}", filter.board),
+        return Verdict::Skip(match unit.hardware() {
+            Hardware::Other(board) => format!("{board}, not a {}", filter.board),
+            Hardware::McuLink | Hardware::Unknown => format!(
+                "its firmware does not say which board it is, so it is not known to be a {}",
+                filter.board
+            ),
         });
     }
     let taken = match &unit.state {
@@ -143,10 +162,7 @@ pub fn judge(unit: &Unit, filter: &Filter, version: &ImageVersion) -> Verdict {
         State::Bootloader => {
             return Verdict::Skip("in ISP mode, which this batch does not take".into());
         }
-        State::MiniBootloader => unreachable!("no board takes a mini"),
-        State::Unreadable { reason, .. } => {
-            return Verdict::Skip(format!("the tool could not ask what it runs: {reason}"));
-        }
+        State::MiniBootloader | State::Unreadable { .. } => unreachable!("judged above"),
         State::Probe {
             firmware: Firmware::Ours(ours),
             ..
@@ -240,6 +256,42 @@ pub struct Entry {
     pub seen: Duration,
 }
 
+/// What became of a unit, as its record line says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Settled {
+    Updated,
+    /// Flashed, and back in ISP mode because its jumper is fitted.
+    JumperFitted,
+    /// It runs the image already.
+    Current,
+    Skipped,
+    Failed,
+    /// Its turn had not come when the batch stopped.
+    Waiting,
+}
+
+impl Settled {
+    /// The name the record file gives it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Settled::Updated => "updated",
+            Settled::JumperFitted => "jumper-fitted",
+            Settled::Current => "current",
+            Settled::Skipped => "skipped",
+            Settled::Failed => "failed",
+            Settled::Waiting => "waiting",
+        }
+    }
+}
+
+impl fmt::Display for Settled {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// One line of the batch's record.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Record {
@@ -250,10 +302,18 @@ pub struct Record {
     pub firmware_before: String,
     pub serial_after: Option<String>,
     pub firmware_after: Option<String>,
-    /// `updated`, `jumper-fitted`, `current`, `skipped` or `failed`.
-    pub result: &'static str,
+    pub result: Settled,
     pub reason: Option<String>,
     pub seconds: Option<f64>,
+}
+
+/// Opens a batch's record file to add lines to it, creating it if needed. Lines already there
+/// stay.
+pub fn open_record(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -281,6 +341,9 @@ pub trait Observer: Progress {
     fn starting(&mut self, _entry: &Entry) {}
     /// A unit is settled, as its record says.
     fn record(&mut self, _record: &Record) {}
+    /// A settled unit can be unplugged. `blinking` says whether its LEDs blink to show which
+    /// unit it is, which they do only while the batch runs.
+    fn unplug(&mut self, _port: &str, _blinking: bool) {}
     /// The batch pauses, saying why, or resumes with `None`.
     fn paused(&mut self, _reason: Option<&str>) {}
 }
@@ -298,11 +361,17 @@ fn port(device: &UsbDevice) -> String {
         .unwrap_or_else(|| format!("device {}", device.instance))
 }
 
-/// The bus, noting when each port first shows a device. An update polls the bus while it waits,
-/// so units that arrive during one keep their order.
+/// The units [`Batch::blink`] lights.
+fn blinks(entry: &Entry) -> bool {
+    matches!(entry.status, Status::Updated | Status::Current) && entry.device.dap_v2
+}
+
+/// The bus, noting when each port first shows each device. An update polls the bus while it
+/// waits, so units that arrive during one keep their order.
 struct Watch<'b, B> {
     bus: &'b B,
-    seen: RefCell<HashMap<String, Duration>>,
+    /// By port: the instance there, and when the bus first showed it.
+    seen: RefCell<HashMap<String, (String, Duration)>>,
 }
 
 impl<B: Bus> Bus for Watch<'_, B> {
@@ -314,7 +383,12 @@ impl<B: Bus> Bus for Watch<'_, B> {
         let now = self.bus.now();
         let mut seen = self.seen.borrow_mut();
         for device in &devices {
-            seen.entry(port(device)).or_insert(now);
+            let first = seen
+                .entry(port(device))
+                .or_insert_with(|| (device.instance.clone(), now));
+            if first.0 != device.instance {
+                *first = (device.instance.clone(), now);
+            }
         }
         Ok(devices)
     }
@@ -340,7 +414,8 @@ fn now_rfc3339() -> String {
     humantime::format_rfc3339_seconds(SystemTime::now()).to_string()
 }
 
-/// An armed batch. Drive it with [`Batch::step`] until [`Batch::finished`].
+/// An armed batch. Drive it with [`Batch::step`] until [`Batch::finished`], then
+/// [`Batch::close`] it.
 pub struct Batch<'b, B: Bus> {
     bus: Watch<'b, B>,
     armed: Armed,
@@ -354,8 +429,10 @@ pub struct Batch<'b, B: Bus> {
     cancel: Cancel,
     limit: Option<usize>,
     updated: usize,
-    armed_on_bus: bool,
+    /// The instances on the bus at the first look, each kept while it stays on the bus.
+    attached: Option<Vec<String>>,
     lit: bool,
+    closed: bool,
 }
 
 impl<'b, B: Bus> Batch<'b, B> {
@@ -386,8 +463,9 @@ impl<'b, B: Bus> Batch<'b, B> {
             cancel,
             limit,
             updated: 0,
-            armed_on_bus: false,
+            attached: None,
             lit: false,
+            closed: false,
         }
     }
 
@@ -455,11 +533,15 @@ impl<'b, B: Bus> Batch<'b, B> {
             return;
         };
         let (result, reason) = match &entry.status {
-            Status::Updated => ("updated", None),
-            Status::JumperFitted => ("jumper-fitted", None),
-            Status::Current => ("current", None),
-            Status::Skipped(reason) => ("skipped", Some(reason.clone())),
-            Status::Failed(reason) => ("failed", Some(reason.clone())),
+            Status::Updated => (Settled::Updated, None),
+            Status::JumperFitted => (Settled::JumperFitted, None),
+            Status::Current => (Settled::Current, None),
+            Status::Skipped(reason) => (Settled::Skipped, Some(reason.clone())),
+            Status::Failed(reason) => (Settled::Failed, Some(reason.clone())),
+            Status::Waiting if self.closed => (
+                Settled::Waiting,
+                Some("the batch stopped before its turn came".to_owned()),
+            ),
             Status::Waiting | Status::LeftAlone => return,
         };
         let record = Record {
@@ -473,13 +555,28 @@ impl<'b, B: Bus> Batch<'b, B> {
             reason,
             seconds,
         };
+        let unplug = blinks(entry);
         observer.record(&record);
         self.records.push(record);
+        if unplug {
+            observer.unplug(port, !self.finished());
+        }
     }
 
     /// The batch's rule for starting a unit: nothing in ISP mode on the bus, unless it is a
-    /// waiting unit the batch takes, and then that one goes first.
+    /// waiting unit the batch takes, and then that one goes first. Nothing starts while a unit
+    /// that reports no port is attached either.
     fn guard(&self, devices: &[UsbDevice]) -> Option<String> {
+        if let Some(lost) = devices.iter().find(|d| d.location.is_none()) {
+            let serial = lost
+                .serial
+                .as_deref()
+                .map(|s| format!(", serial {s}"))
+                .unwrap_or_default();
+            return Some(format!(
+                "A unit ({lost}{serial}) reports no USB port. The batch knows units by their port, so it waits until that unit is unplugged."
+            ));
+        }
         if let Some(mini) = devices
             .iter()
             .find(|d| d.role() == Some(Role::MiniBootloader))
@@ -559,19 +656,44 @@ impl<'b, B: Bus> Batch<'b, B> {
             .seen
             .borrow_mut()
             .retain(|p, _| present.contains_key(p));
+        let attached = self
+            .attached
+            .get_or_insert_with(|| devices.iter().map(|d| d.instance.clone()).collect());
+        attached.retain(|instance| devices.iter().any(|d| d.instance == *instance));
+        let attached = attached.clone();
 
+        let now = self.bus.now();
         let seen = self.bus.seen.borrow().clone();
+        let first_seen = |d: &UsbDevice| seen.get(&port(d)).map_or(now, |(_, at)| *at);
         let mut arrivals: Vec<&UsbDevice> = devices
             .iter()
-            .filter(|d| !tracked.contains(&port(d)))
+            .filter(|d| d.location.is_some() && !tracked.contains(&port(d)))
             .collect();
-        arrivals.sort_by_key(|d| (seen.get(&port(d)).copied(), port(d)));
+        arrivals.sort_by_key(|d| (first_seen(d), port(d)));
         for device in arrivals {
+            let at = port(device);
+            let was_attached = attached.contains(&device.instance);
+            let leave_alone = was_attached && !self.filter.attached;
+            let probe = device.role() == Some(Role::Probe);
+            let since = now.saturating_sub(first_seen(device));
+            // A firmware that has just enumerated is given the time the update path gives it.
+            if probe && !was_attached && since < self.timing.settle {
+                continue;
+            }
             let Some(unit) = detect::query_device(&self.bus, device.clone()) else {
                 continue;
             };
-            let at = port(device);
-            let status = if !self.armed_on_bus && !self.filter.attached {
+            // Opening a new device can fail for a moment while the system still sets it up.
+            let grace = self.timing.settle + self.timing.poll * OPEN_GRACE_POLLS;
+            if probe
+                && !leave_alone
+                && device.dap_v2
+                && matches!(unit.state, State::Unreadable { .. })
+                && since < grace
+            {
+                continue;
+            }
+            let status = if leave_alone {
                 Status::LeftAlone
             } else {
                 match judge(&unit, &self.filter, &self.armed.version) {
@@ -589,11 +711,10 @@ impl<'b, B: Bus> Batch<'b, B> {
                 status,
                 serial_before: unit.serial().map(str::to_owned),
                 firmware_before: unit.state.to_string(),
-                seen: seen.get(&at).copied().unwrap_or_default(),
+                seen: first_seen(device),
             });
             self.settle(observer, &at, None, None);
         }
-        self.armed_on_bus = true;
 
         let paused = self.guard(&devices);
         if paused != self.paused {
@@ -605,8 +726,7 @@ impl<'b, B: Bus> Batch<'b, B> {
             && !self.finished()
             && let Some(at) = self.next()
         {
-            self.run(&at, observer)?;
-            return Ok(());
+            return self.run(&at, observer);
         }
         self.blink();
         self.bus.sleep(self.timing.poll);
@@ -633,6 +753,12 @@ impl<'b, B: Bus> Batch<'b, B> {
             self.settle(observer, at, None, None);
             return Ok(());
         }
+        // Asking took time, and a stop that arrived meanwhile must still keep the unit out of its
+        // bootloader.
+        if self.finished() {
+            self.queue.push_front(at.to_owned());
+            return Ok(());
+        }
         if let Some(entry) = self.entries.iter().find(|e| e.port == at) {
             observer.starting(entry);
         }
@@ -646,8 +772,13 @@ impl<'b, B: Bus> Batch<'b, B> {
             &self.cancel,
         );
         let seconds = Some((self.bus.now() - started).as_secs_f64());
-        // Whatever is on the port now is this unit, so the next step does not take it for a new one.
-        let now_at = self.bus.devices()?.into_iter().find(|d| port(d) == at);
+        // Whatever is on the port now is this unit, so the next step does not take it for a new
+        // one. A failure to look is returned once the install is recorded.
+        let looked = self.bus.devices();
+        let now_at = looked
+            .as_ref()
+            .ok()
+            .and_then(|devices| devices.iter().find(|d| port(d) == at).cloned());
         let (status, after) = match result {
             Ok(Outcome::Running(back)) => {
                 self.updated += 1;
@@ -666,7 +797,7 @@ impl<'b, B: Bus> Batch<'b, B> {
             }
         }
         self.settle(observer, at, after.as_ref(), seconds);
-        Ok(())
+        looked.map(drop)
     }
 
     /// Toggles the LEDs of every finished unit still attached, so a person can see which to
@@ -674,7 +805,7 @@ impl<'b, B: Bus> Batch<'b, B> {
     fn blink(&mut self) {
         self.lit = !self.lit;
         for entry in &self.entries {
-            if !matches!(entry.status, Status::Updated | Status::Current) || !entry.device.dap_v2 {
+            if !blinks(entry) {
                 continue;
             }
             match self.bus.open_dap(&entry.device) {
@@ -688,18 +819,57 @@ impl<'b, B: Bus> Batch<'b, B> {
         }
     }
 
-    /// Turns the finished units' LEDs off. Call once the batch has finished.
-    pub fn close(&mut self) {
+    /// Ends the batch: a record line for each unit still waiting, and the finished units' LEDs
+    /// off. Call it once the batch has finished, and after a step fails.
+    pub fn close(&mut self, observer: &mut dyn Observer) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
+        let waiting: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|e| e.status == Status::Waiting)
+            .map(|e| e.port.clone())
+            .collect();
+        for at in waiting {
+            self.settle(observer, &at, None, None);
+        }
         self.lit = true;
         self.blink();
     }
 
-    /// Steps until the batch finishes, then closes it.
+    /// Steps until the batch finishes or a step fails, then closes it.
     pub fn run_to_end(&mut self, observer: &mut dyn Observer) -> Result<(), BusError> {
+        let mut result = Ok(());
         while !self.finished() {
-            self.step(observer)?;
+            result = self.step(observer);
+            if result.is_err() {
+                break;
+            }
         }
-        self.close();
-        Ok(())
+        self.close(observer);
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The names the README gives for the record's `result`.
+    #[test]
+    fn a_result_is_written_as_the_readme_names_it() {
+        for (result, name) in [
+            (Settled::Updated, "updated"),
+            (Settled::JumperFitted, "jumper-fitted"),
+            (Settled::Current, "current"),
+            (Settled::Skipped, "skipped"),
+            (Settled::Failed, "failed"),
+            (Settled::Waiting, "waiting"),
+        ] {
+            assert_eq!(serde_json::to_value(result).unwrap(), name);
+            assert_eq!(result.as_str(), name);
+        }
     }
 }

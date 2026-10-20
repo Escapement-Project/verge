@@ -4,7 +4,7 @@
 use std::path::{Path as FsPath, PathBuf};
 
 use egui::{Color32, Margin, Stroke, Ui, vec2};
-use verge_core::batch::{Board, Filter, OursFilter, Record, StockFilter, Tally};
+use verge_core::batch::{Board, Filter, OursFilter, Record, Settled, StockFilter, Tally};
 use verge_core::paths::ISP_IDENTITY_WARNING;
 use verge_core::progress::{Cancel, Unit as StepUnit};
 use verge_core::source::Source;
@@ -177,12 +177,12 @@ impl BatchRun {
 }
 
 /// A result's glyph and colour, the same family as the unit view's.
-fn mark(result: &str) -> (Glyph, Color32) {
+fn mark(result: Settled) -> (Glyph, Color32) {
     match result {
-        "updated" => (glyph::DONE, color::OURS),
-        "jumper-fitted" => (glyph::ATTENTION, color::ATTENTION),
-        "failed" => (glyph::FAILED, color::FAULT),
-        _ => (glyph::STOCK, color::TEXT_2),
+        Settled::Updated => (glyph::DONE, color::OURS),
+        Settled::JumperFitted => (glyph::ATTENTION, color::ATTENTION),
+        Settled::Failed => (glyph::FAILED, color::FAULT),
+        Settled::Current | Settled::Skipped | Settled::Waiting => (glyph::STOCK, color::TEXT_2),
     }
 }
 
@@ -549,7 +549,9 @@ impl UpdaterApp {
                             None => record.firmware_before.clone(),
                         };
                         ui.label(text(Role::Data, firmware).color(color::TEXT_2));
-                        ui.label(text(Role::Label, record.result.to_uppercase()).color(tint));
+                        ui.label(
+                            text(Role::Label, record.result.as_str().to_uppercase()).color(tint),
+                        );
                     });
                     if let Some(reason) = &record.reason {
                         wrapping(ui, text(Role::Body, reason).color(color::TEXT_2));

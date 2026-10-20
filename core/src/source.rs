@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::detect::Unit;
+use crate::detect::{Hardware, Unit};
 use crate::image::{Image, ImageError};
 use crate::progress::Progress;
 use crate::release::{GitHub, Http, Release, ReleaseError};
@@ -52,6 +52,10 @@ pub enum LoadError {
     AlreadyRuns { tag: String },
     #[error("the unit runs {build}, which is newer than release {tag}")]
     Newer { build: String, tag: String },
+    #[error(
+        "the unit is {board}, and this firmware is built for the plain MCU-Link only. NXP's stock image can go on it"
+    )]
+    OtherBoard { board: String },
 }
 
 fn from_file(path: &std::path::Path) -> Result<Image, LoadError> {
@@ -86,8 +90,22 @@ pub fn check_release(unit: Option<&Unit>, release: &Release, force: bool) -> Res
     }
 }
 
-/// Loads the image `source` names. For a release, refuses one `unit` already runs or is ahead
-/// of unless `force`, and downloads it with its checksums checked.
+/// Whether `source` may go on `unit`. Stock's image goes anywhere stock runs; anything else is
+/// ours, a release or a file, and goes only on the plain MCU-Link. A unit that does not say which
+/// board it is, such as one in ISP mode, is not refused.
+pub fn check_board(unit: Option<&Unit>, source: &Source) -> Result<(), LoadError> {
+    if matches!(source, Source::Stock(_)) {
+        return Ok(());
+    }
+    match unit.map(Unit::hardware) {
+        Some(Hardware::Other(board)) => Err(LoadError::OtherBoard { board }),
+        Some(Hardware::McuLink | Hardware::Unknown) | None => Ok(()),
+    }
+}
+
+/// Loads the image `source` names. Refuses an image of ours for a unit known to be another
+/// board. For a release, refuses one `unit` already runs or is ahead of unless `force`, and
+/// downloads it with its checksums checked.
 pub fn load<H: Http>(
     source: &Source,
     github: &GitHub<H>,
@@ -95,6 +113,7 @@ pub fn load<H: Http>(
     force: bool,
     progress: &mut dyn Progress,
 ) -> Result<Loaded, LoadError> {
+    check_board(unit, source)?;
     match source {
         Source::File(path) => {
             let image = from_file(path)?;

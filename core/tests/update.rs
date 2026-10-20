@@ -486,3 +486,150 @@ fn a_mini_in_isp_mode_holds_back_a_jumper_free_update() {
             .any(|l| l.contains("control") || l.contains("ROM command"))
     );
 }
+
+/// The bootloader is opened by retrying while it comes up. One that joins it meanwhile refuses
+/// the flash before anything is erased.
+#[test]
+fn a_second_bootloader_that_arrives_while_connecting_refuses_the_flash() {
+    let bus = SimBus::default();
+    bus.add_bootloader(false);
+    bus.plug_in_bootloader_later(Duration::from_millis(1));
+    let image = firmware_image(&ours("v0.3.0"));
+    let result = update::flash_now(
+        &bus,
+        &image,
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    );
+    let Err(UpdateError::Refused(reason)) = result else {
+        panic!("{result:?}");
+    };
+    assert!(reason.starts_with("2 units are in ISP mode"), "{reason}");
+    assert!(
+        !bus.log()
+            .iter()
+            .any(|l| l.contains("ROM command 0x02") || l.contains("ROM command 0x04"))
+    );
+}
+
+/// The bootloader checked leaves while the tool connects, and another takes its place on
+/// another port: the one that answers is not the one checked.
+#[test]
+fn a_bootloader_replaced_while_connecting_refuses_the_flash() {
+    let bus = SimBus::default();
+    let first = bus.add_bootloader(false);
+    bus.unplug_later(Duration::from_micros(1500), first);
+    bus.plug_in_bootloader_later(Duration::from_micros(1500));
+    let image = firmware_image(&ours("v0.3.0"));
+    let result = update::flash_now(
+        &bus,
+        &image,
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    );
+    let Err(UpdateError::Refused(reason)) = result else {
+        panic!("{result:?}");
+    };
+    assert!(
+        reason.contains("changed while the tool connected"),
+        "{reason}"
+    );
+    assert!(!bus.log().iter().any(|l| l.contains("ROM command 0x02")));
+}
+
+/// Plugs `stranger` in as the flashed unit comes back, so both are new on the next look.
+struct Stranger<'a> {
+    bus: &'a SimBus,
+    stranger: usize,
+}
+
+impl Progress for Stranger<'_> {
+    fn start(&mut self, step: Step, _total: u64) {
+        if step == Step::WaitForFirmware {
+            // The unit enumerates 1 s after the reset command, which came just before this.
+            self.bus
+                .plug_back_later(Duration::from_millis(990), self.stranger);
+        }
+    }
+}
+
+/// Where no device reports its port, the unit that comes back is the one new device, and two
+/// new devices are refused.
+#[test]
+fn without_ports_the_unit_back_is_taken_only_as_the_one_new_device() {
+    let bus = SimBus::scenario("isp").unwrap();
+    bus.set_locations(false);
+    let image = firmware_image(&ours("v0.3.0"));
+    let outcome = update::flash_now(
+        &bus,
+        &image,
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    )
+    .unwrap();
+    assert!(matches!(running(&outcome), Firmware::Ours(o) if o.build == "v0.3.0"));
+
+    // The stranger is the first unit on the bench, so it is listed first.
+    let bus = SimBus::default();
+    let stranger = bus.add_stock("3.172");
+    bus.unplug(stranger);
+    bus.add_bootloader(false);
+    bus.set_locations(false);
+    let result = update::flash_now(
+        &bus,
+        &image,
+        &Timing::default(),
+        &mut Stranger {
+            bus: &bus,
+            stranger,
+        },
+        &Cancel::new(),
+    );
+    assert!(
+        matches!(result, Err(UpdateError::Ambiguous { count: 2 })),
+        "{result:?}"
+    );
+}
+
+/// On Windows a bootloader that comes back to the same port keeps its instance. Seen gone, it is
+/// the unit back with its jumper; back too fast to be seen gone, it is still there at the end.
+#[test]
+fn where_a_bootloader_keeps_its_instance_the_jumper_is_still_seen() {
+    for (boot_after_reset, note) in [(1000, false), (100, true)] {
+        let bus = SimBus::default();
+        bus.set_stable_instances(true);
+        bus.add_bootloader(true);
+        bus.set_boot_after_reset(Duration::from_millis(boot_after_reset));
+        let image = firmware_image(&ours("v0.3.0"));
+        let mut steps = Steps::default();
+        let outcome =
+            update::flash_now(&bus, &image, &Timing::default(), &mut steps, &Cancel::new());
+        assert_eq!(
+            outcome.as_ref().ok(),
+            Some(&Outcome::JumperStillFitted),
+            "{boot_after_reset} ms: {outcome:?}"
+        );
+        assert_eq!(
+            steps.notes.iter().any(|n| n.contains("not seen to leave")),
+            note,
+            "{boot_after_reset} ms: {:?}",
+            steps.notes
+        );
+    }
+    // Without the jumper it comes back as a firmware, under an instance of its own.
+    let bus = SimBus::default();
+    bus.set_stable_instances(true);
+    bus.add_bootloader(false);
+    let outcome = update::flash_now(
+        &bus,
+        &firmware_image(&ours("v0.3.0")),
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    )
+    .unwrap();
+    assert!(matches!(running(&outcome), Firmware::Ours(o) if o.build == "v0.3.0"));
+}
