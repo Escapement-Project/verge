@@ -15,6 +15,11 @@ Ours comes from that repository's GitHub releases. Each release is signed, and t
 the signature and the checksums before it flashes anything. Stock comes from your own LinkServer
 install, since NXP's image is not ours to hand out.
 
+Ours is built for the plain MCU-Link only. Stock names its board in its USB product string, and
+ours names it in its identify reply. The tool refuses to put ours, a release or a file, on a unit
+that says it is another board, such as an MCU-Link Pro. Stock's own image can go on any of them.
+A unit in ISP mode cannot say which board it is, so `flash` cannot check it.
+
 ## Building
 
 In this directory:
@@ -57,6 +62,14 @@ asked for. It will not start a jumper-free update while anything sits in ISP mod
 For the same reason, the tool cannot tell an MCU-Link in ISP mode from any other LPC55S69 board
 in ISP mode. Before it flashes a unit that was in ISP mode already, its question says so.
 
+The bootloader can take a few seconds to answer, and the bus can change meanwhile. Once it
+answers, the tool looks again, and flashes only if it is still the one bootloader attached and
+the one it checked. On Linux it also opens that very device, by its path.
+
+After a flash the unit restarts, and the tool finds it again on the same USB port. Where the
+system reports no port, the tool takes the unit back only if it is the one new device. If two
+appear, it stops and says so.
+
 Ctrl-C stops at the next safe point. A unit stopped halfway through a write stays in ISP mode,
 and `verge flash` finishes the job.
 
@@ -78,14 +91,20 @@ verge batch --take isp --yes
 ```
 
 The image is a release, stock or a file, as for `update`. It is loaded once, when the batch is
-armed, and a release's signature is checked then. `--take` picks the kinds of unit: `stock`,
-`ours` and `isp`, with stock and ours the default. A unit running ours is taken when its build is
-older than the image or carries no version; `--ours-any` takes every build. Stock and a file
-carry no version of ours to compare with, so with those a unit running ours is taken only with
-`--ours-any`. A unit already running the image counts as current and is left as it is.
+armed, and a release's signature is checked then. Ctrl-C while it loads stops before anything
+is armed. `--take` picks the kinds of unit: `stock`, `ours` and `isp`, with stock and ours the
+default. A unit running ours is taken when its build is older than the image or carries no
+version; `--ours-any` takes every build. Stock and a file carry no version of ours to compare
+with, so with those a unit running ours is taken only with `--ours-any`. A unit already running
+the image counts as current and is left as it is.
 
 The batch takes only units plugged in after it is armed. `--include-attached` takes the ones
-attached already too.
+attached already too. A unit just plugged in gets a second to settle before the batch asks it
+what it runs, as during an update. If it cannot be opened, the batch tries again for a few
+polls more before it skips it.
+
+The board is the full MCU-Link, and the batch takes only units that say they are one. A unit in
+ISP mode cannot say, so `--take isp` takes any, and the question that arms the batch says so.
 
 Units go through the bootloader one at a time. One that arrives while another is being updated
 waits its turn, in the order they arrived. The batch pauses while anything in ISP mode is not the
@@ -96,33 +115,41 @@ A unit is taken once. Updated, failed, skipped or back in ISP mode with its jump
 left alone until it is unplugged. A failure does not stop the batch, but a unit left in ISP mode
 pauses it: unplug that unit, or flash it with `verge flash`.
 
-A finished unit blinks its LEDs until you unplug it, and the batch names its USB port. Each unit
+A finished unit blinks its LEDs until you unplug it, and the batch names its USB port. The LEDs
+blink only while the batch runs, so the unit that ends it is named without blinking. Each unit
 gets a line once the batch has settled it, and the batch ends with a tally:
 
 ```
 1-1      QK7RM2VTX8D41 -> CJ3E7A91C2  stock V3.172 -> ours, build v0.3.0  UPDATED in 4.7 s
 1-1      blinking: unplug it when you like
 1-3      CJ3E7AC4F5  ours, build v0.3.0  CURRENT
+1-3      blinking: unplug it when you like
 1-4      QK7RM2VTX8D45  stock V3.108  SKIPPED: needs the ISP jumper. Stock V3.108 has no jumper-free update. NXP added it in V3.122.
 Batch done: 1 updated, 1 current, 1 skipped, 0 failed, 0 waiting.
 ```
 
 Ctrl-C stops taking new units, and the unit under way finishes. A second Ctrl-C stops that unit
 at its next safe point, and a third quits. `--count N` stops once N units are updated. The batch
-exits with an error if any unit failed.
+exits with an error if any unit failed. Units still waiting for their turn when the batch stops
+get a line in the record too.
 
 The batch keeps a record, a file with one JSON object per line. `--record FILE` names it; it
-defaults to `verge-batch-<time>.jsonl` in the current directory. A line looks like this:
+defaults to `verge-batch-<time>.jsonl` in the current directory. A batch adds its lines to the
+end of a file that exists already. A line looks like this:
 
 ```
 {"time":"2026-10-20T14:34:58Z","port":"1-1","serial_before":"QK7RM2VTX8D41","firmware_before":"stock V3.172","serial_after":"CJ3E7A91C2","firmware_after":"ours, build v0.3.0","result":"updated","reason":null,"seconds":4.6795}
 ```
 
-`result` is `updated`, `jumper-fitted`, `current`, `skipped` or `failed`. `reason` says why for
-the last two.
+`result` is `updated`, `jumper-fitted`, `current`, `skipped`, `failed` or `waiting`. `reason`
+says why for the last three.
 
-The batch knows a unit by its USB port. A unit on a port that reports no location cannot be
-followed through its restart into the bootloader.
+The batch knows a unit by its USB port. A unit that reports no port cannot be followed through
+its restart into the bootloader, so while one is attached the batch pauses and says so.
+
+The batch notices a unit leave by looking while it is gone, every quarter of a second. On
+Windows a unit that comes back keeps the identity it had, so one unplugged and plugged back in
+between two looks counts as never having left.
 
 ### The window
 
@@ -140,7 +167,8 @@ the kinds of unit, whether to take the units attached now, a count to stop after
 file. The record goes in the directory the window was started from unless you name another.
 Once the batch is armed, the view shows the tally, the unit under way, the units waiting and a
 line for each unit settled. STOP stops taking new units. CANCEL THE UNIT UNDER WAY then stops
-that one at its next safe point.
+that one at its next safe point. STOP, or closing the window, while the image is still loading
+ends the batch at once, since nothing has been flashed.
 
 ### Releases
 
@@ -148,12 +176,15 @@ The tool looks for releases in `Escapement-Project/mculink-verge`, a placeholder
 repository is public. Point it elsewhere with `--repo OWNER/NAME` or `VERGE_REPO`. Public
 releases need no token. For a private repository, set `GITHUB_TOKEN`.
 
+A lookup or download that stalls fails with a message. The tool allows 15 seconds to connect,
+30 for GitHub to answer, and 60 for a download to finish.
+
 A release has to carry three assets:
 
 - exactly one `.s19` asset, the image as `objcopy -O srec` writes it;
 - a checksum file named after it with `.sha256` added, in `sha256sum`'s format;
 - a minisign signature named after it with `.minisig` added. Its trusted comment has to contain
-  `file:` followed by the image's name.
+  `file:` followed by the image's name, and `tag:` followed by the release's tag.
 
 For example `mculink-verge-v0.3.0.s19`, `mculink-verge-v0.3.0.s19.sha256` and
 `mculink-verge-v0.3.0.s19.minisig`. The tag is the version, and it is what a unit built from that
@@ -161,9 +192,10 @@ tag reports, so the tool can tell whether a unit is behind.
 
 The tool checks the signature against the public key built into it. It refuses a release with no
 signature, one signed with another key, and one changed after it was signed, and says which. The
-trusted comment is signed too, so naming the file there stops a signed image being published
-again under another tag. The tool also checks the image against the checksum file and against
-the digest GitHub keeps for every asset.
+trusted comment is signed too. Naming the file there stops a signed image being published under
+another name. Naming the tag stops an old image being published again as a newer release under
+its own name. The tool also checks the image against the checksum file and against the digest
+GitHub keeps for every asset.
 
 The key is `RELEASE_KEY` in `core/src/release.rs`, the base64 line of minisign's `.pub` file. It
 is not set yet, so this build installs no release. A file or stock still works. To make the pair:
@@ -173,27 +205,36 @@ minisign -G -W -p verge.pub -s verge.key
 ```
 
 `-W` leaves the secret key without a password, which the release workflow needs. Keep
-`verge.key` out of the repository; it goes into the workflow's secret, below. The second line of
-`verge.pub` goes into `RELEASE_KEY`.
+`verge.key` out of the repository; it goes into the workflow's environment, below. The second
+line of `verge.pub` goes into `RELEASE_KEY`.
 
 #### The release workflow
 
 The firmware repository's `.github/workflows/release.yml` publishes a release when a tag starting
-with `v` is pushed. It runs in an Arch Linux container, which has the same `arm-none-eabi-gcc` the
-firmware is built with. It installs that toolchain, CMake, Ninja, Python, uv, minisign and the
-GitHub CLI from Arch's packages. It fetches TinyUSB's NXP dependencies, builds the firmware, and
-runs `ninja -C build check`. Then it writes the three assets and attaches them to the tag's
-release, creating the release if there is none.
+with `v` is pushed. It has three jobs, so that the secret key never sits on a machine that ran
+code the build fetched.
 
-It needs:
+- `build` runs in an Arch Linux container, which has the same `arm-none-eabi-gcc` the firmware
+  is built with. It installs that toolchain, CMake, Ninja, Python and uv from Arch's packages.
+  It fetches TinyUSB's NXP dependencies, builds the firmware, runs `ninja -C build check`, and
+  writes the image and its checksum. It has no secret.
+- `sign` installs minisign from Ubuntu's packages and signs the image. It runs in the `release`
+  environment, so it waits for a reviewer's approval and is the only job that sees the key.
+- `publish` attaches the three files to the tag's release, creating the release if there is
+  none. It has no secret either.
 
-- the repository secret `MINISIGN_SECRET_KEY`, holding the whole of `verge.key`. Without it the
-  workflow fails rather than publish an unsigned image;
-- optionally, the repository variable `MINISIGN_PUBLIC_KEY`, holding the second line of
-  `verge.pub`. When it is set, the workflow checks the signature before it uploads anything;
-- permission to write the repository's contents, which the workflow asks for itself.
+The `release` environment (the repository's Settings, Environments) needs:
 
-The workflow has never run, and cannot until the firmware repository is published.
+- at least one required reviewer, who approves each signing;
+- the environment secret `MINISIGN_SECRET_KEY`, holding the whole of `verge.key`. Keep it out of
+  the repository's own secrets, where any job could ask for it. Without it the workflow fails
+  rather than publish an unsigned image;
+- optionally, the variable `MINISIGN_PUBLIC_KEY`, holding the second line of `verge.pub`. When it
+  is set, the workflow checks the signature before it leaves the signing job;
+- ideally, deployments limited to tags matching `v*`, so that no other ref can reach the key.
+
+The workflow asks for permission to write the repository's contents in `publish` only. It has
+never run, and cannot until the firmware repository is published.
 
 To make the assets by hand instead:
 
@@ -234,7 +275,8 @@ sequence, image reading, release lookup and the batch. `cli` is the command line
 It leans on established crates:
 
 - `rblhost`, NXP's own Rust client for the ROM bootloader's protocol. LinkServer ships the same
-  version as its `rblhost` tool.
+  version as its `rblhost` tool. Its USB transport opens the first device with the bootloader's
+  ID, so the tool gives it a transport of its own over `hidapi` that opens the device it chose.
 - `nusb` for USB, the same crate probe-rs uses.
 - `srec` and `object` to read S-records and ELF files.
 - `ureq`, `serde_json` and `sha2` for releases, `minisign-verify` for their signatures, `clap` for
@@ -281,9 +323,10 @@ cargo run -p verge -- --simulate arrivals batch --yes --count 3
 ```
 
 The scenarios are `bench`, `ours`, `stock`, `stock-old`, `stock-hid`, `isp`, `isp-jumper`,
-`two-isp`, `mini`, `isp-mini`, `busy` and `arrivals`. In `arrivals`, five units are plugged in
-over the first eight seconds. A simulated unit boots only the simulator's own images. A real
-image flashed there, such as stock from your LinkServer install, leaves the unit silent.
+`two-isp`, `mini`, `isp-mini`, `busy`, `arrivals` and `pro`. In `arrivals`, five units are plugged
+in over the first eight seconds. In `pro`, the one unit is an MCU-Link Pro. A simulated unit
+boots only the simulator's own images. A real image flashed there, such as stock from your
+LinkServer install, leaves the unit silent.
 
 The window's tests drive it headless through `egui_kittest`, against the same bench. One more
 renders every state to PNG, which needs a GPU:
