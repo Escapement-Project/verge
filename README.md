@@ -70,7 +70,11 @@ verge release               # the latest release, and how each unit compares
 verge inspect image.s19     # what an image puts into flash; touches no USB device
 ```
 
-`update` asks before it flashes. Pass `--yes` to skip the question, for example in a script.
+`update` asks before it downloads a release, and names the repository, the tag and the size.
+It asks again before it flashes. Pass `--yes` to skip both questions, for example in a script.
+Without `--yes`, and without a terminal to answer at, nothing is downloaded. `flash` asks the
+same two questions. A release downloaded once is kept, and needs no download question the next
+time (see "Releases").
 
 `update` refuses to install a release the unit already runs, or one older than it. Pass
 `--force` to install it anyway.
@@ -108,7 +112,8 @@ comes before the unit is asked for its bootloader leaves it as it was.
 
 `verge batch` is for a delivery of probes. Choose the image and the units it takes, answer one
 question, then plug units in one after another or several on a hub. Each unit the batch takes is
-updated without another question.
+updated without another question. Where the release has to be downloaded first, the one question
+says so.
 
 ```
 # The latest release, onto stock and older builds of ours
@@ -214,9 +219,10 @@ right side shows what it runs, the way it can be updated, and the image to insta
 release, the stock image from LinkServer, or a file. A file can also be dropped on the window,
 except under Wayland, which does not pass dropped files on; use FILE and its dialog there.
 
-The window asks before it flashes. While a unit is being written, it shows each step and the
-bytes so far, and it will not close until the update finishes. CANCEL stops it at the next safe
-point instead. The log along the bottom shows what the tool did; SHOW opens it.
+The window asks before it flashes. Where the release has to be downloaded first, the same
+question says so, and so does the batch view's. While a unit is being written, the window shows
+each step and the bytes so far, and it will not close until the update finishes. CANCEL stops it
+at the next safe point instead. The log along the bottom shows what the tool did; SHOW opens it.
 
 A file is checked against the unit's board as soon as it is picked. A release says which boards
 it is for only once it is downloaded, so on a board it does not declare, the update stops there,
@@ -241,6 +247,18 @@ releases need no token. For a private repository, set `GITHUB_TOKEN`.
 
 A lookup or download that stalls fails with a message. The tool allows 15 seconds to connect,
 30 for GitHub to answer, and 60 for a download to finish.
+
+A release, once downloaded, is kept in your cache directory: `~/.cache/verge` on Linux,
+`~/Library/Caches/verge` on macOS and `%LOCALAPPDATA%\verge` on Windows. So the `verge flash`
+that `verge update` sends you to does not download the image again. A kept release is checked
+every time it is used, as a fresh download is: its signature, its checksum file, and GitHub's
+digest of the image where GitHub reports one. One that fails is deleted. The tool asks before it
+downloads the release again, as it does for a release it cannot read from the cache. Deleting the
+cache is always safe.
+
+Looking a release up still needs GitHub, even for one that is kept. GitHub says which release is
+the latest, and its digest of the image is what a kept copy is checked against. When GitHub
+cannot be reached, the tool says so, rather than fall back to a release it kept.
 
 A release has to carry three assets:
 
@@ -328,8 +346,8 @@ It leans on established crates:
 - `srec` and `object` to read S-records and ELF files.
 - `ureq`, `serde_json` and `sha2` for releases, `minisign-verify` for their signatures, `clap` for
   the command line, and `tracing` with `tracing-indicatif` for logs and progress.
-- `eframe` and `egui` for the window, `rfd` for its file dialog, `dirs` for its data directory,
-  and `egui_kittest` to test it.
+- `dirs` for the cache and data directories.
+- `eframe` and `egui` for the window, `rfd` for its file dialog, and `egui_kittest` to test it.
 
 The window's fonts are IBM Plex and Kode Mono, under the SIL Open Font License; `gui/fonts/` has
 them with their licences and where each came from. The window's LICENCES button shows the licence
@@ -366,7 +384,8 @@ key is stored anywhere. One more test checks a signature that the minisign comma
 taken from `minisign-verify`'s documentation.
 
 The command line runs against the same bench with `--simulate`, which is handy while working on
-the tool:
+the tool. A simulated run keeps no releases, since the fake GitHub's key is new every run, so it
+asks before every download:
 
 ```
 cargo run -p verge --features simulate -- --simulate bench
