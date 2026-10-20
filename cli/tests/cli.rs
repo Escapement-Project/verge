@@ -368,3 +368,324 @@ fn ours_is_refused_for_a_pro() {
         .stderr(predicate::str::contains("the unit is an MCU-Link Pro"))
         .stderr(predicate::str::contains("with --stock"));
 }
+
+/// A simulated image of ours in a file of its own, declaring `boards` where they are given.
+fn sim_image(name: &str, boards: Option<u32>) -> PathBuf {
+    use verge_core::sim::{SimFirmware, firmware_srecord, firmware_srecord_declaring};
+    let ours = SimFirmware::Ours {
+        build: "v0.3.0".into(),
+    };
+    let text = match boards {
+        Some(boards) => firmware_srecord_declaring(&ours, boards),
+        None => firmware_srecord(&ours),
+    };
+    let path = std::env::temp_dir().join(format!("verge-cli-{}-{name}.s19", std::process::id()));
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+/// A LinkServer-like directory holding the simulator's stock image of `version`.
+fn sim_stock_dir(name: &str, version: &str) -> PathBuf {
+    use verge_core::sim::{SimFirmware, firmware_srecord};
+    let dir = std::env::temp_dir().join(format!("verge-cli-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(format!(
+            "MCU-LINK_CMSIS-DAP_V{}.s19",
+            version.replace('.', "_")
+        )),
+        firmware_srecord(&SimFirmware::Stock {
+            version: verge_core::version::StockVersion::parse(version).unwrap(),
+        }),
+    )
+    .unwrap();
+    dir
+}
+
+/// The second review's proof, at the command line: `verge bootloader` on a Pro, then `verge
+/// flash` as it advised, put ours on the Pro, since a unit in ISP mode cannot say which board it
+/// is. The check is made before the unit goes into ISP mode.
+#[test]
+fn bootloader_sends_a_pro_into_isp_mode_only_for_stock() {
+    tool("pro")
+        .arg("bootloader")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("the unit is an MCU-Link Pro"))
+        .stderr(predicate::str::contains(
+            "run `verge bootloader --stock`, then `verge flash --stock`",
+        ));
+    tool("pro")
+        .args(["bootloader", "--stock"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "The unit, an MCU-Link Pro, is in ISP mode at 1-1. Flash it with `verge flash --stock`.",
+        ));
+    tool("stock")
+        .arg("bootloader")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "The unit, a full MCU-Link, is in ISP mode at 1-1, where the tool cannot tell its board. Flash it with `verge flash` and an image built for a full MCU-Link",
+        ));
+}
+
+#[test]
+fn list_names_each_units_board() {
+    for (scenario, board) in [
+        ("bench", "board: a full MCU-Link"),
+        ("pro", "board: an MCU-Link Pro"),
+        ("isp", "board: cannot be told in ISP mode"),
+        ("unnamed-board", "board: not reported"),
+        ("mini", "board: an MCU-Link mini"),
+    ] {
+        tool(scenario)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(board));
+    }
+}
+
+/// A running unit that does not say which board it is gets ours only after a question that says
+/// so, answered at a terminal. Stock's own image needs no such answer.
+#[test]
+fn a_unit_that_names_no_board_needs_an_answer_at_a_terminal() {
+    tool("unnamed-board")
+        .args(["update", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "This unit's firmware does not say which board it is",
+        ))
+        .stderr(predicate::str::contains("--yes does not answer that"));
+    tool("unnamed-board")
+        .arg("update")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "so the tool cannot check that the image is built for it.",
+        ))
+        .stderr(predicate::str::contains("Only an answer at a terminal"));
+    let dir = sim_stock_dir("unnamed-stock", "3.172");
+    tool("unnamed-board")
+        .args(["update", "--yes", "--stock"])
+        .arg(&dir)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("now runs stock V3.172"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `flash` cannot tell the board in ISP mode, so its question says which boards the image is for.
+#[test]
+fn flash_says_which_boards_the_image_is_built_for() {
+    for (name, boards, built_for) in [
+        (
+            "flash-plain",
+            None,
+            "The image is built for the full MCU-Link only.",
+        ),
+        (
+            "flash-pro",
+            Some(0b10),
+            "The image is built for the MCU-Link Pro only.",
+        ),
+        (
+            "flash-both",
+            Some(0b11),
+            "The image is built for the full MCU-Link and the MCU-Link Pro.",
+        ),
+    ] {
+        let image = sim_image(name, boards);
+        tool("isp")
+            .args(["flash", "--file"])
+            .arg(&image)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(built_for))
+            .stderr(predicate::str::contains("Pass --yes"));
+        std::fs::remove_file(&image).unwrap();
+    }
+}
+
+#[test]
+fn inspect_says_which_boards_an_image_declares() {
+    let image = sim_image("inspect-pro", Some(0b10));
+    Command::cargo_bin("verge")
+        .unwrap()
+        .arg("inspect")
+        .arg(&image)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "declares, at 0x00000130 in format 1, that it runs on the MCU-Link Pro only (boards 0x00000002)",
+        ));
+    std::fs::remove_file(&image).unwrap();
+    Command::cargo_bin("verge")
+        .unwrap()
+        .arg("inspect")
+        .arg(fixture("layout.elf"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "declares no boards: as an image of ours, it goes on the full MCU-Link only",
+        ));
+}
+
+/// Stock's image or a file carries no version of ours, so a batch that takes ours older than the
+/// image does not arm with one. A newer stock than the units run, and a count, end the batch if
+/// it arms anyway, rather than leave it waiting for units forever.
+#[test]
+fn a_batch_that_cannot_date_ours_does_not_arm() {
+    let dir = sim_stock_dir("batch-stock", "3.200");
+    let record = temp_record("undated");
+    tool("arrivals")
+        .args(["batch", "--yes", "--count", "1", "--stock"])
+        .arg(&dir)
+        .arg("--record")
+        .arg(&record)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "the image carries no version of ours",
+        ))
+        .stderr(predicate::str::contains("Pass --ours-any"));
+    assert!(!record.exists());
+    // Without ours it arms, and asks.
+    tool("arrivals")
+        .args(["batch", "--take", "stock", "--stock"])
+        .arg(&dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "onto every full MCU-Link running stock, attached from now on?",
+        ))
+        .stderr(predicate::str::contains("Pass --yes"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A Pro attached and a count end the batch if it arms anyway, with ours on the Pro.
+#[test]
+fn a_batch_for_the_pro_needs_an_image_built_for_it() {
+    let record = temp_record("pro");
+    tool("pro")
+        .args([
+            "batch",
+            "--yes",
+            "--board",
+            "mcu-link-pro",
+            "--include-attached",
+            "--count",
+            "1",
+            "--record",
+        ])
+        .arg(&record)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "the batch takes the MCU-Link Pro, and the image is built for the full MCU-Link only",
+        ));
+    assert!(!record.exists());
+    let image = sim_image("batch-pro", Some(0b10));
+    tool("arrivals")
+        .args(["batch", "--board", "mcu-link-pro", "--ours-any", "--file"])
+        .arg(&image)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "onto every MCU-Link Pro running stock or ours, attached from now on?",
+        ))
+        .stderr(predicate::str::contains("Pass --yes"));
+    std::fs::remove_file(&image).unwrap();
+}
+
+/// The third review's proof: a Pro whose stock has no jumper-free update. The latest release
+/// declares nothing, so it is for the full MCU-Link only, and `update` refuses it as it would on
+/// the jumper-free path, rather than send the user to a plain `verge flash`.
+#[test]
+fn update_on_a_pro_needing_the_jumper_does_not_advise_a_plain_flash() {
+    let output = tool("pro-old").args(["update", "--yes"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(
+        !stderr.contains("run `verge flash`"),
+        "advises a flash of ours on a known Pro: {stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "the unit is an MCU-Link Pro, and this image is built for the full MCU-Link only"
+        ),
+        "{stderr}"
+    );
+}
+
+/// For an image that is built for the board, the jumper advice names it and the board, since
+/// nothing can check the board once the unit is in ISP mode.
+#[test]
+fn the_jumper_advice_names_the_image_and_the_board() {
+    let image = sim_image("jumper-pro", Some(0b10));
+    tool("pro-old")
+        .args(["update", "--yes", "--file"])
+        .arg(&image)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(format!(
+            "run `verge flash --file {}`",
+            image.display()
+        )))
+        .stderr(predicate::str::contains(
+            "that image is the one checked for this unit, an MCU-Link Pro",
+        ));
+    std::fs::remove_file(&image).unwrap();
+    let dir = sim_stock_dir("jumper-stock", "3.172");
+    tool("pro-old")
+        .args(["update", "--yes", "--stock"])
+        .arg(&dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(format!(
+            "run `verge flash --stock {}`",
+            dir.display()
+        )));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// After an update fails mid-flash, the advice flashes the same image again, and names the
+/// board the unit said it was before it went into ISP mode.
+#[test]
+fn a_failed_update_says_how_to_flash_the_same_image_again() {
+    tool("fails-writes")
+        .args(["update", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "The unit, a full MCU-Link, may be in ISP mode with a partial image",
+        ))
+        .stderr(predicate::str::contains("`verge flash --release v0.3.0`"));
+}
+
+/// `verge bootloader` refused on another board says the whole of what to do instead.
+#[test]
+fn bootloader_on_a_pro_says_how_to_put_ours_on_it() {
+    tool("pro")
+        .arg("bootloader")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "To put an image of ours built for it on it, run `verge update --file IMAGE` instead, which checks that the image declares this board before anything is flashed",
+        ));
+}
+
+/// A batch that cannot date ours is refused before its image is looked for.
+#[test]
+fn a_batch_that_cannot_date_ours_is_refused_before_loading() {
+    tool("arrivals")
+        .args(["batch", "--yes", "--stock", "/nonexistent/probe_firmware"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "the image carries no version of ours",
+        ))
+        .stderr(predicate::str::contains("no MCU-LINK_CMSIS-DAP_V*.s19").not());
+}

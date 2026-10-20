@@ -12,9 +12,11 @@ use tracing_subscriber::filter::{EnvFilter, filter_fn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use verge_core::batch::{
-    Armed, Batch, Board, Entry, Filter, Observer, OursFilter, Record, StockFilter, open_record,
+    ArmError, Armed, Batch, Board, Entry, Filter, Observer, OursFilter, Record, StockFilter,
+    open_record,
 };
-use verge_core::detect::{Guess, State};
+use verge_core::board;
+use verge_core::detect::{Guess, Hardware, State};
 use verge_core::image::{Image, PAGE};
 use verge_core::paths::ISP_IDENTITY_WARNING;
 use verge_core::progress::{Progress, Step};
@@ -23,7 +25,7 @@ use verge_core::release::{DEFAULT_REPO, GitHub, Http, Repo, Ureq};
 use verge_core::sim::http::SimHttp;
 #[cfg(feature = "simulate")]
 use verge_core::sim::{SCENARIOS, SimBus};
-use verge_core::source::{self, LoadError};
+use verge_core::source::{self, LoadError, Loaded};
 use verge_core::update::{self, Outcome, Timing, UpdateError};
 use verge_core::usb::UsbBus;
 use verge_core::version::Relation;
@@ -104,10 +106,17 @@ enum Command {
     /// in the record file.
     Batch(BatchArgs),
     /// Restart a unit into its ROM bootloader without the jumper, and leave it there.
+    ///
+    /// In ISP mode a unit cannot say which board it is, so `verge flash` cannot check that an
+    /// image of ours is built for it. A unit known to be another board than the full MCU-Link is
+    /// restarted only with --stock.
     Bootloader {
         /// The unit to restart, when more than one is attached.
         #[arg(long)]
         serial: Option<String>,
+        /// You mean to flash NXP's stock image next, which goes on any board.
+        #[arg(long)]
+        stock: bool,
     },
     /// Show a release of ours and how each attached unit compares to it.
     Release {
@@ -166,6 +175,8 @@ enum Take {
 enum BoardArg {
     /// The full MCU-Link.
     McuLink,
+    /// The MCU-Link Pro. An image of ours has to declare it.
+    McuLinkPro,
 }
 
 #[derive(Args)]
@@ -310,7 +321,7 @@ fn simulated(_: &Cli, _: &Cancel, _: &Cancel) -> Option<Result<()>> {
     None
 }
 
-fn run<B: Bus, H: Http>(
+fn run<B: Bus + Sync, H: Http>(
     cli: &Cli,
     bus: &B,
     github: &GitHub<H>,
@@ -322,7 +333,9 @@ fn run<B: Bus, H: Http>(
         None | Some(Command::List) => list(bus, cli.verbose > 0),
         Some(Command::Update(args)) => update_unit(bus, github, args, cancel),
         Some(Command::Flash(args)) => flash(bus, github, args, cancel),
-        Some(Command::Bootloader { serial }) => bootloader(bus, serial.as_deref(), cancel),
+        Some(Command::Bootloader { serial, stock }) => {
+            bootloader(bus, serial.as_deref(), *stock, cancel)
+        }
         Some(Command::Release { tag }) => release(bus, github, tag.as_deref()),
         Some(Command::Inspect { file }) => inspect(file),
     }
@@ -347,6 +360,12 @@ fn list<B: Bus>(bus: &B, verbose: bool) -> Result<()> {
     }
     for unit in &units {
         indicatif_println!("{}", describe_unit(unit));
+        let board = match (&unit.state, unit.hardware()) {
+            (State::Bootloader, _) => "cannot be told in ISP mode".to_owned(),
+            (_, Hardware::Unknown) => "not reported".to_owned(),
+            (_, board) => board.to_string(),
+        };
+        indicatif_println!("{:<10}board: {board}", "");
         if verbose && let State::Probe { identity, firmware } = &unit.state {
             let field = |name: &str, value: Option<&str>| {
                 indicatif_println!("{:<10}{name:<13} {}", "", value.unwrap_or("-"));
@@ -397,9 +416,9 @@ fn load<H: Http>(
     github: &GitHub<H>,
     unit: Option<&Unit>,
     force: bool,
-) -> Result<(Image, String)> {
+) -> Result<Loaded> {
     match source::load(&source.to_core(), github, unit, force, &mut Bars::default()) {
-        Ok(loaded) => Ok((loaded.image, loaded.name)),
+        Ok(loaded) => Ok(loaded),
         Err(error @ LoadError::AlreadyRuns { .. }) => {
             bail!("{error}. Pass --force to flash it again")
         }
@@ -407,7 +426,9 @@ fn load<H: Http>(
             bail!("{error}. Pass --force to install the release anyway")
         }
         Err(error @ LoadError::NoStock { .. }) => bail!("{error} with --stock DIR"),
-        Err(error @ LoadError::OtherBoard { .. }) => bail!("{error} with --stock"),
+        Err(error @ (LoadError::OtherBoard { .. } | LoadError::NotForBoard { .. })) => {
+            bail!("{error} with --stock")
+        }
         Err(LoadError::Release(error)) => Err(anyhow::Error::new(error))
             .with_context(|| format!("looking up releases of ours in {}", github.repo())),
         Err(error) => Err(error.into()),
@@ -421,6 +442,18 @@ fn confirm(question: &str, yes: bool) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         bail!("{question} Pass --yes to go ahead without being asked");
     }
+    ask(question)
+}
+
+/// Asks at a terminal, for a question `--yes` does not answer.
+fn confirm_at_terminal(question: &str) -> Result<()> {
+    if !std::io::stdin().is_terminal() {
+        bail!("{question} Only an answer at a terminal says yes to this; --yes does not");
+    }
+    ask(question)
+}
+
+fn ask(question: &str) -> Result<()> {
     let go = dialoguer::Confirm::new()
         .with_prompt(question)
         .default(false)
@@ -429,6 +462,18 @@ fn confirm(question: &str, yes: bool) -> Result<()> {
         bail!("nothing was flashed");
     }
     Ok(())
+}
+
+/// The boards an image of ours is built for, as a sentence. `None` for stock's own image, which
+/// goes on any board.
+fn built_for(image: &Image, stock: bool) -> Result<Option<String>> {
+    if stock {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "The image is built for {}.",
+        board::built_for(&image.boards()?)
+    )))
 }
 
 fn report(outcome: &Outcome) {
@@ -441,6 +486,10 @@ fn report(outcome: &Outcome) {
         ),
         Outcome::JumperStillFitted => indicatif_println!(
             "Flashed. The unit came back in ISP mode, so the jumper is still fitted: unplug it, take the jumper off, and plug it back in."
+        ),
+        Outcome::NotRestarted { maybe_jumper } => indicatif_println!(
+            "Flashed and verified, but the unit is still in ISP mode: {}. Then it starts the new image.",
+            update::not_restarted(*maybe_jumper)
         ),
     }
 }
@@ -475,27 +524,70 @@ fn update_unit<B: Bus, H: Http>(
         );
     };
     if path == Path::Jumper {
+        // Loaded first, so that a known board is refused here as on the jumper-free path, and the
+        // advice names an image checked for it.
+        let loaded = load(&args.source, github, Some(unit), args.force)?;
+        let again = source::flash_command(&args.source.to_core(), &loaded.version);
         bail!(
-            "this unit has no jumper-free update. {} To use the jumper: unplug the unit, fit the ISP jumper, plug it back in, and run `verge flash`",
-            offer.notes.join(" ")
+            "this unit cannot be updated without the jumper now. {} To use the jumper: unplug the unit, fit the ISP jumper, plug it back in, and run `{again}`. {}",
+            offer.notes.join(" "),
+            in_isp_mode(unit)
         );
     }
-    let (image, name) = load(&args.source, github, Some(unit), args.force)?;
-    log_image(&image);
+    let stock = args.source.stock.is_some();
+    let unknown = source::board_unknown(unit).filter(|_| !stock);
+    if let Some(unknown) = unknown
+        && args.yes
+    {
+        bail!(
+            "{unknown} The tool asks before putting ours on such a unit, and --yes does not answer that: run it without --yes, at a terminal"
+        );
+    }
+    let loaded = load(&args.source, github, Some(unit), args.force)?;
+    let (image, name) = (&loaded.image, &loaded.name);
+    log_image(image);
     let target = unit.serial().unwrap_or("the unit in ISP mode");
     let mut question = format!("Flash {name} onto {target}, {path}?");
+    if (path == Path::FlashNow || unknown.is_some())
+        && let Some(built_for) = built_for(image, stock)?
+    {
+        question = format!("{built_for} {question}");
+    }
     if path == Path::FlashNow {
         question = format!("{ISP_IDENTITY_WARNING} {question}");
         if args.yes {
             tracing::warn!("{ISP_IDENTITY_WARNING} Flashing it, as --yes says.");
         }
     }
-    confirm(&question, args.yes)?;
+    match unknown {
+        Some(unknown) => confirm_at_terminal(&format!("{unknown} {question}"))?,
+        None => confirm(&question, args.yes)?,
+    }
     let mut bars = Bars::default();
-    let outcome = update::install(bus, unit, &image, &Timing::default(), &mut bars, cancel);
+    let outcome = update::install(
+        bus,
+        unit,
+        loaded.payload(),
+        &Timing::default(),
+        &mut bars,
+        cancel,
+        cancel,
+    );
     drop(bars);
-    report(&outcome.map_err(explain)?);
+    let again = source::flash_command(&args.source.to_core(), &loaded.version);
+    report(&outcome.map_err(|error| explain(error, &again, Some(unit)))?);
     Ok(())
+}
+
+/// What to know about flashing `unit` once it is in ISP mode, where nothing tells its board.
+fn in_isp_mode(unit: &Unit) -> String {
+    match unit.hardware() {
+        Hardware::Board(board) => format!(
+            "In ISP mode the tool cannot tell which board a unit is: that image is the one checked for this unit, {}.",
+            board.a()
+        ),
+        _ => "In ISP mode the tool cannot tell which board a unit is, and this unit's firmware did not say either: check that the image is built for it.".to_owned(),
+    }
 }
 
 fn flash<B: Bus, H: Http>(
@@ -505,20 +597,27 @@ fn flash<B: Bus, H: Http>(
     cancel: &Cancel,
 ) -> Result<()> {
     let rom = update::only_bootloader(&bus.devices()?)?;
-    let (image, name) = load(&args.source, github, None, true)?;
-    log_image(&image);
+    let loaded = load(&args.source, github, None, true)?;
+    let (image, name) = (&loaded.image, &loaded.name);
+    log_image(image);
     let location = rom.location.as_deref().unwrap_or("?");
+    let built_for = built_for(image, args.source.stock.is_some())?
+        .map(|sentence| format!("{sentence} "))
+        .unwrap_or_default();
     if args.yes {
-        tracing::warn!("{ISP_IDENTITY_WARNING} Flashing it, as --yes says.");
+        tracing::warn!("{ISP_IDENTITY_WARNING} {built_for}Flashing it, as --yes says.");
     }
     confirm(
-        &format!("{ISP_IDENTITY_WARNING} Flash {name} onto the unit in ISP mode at {location}?"),
+        &format!(
+            "{ISP_IDENTITY_WARNING} {built_for}Flash {name} onto the unit in ISP mode at {location}?"
+        ),
         args.yes,
     )?;
     let mut bars = Bars::default();
-    let outcome = update::flash_now(bus, &image, &Timing::default(), &mut bars, cancel);
+    let outcome = update::flash_now(bus, image, &Timing::default(), &mut bars, cancel);
     drop(bars);
-    report(&outcome.map_err(explain)?);
+    let again = source::flash_command(&args.source.to_core(), &loaded.version);
+    report(&outcome.map_err(|error| explain(error, &again, None))?);
     Ok(())
 }
 
@@ -604,7 +703,7 @@ impl Observer for BatchOutput {
     }
 }
 
-fn batch<B: Bus, H: Http>(
+fn batch<B: Bus + Sync, H: Http>(
     bus: &B,
     github: &GitHub<H>,
     args: &BatchArgs,
@@ -628,31 +727,39 @@ fn batch<B: Bus, H: Http>(
     let filter = Filter {
         board: match args.board {
             BoardArg::McuLink => Board::McuLink,
+            BoardArg::McuLinkPro => Board::McuLinkPro,
         },
         stock,
         ours,
         bootloaders: args.take.contains(&Take::Isp),
         attached: args.include_attached,
     };
-    let (image, name, version) = match source::load(
-        &args.source.to_core(),
-        github,
-        None,
-        true,
-        &mut Bars::default(),
-    ) {
-        Ok(loaded) => (loaded.image, loaded.name, loaded.version),
-        Err(LoadError::Release(error)) => {
-            return Err(anyhow::Error::new(error))
-                .with_context(|| format!("looking up releases of ours in {}", github.repo()));
-        }
-        Err(error) => return Err(error.into()),
-    };
+    let core_source = args.source.to_core();
+    filter
+        .check_source(&core_source)
+        .map_err(|error| arm_refusal(&error))?;
+    let (image, name, version) =
+        match source::load(&core_source, github, None, true, &mut Bars::default()) {
+            Ok(loaded) => (loaded.image, loaded.name, loaded.version),
+            Err(LoadError::Release(error)) => {
+                return Err(anyhow::Error::new(error))
+                    .with_context(|| format!("looking up releases of ours in {}", github.repo()));
+            }
+            Err(error) => return Err(error.into()),
+        };
     if stop.is_cancelled() {
         indicatif_println!("Stopped before the batch was armed. Nothing was flashed.");
         return Ok(());
     }
-    log_image(&image);
+    let armed = Armed {
+        image,
+        name,
+        version,
+        source: core_source,
+    };
+    armed.check(&filter).map_err(|error| arm_refusal(&error))?;
+    let Armed { image, name, .. } = &armed;
+    log_image(image);
     let path = args.record.clone().unwrap_or_else(|| {
         let stamp = humantime::format_rfc3339_seconds(std::time::SystemTime::now())
             .to_string()
@@ -681,11 +788,6 @@ fn batch<B: Bus, H: Http>(
         filter.describe(),
         path.display()
     );
-    let armed = Armed {
-        image,
-        name,
-        version,
-    };
     let mut batch = Batch::arm(
         bus,
         armed,
@@ -694,7 +796,7 @@ fn batch<B: Bus, H: Http>(
         stop.clone(),
         cancel.clone(),
         args.count,
-    );
+    )?;
     batch.run_to_end(&mut output)?;
     let tally = batch.tally();
     indicatif_println!("Batch done: {tally}.");
@@ -708,17 +810,48 @@ fn batch<B: Bus, H: Http>(
     Ok(())
 }
 
-fn bootloader<B: Bus>(bus: &B, serial: Option<&str>, cancel: &Cancel) -> Result<()> {
+/// Why a batch did not arm, with the flags that change it.
+fn arm_refusal(error: &ArmError) -> anyhow::Error {
+    match error {
+        ArmError::OursUndated => anyhow::anyhow!(
+            "{error}. Pass --ours-any to take every unit running ours, or leave ours out, as with --take stock"
+        ),
+        ArmError::NotForBoard { .. } => anyhow::anyhow!(
+            "{error}. Pick an image of ours built for it, or NXP's stock image with --stock"
+        ),
+        ArmError::Image(_) => anyhow::anyhow!("{error}"),
+    }
+}
+
+fn bootloader<B: Bus>(bus: &B, serial: Option<&str>, stock: bool, cancel: &Cancel) -> Result<()> {
     let units = detect(bus).context("looking for MCU-Links")?;
     let unit = update::select(&units, serial)?;
+    if let Err(refused) = update::check_entry(unit, stock) {
+        bail!(
+            "{refused}. To put NXP's stock image on it, run `verge bootloader --stock`, then `verge flash --stock`. To put an image of ours built for it on it, run `verge update --file IMAGE` instead, which checks that the image declares this board before anything is flashed"
+        );
+    }
     let mut bars = Bars::default();
-    let rom = update::enter_bootloader(bus, unit, &Timing::default(), &mut bars, cancel)
-        .map_err(explain)?;
+    let rom = update::enter_bootloader(bus, unit, stock, &Timing::default(), &mut bars, cancel)?;
     drop(bars);
-    indicatif_println!(
-        "The unit is in ISP mode at {}. Flash it with `verge flash`.",
-        rom.location.as_deref().unwrap_or("?")
-    );
+    let at = rom.location.as_deref().unwrap_or("?");
+    match unit.hardware() {
+        Hardware::Board(board) if stock => indicatif_println!(
+            "The unit, {}, is in ISP mode at {at}. Flash it with `verge flash --stock`.",
+            board.a()
+        ),
+        Hardware::Board(board) => indicatif_println!(
+            "The unit, {}, is in ISP mode at {at}, where the tool cannot tell its board. Flash it with `verge flash` and an image built for {}: the question names the boards the image is for.",
+            board.a(),
+            board.a()
+        ),
+        _ if stock => indicatif_println!(
+            "The unit is in ISP mode at {at}. Flash it with `verge flash --stock`."
+        ),
+        _ => indicatif_println!(
+            "The unit is in ISP mode at {at}. Its firmware did not say which board it is, so check that an image is built for it before you flash it with `verge flash`."
+        ),
+    }
     Ok(())
 }
 
@@ -790,6 +923,19 @@ fn inspect(file: &FsPath) -> Result<()> {
         runs.len()
     );
     indicatif_println!("  sha256 {}", image.sha256_hex());
+    match image.declaration() {
+        Ok(Some(declaration)) => indicatif_println!(
+            "  declares, at 0x{:08x} in format {}, that it runs on {} (boards 0x{:08x})",
+            declaration.address,
+            declaration.format,
+            board::built_for(&image.boards()?),
+            declaration.boards
+        ),
+        Ok(None) => indicatif_println!(
+            "  declares no boards: as an image of ours, it goes on the full MCU-Link only"
+        ),
+        Err(_) => {}
+    }
     match image.check_for_mculink() {
         Ok(()) => indicatif_println!("  fits this part's flash and has a vector table"),
         Err(error) => indicatif_println!("  will not be flashed: {error}"),
@@ -798,13 +944,24 @@ fn inspect(file: &FsPath) -> Result<()> {
 }
 
 /// Adds what the user can do next to the errors that can leave a unit in ISP mode or away.
-fn explain(error: UpdateError) -> anyhow::Error {
+///
+/// `again` is the command that flashes the same image, and `unit` the unit as it was before, where
+/// it was running, to name its board.
+fn explain(error: UpdateError, again: &str, unit: Option<&Unit>) -> anyhow::Error {
     let next = match &error {
-        UpdateError::Isp(_) | UpdateError::Cancelled | UpdateError::RomSilent { .. } => Some(
-            "The unit may be in ISP mode with a partial image. `verge flash` flashes it again.",
-        ),
+        UpdateError::Isp(_) | UpdateError::Cancelled | UpdateError::RomSilent { .. } => {
+            Some(match unit.map(Unit::hardware) {
+                Some(Hardware::Board(board)) => format!(
+                    "The unit, {}, may be in ISP mode with a partial image. There the tool cannot tell its board, so flash it again with the same image, which is built for it: `{again}`.",
+                    board.a()
+                ),
+                _ => format!(
+                    "The unit may be in ISP mode with a partial image. `{again}` flashes it again."
+                ),
+            })
+        }
         UpdateError::NoReturn(_) | UpdateError::Ambiguous { .. } => {
-            Some("`verge list` shows what is attached now.")
+            Some("`verge list` shows what is attached now.".to_owned())
         }
         _ => None,
     };

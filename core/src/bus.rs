@@ -76,4 +76,7 @@ pub trait Bus {
     /// Time since an arbitrary start.
     fn now(&self) -> Duration;
     fn sleep(&self, duration: Duration);
+    /// Whether a device that leaves the bus and comes back keeps its [`UsbDevice::instance`], as
+    /// on Windows. Where it does not, an instance still there means the device never left.
+    fn keeps_instances(&self) -> bool;
 }

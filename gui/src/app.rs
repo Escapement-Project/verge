@@ -8,12 +8,13 @@ use std::time::Duration;
 use egui::{
     Color32, CornerRadius, Frame, Margin, ScrollArea, Stroke, Ui, ViewportCommand, pos2, vec2,
 };
-use verge_core::detect::{Firmware, Guess, State};
+use verge_core::board::{self, Board};
+use verge_core::detect::{Firmware, Guess, Hardware, State};
 use verge_core::image::{Image, PAGE};
 use verge_core::paths::ISP_IDENTITY_WARNING;
 use verge_core::progress::{Cancel, Step, Unit as StepUnit};
 use verge_core::release::{Release, Repo};
-use verge_core::source::{self, LoadError, Source};
+use verge_core::source::{self, ImageVersion, LoadError, Source};
 use verge_core::stock::{self, StockImage};
 use verge_core::update::Outcome;
 use verge_core::{Path, Unit, offer};
@@ -458,6 +459,8 @@ impl VergeApp {
         self.picked = Some(Picked { path, image });
         self.choice = Choice::File;
         self.notice = None;
+        // A question asked about another image no longer stands.
+        self.confirming = None;
     }
 
     fn open_picker(&mut self, ctx: &egui::Context) {
@@ -514,13 +517,9 @@ impl VergeApp {
             };
         };
         let offer = offer(unit, &self.units);
-        match offer.best() {
-            None => return blocked("Cannot update", String::new()),
-            Some(Path::Jumper) => {
-                return blocked("Needs the jumper", Path::Jumper.describe().to_owned());
-            }
-            Some(_) => {}
-        }
+        let Some(path) = offer.best() else {
+            return blocked("Cannot update", String::new());
+        };
         let action = match self.choice {
             Choice::Release => match &self.release {
                 None => blocked("Looking up releases", String::new()),
@@ -573,15 +572,50 @@ impl VergeApp {
                 }
             },
         };
-        if let Action::Ready { source, .. } = &action
-            && let Err(error) = source::check_board(Some(unit), source)
-        {
-            return blocked(
-                "Not for this board",
-                format!("{} Pick STOCK for that.", sentence(&error.to_string())),
-            );
+        // A release's image says which boards it supports only once it is downloaded.
+        if let Action::Ready { source, .. } = &action {
+            let checked = match (source, self.picked_image()) {
+                (Source::File(_), Some(image)) => {
+                    source::check_board(Some(unit), image, &ImageVersion::Unknown)
+                }
+                _ => source::check_unit(Some(unit), source),
+            };
+            if let Err(error) = checked {
+                return blocked(
+                    "Not for this board",
+                    format!("{} Pick STOCK for that.", sentence(&error.to_string())),
+                );
+            }
+        }
+        if path == Path::Jumper {
+            return blocked("Needs the jumper", jumper_advice(unit, &action));
         }
         action
+    }
+
+    /// The picked file's image, where it read as one.
+    fn picked_image(&self) -> Option<&Image> {
+        match &self.picked {
+            Some(Picked {
+                image: Ok(image), ..
+            }) => Some(image),
+            _ => None,
+        }
+    }
+
+    /// The question's sentence on the boards the image is built for, where the unit cannot say
+    /// its own: stock's goes on any, a file says, and a release says only once it is downloaded.
+    fn built_for(&self, source: &Source) -> Option<String> {
+        match source {
+            Source::Stock(_) => None,
+            Source::File(_) => self
+                .picked_image()
+                .and_then(|image| image.boards().ok())
+                .map(|boards| format!("The image is built for {}.", board::built_for(&boards))),
+            Source::Release(_) => Some(
+                "A release says which boards it is built for only once it is downloaded.".into(),
+            ),
+        }
     }
 
     fn start(&mut self, unit: Box<Unit>, source: Source, now: f64) {
@@ -934,8 +968,18 @@ impl VergeApp {
                 "Flash {what} onto {}? Keep it plugged in until the tool says it is done.",
                 unit_name(&unit)
             );
+            let unknown =
+                source::board_unknown(&unit).filter(|_| !matches!(source, Source::Stock(_)));
+            if (unit.is_bootloader() || unknown.is_some())
+                && let Some(built_for) = self.built_for(&source)
+            {
+                question = format!("{built_for} {question}");
+            }
             if unit.is_bootloader() {
                 question = format!("{ISP_IDENTITY_WARNING} {question}");
+            }
+            if let Some(unknown) = unknown {
+                question = format!("{unknown} {question}");
             }
             edged(ui, color::ATTENTION, &question);
             ui.add_space(space::S);
@@ -1282,6 +1326,19 @@ impl VergeApp {
                 glyph::ATTENTION,
                 color::ATTENTION,
             ),
+            Ok(Outcome::NotRestarted { maybe_jumper: false }) => (
+                "FLASHED",
+                "IT DID NOT RESTART: UNPLUG IT AND PLUG IT BACK IN".to_owned(),
+                glyph::ATTENTION,
+                color::ATTENTION,
+            ),
+            Ok(Outcome::NotRestarted { maybe_jumper: true }) => (
+                "FLASHED",
+                "IT DID NOT RESTART, OR ITS JUMPER IS FITTED: UNPLUG IT, TAKE ANY JUMPER OFF, PLUG IT BACK IN"
+                    .to_owned(),
+                glyph::ATTENTION,
+                color::ATTENTION,
+            ),
             Err(error) if error.left_in_isp => (
                 "FAILED",
                 "THE UNIT MAY BE IN ISP MODE".to_owned(),
@@ -1387,8 +1444,47 @@ impl VergeApp {
     }
 }
 
+/// What to do for a unit that needs the jumper, naming its board and the image to flash once it
+/// is in ISP mode, where nothing tells its board.
+fn jumper_advice(unit: &Unit, action: &Action) -> String {
+    let fit = Path::Jumper.describe();
+    let Hardware::Board(board) = unit.hardware() else {
+        return format!(
+            "{fit} This unit's firmware does not say which board it is, and in ISP mode nothing does: flash it with an image built for it."
+        );
+    };
+    match action {
+        Action::Ready {
+            source: Source::Release(_),
+            ..
+        } if board != Board::McuLink => format!(
+            "{fit} This unit is {}. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it with STOCK, or with a file built for {}.",
+            board.a(),
+            board.a()
+        ),
+        Action::Ready {
+            source: Source::Release(_),
+            what,
+            ..
+        } => format!(
+            "{fit} This unit is {}. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it then with {what} only if it is built for {}.",
+            board.a(),
+            board.a()
+        ),
+        Action::Ready { what, .. } => format!(
+            "{fit} This unit is {}. In ISP mode the tool cannot tell its board, so flash it then with {what}, which is built for it.",
+            board.a()
+        ),
+        Action::Blocked { .. } => format!(
+            "{fit} This unit is {}. In ISP mode the tool cannot tell its board, so flash it then with an image built for {}.",
+            board.a(),
+            board.a()
+        ),
+    }
+}
+
 /// An error message as a sentence: capitalised, with a full stop.
-fn sentence(message: &str) -> String {
+pub fn sentence(message: &str) -> String {
     let mut chars = message.chars();
     let mut out: String = chars
         .next()
@@ -1399,6 +1495,16 @@ fn sentence(message: &str) -> String {
         out.push('.');
     }
     out
+}
+
+/// The worker's thread is joined when the window's state goes. A batch still running is told to
+/// stop first, so that the join ends once the unit under way is done.
+impl Drop for VergeApp {
+    fn drop(&mut self) {
+        if let Some(run) = &self.batch {
+            run.stop.cancel();
+        }
+    }
 }
 
 impl eframe::App for VergeApp {

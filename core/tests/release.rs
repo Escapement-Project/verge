@@ -549,10 +549,11 @@ fn from_release_to_running() {
         Relation::Unknown
     );
     let image = github.download(&release, &mut Quiet).unwrap();
+    let version = source::ImageVersion::Ours(release.tag.clone());
     let outcome = update::update(
         &bus,
         unit,
-        &image,
+        source::Payload::new(&image, &version),
         &Timing::default(),
         &mut Quiet,
         &Cancel::new(),
@@ -702,23 +703,93 @@ fn a_stalled_request_fails_with_a_message() {
     }
 }
 
-/// Ours is built for the plain MCU-Link. A release or a file is refused for a unit that says it
-/// is another board before anything is downloaded; stock's own image is not.
+/// An image of ours goes on a board only where its declaration names it, and an image that
+/// declares nothing names the full MCU-Link alone. A release says so only once it is downloaded.
+/// Stock's own image goes on any board.
 #[test]
-fn an_image_of_ours_is_refused_for_another_board() {
-    let http = SimHttp::new(repo());
-    http.publish_ours("v0.3.0");
-    let bus = SimBus::scenario("pro").unwrap();
-    let unit = detect(&bus).unwrap().remove(0);
-    let file = std::env::temp_dir().join(format!("verge-pro-{}.s19", std::process::id()));
-    std::fs::write(&file, image_bytes("v0.3.0")).unwrap();
-    for source in [Source::Release(None), Source::File(file.clone())] {
-        let result = source::load(&source, &github(&http), Some(&unit), false, &mut Quiet);
-        let Err(LoadError::OtherBoard { board }) = &result else {
-            panic!("{source:?}: {result:?}");
+fn an_image_of_ours_goes_only_on_a_board_it_declares() {
+    const PLAIN: u32 = 1 << 0;
+    const PRO: u32 = 1 << 1;
+    let pro_bus = SimBus::scenario("pro").unwrap();
+    let pro = detect(&pro_bus).unwrap().remove(0);
+    let plain_bus = SimBus::scenario("stock").unwrap();
+    let plain = detect(&plain_bus).unwrap().remove(0);
+    let not_for = |board: &str, built_for: &str| LoadError::NotForBoard {
+        board: board.into(),
+        built_for: built_for.into(),
+    };
+    let cases: [(&str, &verge_core::Unit, Option<u32>, Option<LoadError>); 7] = [
+        (
+            "pro, nothing declared",
+            &pro,
+            None,
+            Some(not_for("an MCU-Link Pro", "the full MCU-Link only")),
+        ),
+        ("pro, the pro declared", &pro, Some(PRO), None),
+        ("pro, both declared", &pro, Some(PLAIN | PRO), None),
+        // A bit for a board this tool does not know names nothing.
+        (
+            "pro, board 5 declared",
+            &pro,
+            Some(1 << 5),
+            Some(not_for("an MCU-Link Pro", "no board this tool knows")),
+        ),
+        ("plain, nothing declared", &plain, None, None),
+        (
+            "plain, the pro declared",
+            &plain,
+            Some(PRO),
+            Some(not_for("a full MCU-Link", "the MCU-Link Pro only")),
+        ),
+        ("plain, both declared", &plain, Some(PLAIN | PRO), None),
+    ];
+    for (case, unit, boards, refused) in cases {
+        let http = SimHttp::new(repo());
+        http.publish_ours_declaring("v0.3.0", boards);
+        let file = std::env::temp_dir().join(format!("verge-board-{}.s19", std::process::id()));
+        let image = match boards {
+            Some(boards) => verge_core::sim::firmware_srecord_declaring(
+                &SimFirmware::Ours {
+                    build: "v0.3.0".into(),
+                },
+                boards,
+            ),
+            None => String::from_utf8(image_bytes("v0.3.0")).unwrap(),
         };
-        assert_eq!(board, "an MCU-Link Pro");
+        std::fs::write(&file, image).unwrap();
+        for source in [Source::Release(None), Source::File(file.clone())] {
+            let result = source::load(&source, &github(&http), Some(unit), false, &mut Quiet);
+            match (&result, &refused) {
+                (Ok(_), None) => {}
+                (Err(error), Some(expected)) if error.to_string() == expected.to_string() => {}
+                _ => panic!("{case}, {source:?}: {:?}", result.map(|l| l.name)),
+            }
+        }
+        std::fs::remove_file(&file).unwrap();
     }
+}
+
+/// A board no image of ours can name is refused before anything is downloaded, and stock's own
+/// image still goes on it.
+#[test]
+fn a_board_no_image_can_name_is_refused_before_the_download() {
+    let http = SimHttp::new(repo());
+    http.publish_ours_declaring("v0.3.0", Some(u32::MAX));
+    let bus = SimBus::default();
+    let unit = bus.add_ours("v0.2.0");
+    bus.set_board(unit, verge_core::dap::Ours::BOARD_ON_BOARD);
+    let unit = detect(&bus).unwrap().remove(0);
+    let result = source::load(
+        &Source::Release(None),
+        &github(&http),
+        Some(&unit),
+        false,
+        &mut Quiet,
+    );
+    let Err(LoadError::OtherBoard { board }) = &result else {
+        panic!("{:?}", result.map(|l| l.name));
+    };
+    assert_eq!(board, "an on-board MCU-Link");
     assert!(http.requests().is_empty(), "{:?}", http.requests());
 
     let dir = std::env::temp_dir().join(format!("verge-pro-stock-{}", std::process::id()));
@@ -730,14 +801,18 @@ fn an_image_of_ours_is_refused_for_another_board() {
         }),
     )
     .unwrap();
-    let stock = source::load(
-        &Source::Stock(Some(dir.clone())),
-        &github(&http),
-        Some(&unit),
-        false,
-        &mut Quiet,
-    );
+    for unit in [
+        unit,
+        detect(&SimBus::scenario("pro").unwrap()).unwrap().remove(0),
+    ] {
+        let stock = source::load(
+            &Source::Stock(Some(dir.clone())),
+            &github(&http),
+            Some(&unit),
+            false,
+            &mut Quiet,
+        );
+        assert!(stock.is_ok(), "{:?}", stock.map(|l| l.name));
+    }
     std::fs::remove_dir_all(&dir).unwrap();
-    std::fs::remove_file(&file).unwrap();
-    assert!(stock.is_ok(), "{stock:?}");
 }

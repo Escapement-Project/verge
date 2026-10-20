@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use super::{SimFirmware, firmware_srecord};
+use super::{SimFirmware, srecord};
 use crate::release::{Http, HttpError, Repo};
 
 #[derive(Clone, Debug)]
@@ -121,12 +121,21 @@ impl SimHttp {
     }
 
     /// The image, checksum and signature assets a release of ours carries, by the convention in
-    /// [`crate::release`].
+    /// [`crate::release`]. Its image declares no boards.
     #[must_use]
     pub fn ours_assets(&self, tag: &str) -> Vec<SimAsset> {
-        let image = firmware_srecord(&SimFirmware::Ours {
-            build: tag.to_owned(),
-        })
+        self.ours_assets_declaring(tag, None)
+    }
+
+    /// [`SimHttp::ours_assets`], with an image that declares `boards` where they are given.
+    #[must_use]
+    pub fn ours_assets_declaring(&self, tag: &str, boards: Option<u32>) -> Vec<SimAsset> {
+        let image = srecord(
+            &SimFirmware::Ours {
+                build: tag.to_owned(),
+            },
+            boards,
+        )
         .into_bytes();
         let name = format!("mculink-verge-{tag}.s19");
         let sums = format!("{}  {name}\n", hex::encode(Sha256::digest(&image)));
@@ -151,12 +160,17 @@ impl SimHttp {
         self.inner().releases.push(release);
     }
 
-    /// Publishes a release of ours that follows the convention.
+    /// Publishes a release of ours that follows the convention, and declares no boards.
     pub fn publish_ours(&self, tag: &str) {
+        self.publish_ours_declaring(tag, None);
+    }
+
+    /// Publishes a release of ours whose image declares `boards` where they are given.
+    pub fn publish_ours_declaring(&self, tag: &str, boards: Option<u32>) {
         self.publish(SimRelease {
             tag: tag.to_owned(),
             prerelease: false,
-            assets: self.ours_assets(tag),
+            assets: self.ours_assets_declaring(tag, boards),
         });
     }
 

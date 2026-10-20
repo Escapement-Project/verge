@@ -4,10 +4,10 @@
 use std::path::{Path as FsPath, PathBuf};
 
 use egui::{Color32, Margin, Stroke, Ui, vec2};
-use verge_core::batch::{Board, Filter, OursFilter, Record, Settled, StockFilter, Tally};
+use verge_core::batch::{self, Board, Filter, OursFilter, Record, Settled, StockFilter, Tally};
 use verge_core::paths::ISP_IDENTITY_WARNING;
 use verge_core::progress::{Cancel, Unit as StepUnit};
-use verge_core::source::Source;
+use verge_core::source::{ImageVersion, Source};
 use verge_core::version::StockVersion;
 
 use super::{
@@ -15,7 +15,7 @@ use super::{
 };
 use crate::glyph::{self, Glyph};
 use crate::style::{Role, color, space, text};
-use crate::worker::{BatchState, Event, Request};
+use crate::worker::{BatchState, Event, Request, arm_error};
 
 fn record_path(dir: &FsPath) -> String {
     let stamp = humantime::format_rfc3339_millis(std::time::SystemTime::now())
@@ -35,6 +35,7 @@ pub(in crate::app) struct BatchForm {
     isp: bool,
     attached: bool,
     stop_after: bool,
+    board: Board,
     count: String,
     record: String,
     dir: PathBuf,
@@ -51,6 +52,7 @@ impl BatchForm {
             isp: false,
             attached: false,
             stop_after: false,
+            board: Board::McuLink,
             count: String::new(),
             record: record_path(dir),
             dir: dir.to_path_buf(),
@@ -93,7 +95,7 @@ impl BatchForm {
         };
         Ok((
             Filter {
-                board: Board::McuLink,
+                board: self.board,
                 stock,
                 ours,
                 bootloaders: self.isp,
@@ -180,41 +182,58 @@ impl BatchRun {
 fn mark(result: Settled) -> (Glyph, Color32) {
     match result {
         Settled::Updated => (glyph::DONE, color::OURS),
-        Settled::JumperFitted => (glyph::ATTENTION, color::ATTENTION),
+        Settled::JumperFitted | Settled::NotRestarted => (glyph::ATTENTION, color::ATTENTION),
         Settled::Failed => (glyph::FAILED, color::FAULT),
         Settled::Current | Settled::Skipped | Settled::Waiting => (glyph::STOCK, color::TEXT_2),
     }
 }
 
 impl VergeApp {
-    /// The image chosen above, as a batch's source, or why there is none.
-    fn batch_source(&self) -> Result<(Source, String), String> {
-        match self.choice {
+    /// The image chosen above, as a batch's source, or why there is none. A batch that cannot arm
+    /// with it says so here, as far as the choice tells before the image is loaded: a release's
+    /// image is checked against the board once it is downloaded.
+    fn batch_source(&self, filter: &Filter) -> Result<(Source, String), String> {
+        let (source, what, version) = match self.choice {
             Choice::Release => match &self.release {
-                None => Err("Looking up the latest release.".into()),
-                Some(Err(error)) => Err(error.clone()),
-                Some(Ok(release)) => Ok((
+                None => return Err("Looking up the latest release.".into()),
+                Some(Err(error)) => return Err(error.clone()),
+                Some(Ok(release)) => (
                     Source::Release(Some(release.tag.clone())),
                     format!("release {}", release.tag),
-                )),
+                    ImageVersion::Ours(release.tag.clone()),
+                ),
             },
             Choice::Stock => match &self.stock {
-                None => Err("No stock image in LinkServer's usual places.".into()),
-                Some(found) => Ok((
+                None => return Err("No stock image in LinkServer's usual places.".into()),
+                Some(found) => (
                     Source::Stock(found.path.parent().map(FsPath::to_path_buf)),
                     format!("stock V{}", found.version),
-                )),
+                    ImageVersion::Stock(found.version),
+                ),
             },
             Choice::File => match &self.picked {
-                Some(Picked { path, image: Ok(_) }) => {
-                    Ok((Source::File(path.clone()), path.display().to_string()))
+                Some(Picked {
+                    path,
+                    image: Ok(image),
+                }) => {
+                    batch::check(filter, image, &ImageVersion::Unknown)
+                        .map_err(|error| arm_error(&error))?;
+                    (
+                        Source::File(path.clone()),
+                        path.display().to_string(),
+                        ImageVersion::Unknown,
+                    )
                 }
                 Some(Picked {
                     image: Err(error), ..
-                }) => Err(error.clone()),
-                None => Err("Pick an ELF or S-record, or drop one on the window.".into()),
+                }) => return Err(error.clone()),
+                None => return Err("Pick an ELF or S-record, or drop one on the window.".into()),
             },
-        }
+        };
+        filter
+            .check_version(&version)
+            .map_err(|error| arm_error(&error))?;
+        Ok((source, what))
     }
 
     pub(in crate::app) fn batch_view(&mut self, ui: &mut Ui, now: f64) {
@@ -295,7 +314,15 @@ impl VergeApp {
             );
         });
         field(ui, "board", |ui| {
-            ui.label(text(Role::Data, Board::McuLink.to_string()).color(color::TEXT));
+            ui.horizontal(|ui| {
+                for board in Board::ALL {
+                    ui.radio_value(
+                        &mut form.board,
+                        board,
+                        text(Role::Body, board.to_string()).color(color::TEXT),
+                    );
+                }
+            });
         });
         field(ui, "stop", |ui| {
             ui.horizontal(|ui| {
@@ -323,9 +350,10 @@ impl VergeApp {
         });
         ui.add_space(space::L);
 
-        let ready = self
-            .batch_source()
-            .and_then(|(source, what)| self.batch_form.filter().map(|(f, n)| (source, what, f, n)));
+        let ready = self.batch_form.filter().and_then(|(filter, limit)| {
+            self.batch_source(&filter)
+                .map(|(source, what)| (source, what, filter, limit))
+        });
         let (source, what, filter, limit) = match ready {
             Ok(ready) => ready,
             Err(reason) => {
@@ -394,6 +422,9 @@ impl VergeApp {
         };
         let (word, instruction, glyph, fill) = match &run.ended {
             Some(Ok(_)) => ("BATCH", "ENDED", glyph::DONE, Some(color::OURS)),
+            Some(Err(_)) if run.name.is_none() => {
+                ("BATCH", "NOT ARMED", glyph::FAILED, Some(color::FAULT))
+            }
             Some(Err(_)) => (
                 "BATCH",
                 "STOPPED BY A FAULT",

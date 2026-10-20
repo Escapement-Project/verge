@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use crate::board::Board;
 use crate::bus::{Bus, BusError, UsbDevice};
 use crate::dap::{self, DapError, Identity, Ours};
 use crate::ids::Role;
@@ -54,9 +55,10 @@ pub enum State {
 /// Which board a unit is, as far as what it reports says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Hardware {
-    /// The plain MCU-Link, the only board ours is built for.
-    McuLink,
-    /// Another board with an LPC55S69 MCU-Link on it, named for a person to read.
+    /// A board this tool knows, which an image of ours can declare.
+    Board(Board),
+    /// Another board with an LPC55S69 MCU-Link on it, named for a person to read. No image of
+    /// ours goes on it.
     Other(String),
     /// Nothing says which: a unit in ISP mode, or a firmware that does not report it.
     Unknown,
@@ -75,8 +77,8 @@ impl Hardware {
             return Hardware::Unknown;
         };
         match board.trim() {
-            "" => Hardware::McuLink,
-            "Pro" => Hardware::Other("an MCU-Link Pro".into()),
+            "" => Hardware::Board(Board::McuLink),
+            "Pro" => Hardware::Board(Board::McuLinkPro),
             "MR" => Hardware::Other("an MCU-Link MR".into()),
             "on-board" => Hardware::Other("an on-board MCU-Link".into()),
             name => Hardware::Other(format!("the MCU-Link on a {name}")),
@@ -88,10 +90,24 @@ impl Hardware {
     #[must_use]
     pub fn from_ours(ours: &Ours) -> Hardware {
         match ours.board {
-            None | Some(Ours::BOARD_MCU_LINK) => Hardware::McuLink,
-            Some(Ours::BOARD_MCU_LINK_PRO) => Hardware::Other("an MCU-Link Pro".into()),
-            Some(Ours::BOARD_ON_BOARD) => Hardware::Other("an on-board MCU-Link".into()),
-            Some(other) => Hardware::Other(format!("board {other}, which this tool does not know")),
+            None => Hardware::Board(Board::McuLink),
+            Some(number) => match Board::from_number(number) {
+                Some(board) => Hardware::Board(board),
+                None if number == Ours::BOARD_ON_BOARD => {
+                    Hardware::Other("an on-board MCU-Link".into())
+                }
+                None => Hardware::Other(format!("board {number}, which this tool does not know")),
+            },
+        }
+    }
+}
+
+impl fmt::Display for Hardware {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Hardware::Board(board) => f.write_str(board.a()),
+            Hardware::Other(name) => f.write_str(name),
+            Hardware::Unknown => f.write_str("a board it does not name"),
         }
     }
 }

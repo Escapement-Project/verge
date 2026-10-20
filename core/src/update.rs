@@ -4,14 +4,16 @@ use std::time::Duration;
 
 use mboot::McuBoot;
 
+use crate::board::Board;
 use crate::bus::{Bus, BusError, UsbDevice};
 use crate::dap::{self, DapLink, EntryError, LinkError};
-use crate::detect::{self, Firmware, State, Unit};
+use crate::detect::{self, Firmware, Hardware, State, Unit};
 use crate::ids::Role;
 use crate::image::{Image, ImageError};
 use crate::isp::{self, IspError};
 use crate::paths::{self, Path};
 use crate::progress::{Cancel, Progress, Step};
+use crate::source::{self, Payload};
 
 /// How long each wait lasts, in the bus's time.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,6 +70,8 @@ pub enum UpdateError {
     Ambiguous { count: usize },
     #[error("cancelled")]
     Cancelled,
+    #[error("stopped before the unit was asked for its bootloader, so nothing was changed")]
+    Stopped,
 }
 
 /// How a flashed unit came back.
@@ -77,6 +81,21 @@ pub enum Outcome {
     Running(Box<Unit>),
     /// In ISP mode again: the jumper is still fitted. Unplug it, take the jumper off, plug it in.
     JumperStillFitted,
+    /// Flashed and verified, but the bootloader was never seen to leave the bus after its reset,
+    /// so the unit is still in ISP mode. `maybe_jumper` where a bootloader that restarts with its
+    /// jumper fitted keeps its instance, as on Windows: there it may have restarted between two
+    /// looks. [`not_restarted`] says what to do.
+    NotRestarted { maybe_jumper: bool },
+}
+
+/// What happened to a unit whose outcome is [`Outcome::NotRestarted`], and what to do about it.
+#[must_use]
+pub fn not_restarted(maybe_jumper: bool) -> &'static str {
+    if maybe_jumper {
+        "its bootloader did not restart, or restarted too quickly to see with the ISP jumper fitted: unplug it, take the jumper off if it is fitted, and plug it back in"
+    } else {
+        "its bootloader did not restart: unplug it and plug it back in"
+    }
 }
 
 /// Picks the unit to act on: the one with this serial, or the only one attached.
@@ -150,15 +169,51 @@ fn the_one(new: &[&UsbDevice], of: &UsbDevice) -> Option<Result<UsbDevice, Updat
     }
 }
 
-/// Asks a running firmware to restart into its bootloader, and waits for the bootloader.
+/// Whether `unit` may be sent into ISP mode to be flashed afterwards by [`flash_now`], which
+/// cannot tell which board a unit in ISP mode is. Only a unit not known to be another board than
+/// the full MCU-Link goes, unless `stock` says stock's own image follows, which goes on any board.
+/// [`enter_bootloader`] checks it first.
+pub fn check_entry(unit: &Unit, stock: bool) -> Result<(), UpdateError> {
+    match unit.hardware() {
+        Hardware::Board(Board::McuLink) | Hardware::Unknown => Ok(()),
+        _ if stock => Ok(()),
+        other => Err(UpdateError::Refused(format!(
+            "the unit is {other}. In ISP mode nothing tells which board it is, so a flash there could not check that an image of ours is built for it"
+        ))),
+    }
+}
+
+/// Asks a running firmware to restart into its bootloader, and waits for the bootloader, for a
+/// flash to follow by [`flash_now`]. `stock` says that flash is stock's own image; see
+/// [`check_entry`].
+///
+/// A cancel that arrives before the request is sent stops it with [`UpdateError::Stopped`].
 pub fn enter_bootloader<B: Bus>(
+    bus: &B,
+    unit: &Unit,
+    stock: bool,
+    timing: &Timing,
+    progress: &mut dyn Progress,
+    cancel: &Cancel,
+) -> Result<UsbDevice, UpdateError> {
+    check_entry(unit, stock)?;
+    enter(bus, unit, timing, progress, cancel, cancel)
+}
+
+/// [`enter_bootloader`], where `stop` keeps the unit out of its bootloader until the request is
+/// sent and `cancel` stops the wait after it.
+fn enter<B: Bus>(
     bus: &B,
     unit: &Unit,
     timing: &Timing,
     progress: &mut dyn Progress,
     cancel: &Cancel,
+    stop: &Cancel,
 ) -> Result<UsbDevice, UpdateError> {
     let all = detect::detect(bus)?;
+    if stop.is_cancelled() {
+        return Err(UpdateError::Stopped);
+    }
     let before: Vec<String> = all.iter().map(|u| u.device.instance.clone()).collect();
     let offer = paths::offer(unit, &all);
     let path = offer
@@ -181,6 +236,9 @@ pub fn enter_bootloader<B: Bus>(
         link.drain()
             .map_err(dap::DapError::from)
             .map_err(EntryError::from)?;
+        if stop.is_cancelled() {
+            return Err(UpdateError::Stopped);
+        }
         match (path, &unit.state) {
             (Path::OursJumperFree, _) => {
                 dap::request_ours_bootloader(&mut link).map_err(UpdateError::OursEntry)?;
@@ -333,10 +391,9 @@ pub fn wait_for_return<B: Bus>(
     let device = match back {
         Some(found) => found?,
         None if !gone && bus.devices()?.iter().any(|d| d.instance == rom.instance) => {
-            progress.note(
-                "The bootloader was not seen to leave the bus after the reset, so it either restarted too quickly to see or did not restart. Either way the unit is in ISP mode with the image flashed and verified.",
-            );
-            return Ok(Outcome::JumperStillFitted);
+            return Ok(Outcome::NotRestarted {
+                maybe_jumper: bus.keeps_instances(),
+            });
         }
         None => return Err(UpdateError::NoReturn(timing.firmware_returns)),
     };
@@ -354,16 +411,32 @@ pub fn wait_for_return<B: Bus>(
     }
 }
 
-/// The jumper-free update: into the bootloader, flash, reset, and back.
+/// The jumper-free update: into the bootloader, flash, reset, and back. Refuses an image of ours
+/// that does not declare the unit's board, before anything is sent to the unit.
 pub fn update<B: Bus>(
     bus: &B,
     unit: &Unit,
-    image: &Image,
+    payload: Payload<'_>,
     timing: &Timing,
     progress: &mut dyn Progress,
     cancel: &Cancel,
 ) -> Result<Outcome, UpdateError> {
+    update_unless(bus, unit, payload, timing, progress, cancel, cancel)
+}
+
+fn update_unless<B: Bus>(
+    bus: &B,
+    unit: &Unit,
+    payload: Payload<'_>,
+    timing: &Timing,
+    progress: &mut dyn Progress,
+    cancel: &Cancel,
+    stop: &Cancel,
+) -> Result<Outcome, UpdateError> {
+    let image = payload.image;
     image.check_for_mculink()?;
+    source::check_board(Some(unit), image, payload.version)
+        .map_err(|error| UpdateError::Refused(error.to_string()))?;
     progress.plan(&[
         Step::EnterBootloader,
         Step::WaitForBootloader,
@@ -374,31 +447,43 @@ pub fn update<B: Bus>(
         Step::Reset,
         Step::WaitForFirmware,
     ]);
-    enter_bootloader(bus, unit, timing, progress, cancel)?;
+    enter(bus, unit, timing, progress, cancel, stop)?;
     let flashed = flash_bootloader(bus, image, timing, progress, cancel)?;
     wait_for_return(bus, &flashed, timing, progress, cancel)
 }
 
 /// Installs `image` on `unit` by the best path its state allows: the jumper-free update, or a
 /// flash when it is in ISP mode already. Refuses, saying why, when neither is open to it.
+///
+/// `stop` asks it to start nothing: it is checked up to the bootloader request, or before a unit
+/// already in ISP mode is connected to, and gives [`UpdateError::Stopped`]. After that only
+/// `cancel` stops the update. A single update passes the same flag as both.
 pub fn install<B: Bus>(
     bus: &B,
     unit: &Unit,
-    image: &Image,
+    payload: Payload<'_>,
     timing: &Timing,
     progress: &mut dyn Progress,
     cancel: &Cancel,
+    stop: &Cancel,
 ) -> Result<Outcome, UpdateError> {
     let units = detect::detect(bus)?;
+    if stop.is_cancelled() {
+        return Err(UpdateError::Stopped);
+    }
     let offer = paths::offer(unit, &units);
     match offer.best() {
-        Some(Path::FlashNow) => flash_now(bus, image, timing, progress, cancel),
+        Some(Path::FlashNow) => flash_now(bus, payload.image, timing, progress, cancel),
         Some(Path::OursJumperFree | Path::StockJumperFree) => {
-            update(bus, unit, image, timing, progress, cancel)
+            update_unless(bus, unit, payload, timing, progress, cancel, stop)
         }
         Some(Path::Jumper) => Err(UpdateError::Refused(format!(
-            "this unit has no jumper-free update. {} To use the jumper: unplug the unit, fit the ISP jumper, plug it back in, and flash it",
-            offer.notes.join(" ")
+            "this unit cannot be updated without the jumper now. {} To use the jumper: unplug the unit, fit the ISP jumper, plug it back in, and flash it with an image built for {}. In ISP mode the tool cannot check the board",
+            offer.notes.join(" "),
+            match unit.hardware() {
+                Hardware::Unknown => "it".to_owned(),
+                known => known.to_string(),
+            }
         ))),
         None => Err(UpdateError::Refused(format!(
             "this unit cannot be updated as it is. {}",

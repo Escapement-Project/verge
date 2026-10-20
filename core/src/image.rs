@@ -8,6 +8,8 @@ use object::elf;
 use object::read::elf::{ElfFile32, FileHeader, ProgramHeader, SectionHeader};
 use sha2::{Digest, Sha256};
 
+use crate::board::Board;
+
 /// The LPC55S69's flash page: the unit of erase and of programming.
 pub const PAGE: u32 = 512;
 
@@ -16,6 +18,40 @@ pub const PAGE: u32 = 512;
 /// 8 KB), and the protected flash region starts at `0x9DE00`, 1.5 KB above this. The tool takes
 /// the lowest of the three.
 pub const APP_FLASH_END: u32 = 0x9_D800;
+
+/// The ASCII bytes that start an image's board declaration, with no terminator.
+pub const DECLARATION_MAGIC: &[u8; 8] = b"VERGEIMG";
+
+/// A declaration's length at format 1, the format that added the boards.
+const DECLARATION_LEN: usize = 16;
+
+/// The boards an image says it runs on: a record in its flash, little-endian, found by its magic.
+///
+/// | offset | size | field |
+/// | --- | --- | --- |
+/// | 0 | 8 | [`DECLARATION_MAGIC`] |
+/// | 8 | 1 | format, 1 |
+/// | 9 | 1 | the record's length in bytes, 16 at format 1 |
+/// | 10 | 2 | zero |
+/// | 12 | 4 | boards: bit n set means the image runs on board n, numbered as [`Board::number`] |
+///
+/// Fields are only ever appended, and each is read only from the format that added it on. An image
+/// with no declaration runs on the plain MCU-Link only, as every image built before it did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Declaration {
+    /// Where the record starts.
+    pub address: u32,
+    pub format: u8,
+    pub boards: u32,
+}
+
+impl Declaration {
+    /// Whether the record names `board`. A bit for a board this tool does not know names nothing.
+    #[must_use]
+    pub fn names(&self, board: Board) -> bool {
+        self.boards & (1 << board.number()) != 0
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -79,6 +115,12 @@ pub enum ImageError {
     BadStackPointer(u32),
     #[error("reading {path}: {reason}")]
     Read { path: String, reason: String },
+    #[error(
+        "the image declares its boards twice, at 0x{first:08x} and 0x{second:08x}, so it is malformed"
+    )]
+    TwoDeclarations { first: u32, second: u32 },
+    #[error("the image's board declaration at 0x{address:08x} is malformed: {reason}")]
+    BadDeclaration { address: u32, reason: String },
 }
 
 /// A firmware image ready to flash.
@@ -178,7 +220,69 @@ impl Image {
         if stack == 0 || stack == u32::MAX || stack % 4 != 0 {
             return Err(ImageError::BadStackPointer(stack));
         }
+        self.declaration()?;
         Ok(())
+    }
+
+    /// The image's board declaration, looked for at every 4-byte-aligned address of every chunk.
+    /// `None` where it has none. Two of them, or one that does not hold together, make the image
+    /// malformed.
+    pub fn declaration(&self) -> Result<Option<Declaration>, ImageError> {
+        let mut found: Vec<(&Chunk, usize)> = Vec::new();
+        for chunk in &self.chunks {
+            let mut offset = ((4 - chunk.address % 4) % 4) as usize;
+            while offset + DECLARATION_MAGIC.len() <= chunk.data.len() {
+                if chunk.data[offset..].starts_with(DECLARATION_MAGIC) {
+                    found.push((chunk, offset));
+                }
+                offset += 4;
+            }
+        }
+        let address = |(chunk, offset): (&Chunk, usize)| chunk.address + offset as u32;
+        let (chunk, offset) = match found.as_slice() {
+            [] => return Ok(None),
+            [one] => *one,
+            [first, second, ..] => {
+                return Err(ImageError::TwoDeclarations {
+                    first: address(*first),
+                    second: address(*second),
+                });
+            }
+        };
+        let record = &chunk.data[offset..];
+        let bad = |reason: String| ImageError::BadDeclaration {
+            address: address((chunk, offset)),
+            reason,
+        };
+        let past = || bad("it runs past the end of its part of the image".into());
+        let (&format, &len) = record.get(8).zip(record.get(9)).ok_or_else(past)?;
+        if format == 0 {
+            return Err(bad("its format is 0".into()));
+        }
+        let len = usize::from(len);
+        if len < DECLARATION_LEN {
+            return Err(bad(format!(
+                "its length is {len}, under the {DECLARATION_LEN} bytes of format 1"
+            )));
+        }
+        let fields = record.get(..len).ok_or_else(past)?;
+        Ok(Some(Declaration {
+            address: address((chunk, offset)),
+            format,
+            boards: u32::from_le_bytes([fields[12], fields[13], fields[14], fields[15]]),
+        }))
+    }
+
+    /// The boards the image runs on: those its declaration names, or the plain MCU-Link where it
+    /// declares nothing.
+    pub fn boards(&self) -> Result<Vec<Board>, ImageError> {
+        Ok(match self.declaration()? {
+            None => vec![Board::McuLink],
+            Some(declaration) => Board::ALL
+                .into_iter()
+                .filter(|board| declaration.names(*board))
+                .collect(),
+        })
     }
 
     /// The image as whole pages, grouped into runs of consecutive pages.
@@ -524,6 +628,109 @@ mod tests {
         ]
         .concat();
         assert_eq!(parse(up_to_the_end), Ok(()));
+    }
+
+    /// A declaration as the firmware's spec table lays it out, written out by
+    /// hand: magic, format, length, two zero bytes, boards.
+    fn record(format: u8, len: u8, boards: u32) -> Vec<u8> {
+        let mut bytes = b"VERGEIMG".to_vec();
+        bytes.extend_from_slice(&[format, len, 0, 0]);
+        bytes.extend_from_slice(&boards.to_le_bytes());
+        bytes
+    }
+
+    fn declared(parts: &[(u32, Vec<u8>)]) -> Result<Option<Declaration>, ImageError> {
+        let mut text = s3(0, &vectors(0x2001_0000, 0x9));
+        for (address, data) in parts {
+            text.push_str(&s3(*address, data));
+        }
+        Image::parse(text.as_bytes()).unwrap().declaration()
+    }
+
+    #[test]
+    fn a_declaration_is_found_by_its_magic_at_an_aligned_address() {
+        let found = declared(&[(0x130, record(1, 16, 0b11))]).unwrap().unwrap();
+        assert_eq!(
+            found,
+            Declaration {
+                address: 0x130,
+                format: 1,
+                boards: 0b11
+            }
+        );
+        // A chunk that starts off a 4-byte boundary: the record sits at offset 2 of it, and at
+        // the aligned address 0x204.
+        let mut shifted = vec![0xEE, 0xEE];
+        shifted.extend(record(1, 16, 0b10));
+        let found = declared(&[(0x202, shifted)]).unwrap().unwrap();
+        assert_eq!((found.address, found.boards), (0x204, 0b10));
+        // The same bytes one address off: not aligned, so not a declaration.
+        let mut unaligned = vec![0xEE];
+        unaligned.extend(record(1, 16, 0b10));
+        assert_eq!(declared(&[(0x200, unaligned)]), Ok(None));
+        assert_eq!(declared(&[]), Ok(None));
+        // A later format keeps the boards where format 1 put them, and may be longer.
+        let mut later = record(2, 20, 0b10);
+        later.extend_from_slice(&[0xAB; 4]);
+        assert_eq!(declared(&[(0x130, later)]).unwrap().unwrap().boards, 0b10);
+    }
+
+    #[test]
+    fn a_malformed_declaration_is_refused() {
+        let bad = |parts: &[(u32, Vec<u8>)]| match declared(parts) {
+            Err(ImageError::BadDeclaration { address, reason }) => (address, reason),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            declared(&[(0x130, record(1, 16, 1)), (0x40000, record(1, 16, 2))]),
+            Err(ImageError::TwoDeclarations {
+                first: 0x130,
+                second: 0x40000
+            })
+        );
+        assert_eq!(bad(&[(0x130, record(0, 16, 1))]).1, "its format is 0");
+        assert!(bad(&[(0x130, record(1, 15, 1))]).1.contains("length is 15"));
+        // Its length says 20, and its part of the image ends after 16.
+        assert!(bad(&[(0x130, record(1, 20, 1))]).1.contains("runs past"));
+        // The magic ends its part of the image.
+        assert!(
+            bad(&[(0x130, b"VERGEIMG\x01".to_vec())])
+                .1
+                .contains("runs past")
+        );
+        let image = Image::parse(
+            [
+                s3(0, &vectors(0x2001_0000, 0x5)),
+                s3(0x130, &record(1, 15, 1)),
+            ]
+            .concat()
+            .as_bytes(),
+        )
+        .unwrap();
+        assert!(matches!(
+            image.check_for_mculink(),
+            Err(ImageError::BadDeclaration { address: 0x130, .. })
+        ));
+    }
+
+    #[test]
+    fn the_boards_an_image_runs_on() {
+        let boards = |parts: &[(u32, Vec<u8>)]| {
+            let mut text = s3(0, &vectors(0x2001_0000, 0x9));
+            for (address, data) in parts {
+                text.push_str(&s3(*address, data));
+            }
+            Image::parse(text.as_bytes()).unwrap().boards().unwrap()
+        };
+        assert_eq!(boards(&[]), [Board::McuLink]);
+        assert_eq!(boards(&[(0x130, record(1, 16, 0b01))]), [Board::McuLink]);
+        assert_eq!(boards(&[(0x130, record(1, 16, 0b10))]), [Board::McuLinkPro]);
+        assert_eq!(
+            boards(&[(0x130, record(1, 16, 0b11))]),
+            [Board::McuLink, Board::McuLinkPro]
+        );
+        // Board 2, on-board, and board 31 are not boards this tool knows.
+        assert_eq!(boards(&[(0x130, record(1, 16, 1 << 2 | 1 << 31))]), []);
     }
 
     #[test]

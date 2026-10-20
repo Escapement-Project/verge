@@ -7,6 +7,7 @@
 //! only with the `simulate` feature.
 
 pub mod batch;
+pub mod board;
 pub mod bus;
 pub mod dap;
 pub mod detect;

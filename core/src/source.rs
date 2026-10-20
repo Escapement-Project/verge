@@ -2,7 +2,8 @@
 
 use std::path::PathBuf;
 
-use crate::detect::{Hardware, Unit};
+use crate::board;
+use crate::detect::{Hardware, State, Unit};
 use crate::image::{Image, ImageError};
 use crate::progress::Progress;
 use crate::release::{GitHub, Http, Release, ReleaseError};
@@ -19,14 +20,22 @@ pub enum Source {
     Stock(Option<PathBuf>),
 }
 
-/// What an image is, as far as telling a unit that runs it already.
+/// What an image is, as far as telling a unit that runs it already, and whether it is stock's
+/// own, which goes on any board.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ImageVersion {
     /// A release of ours, by its tag.
     Ours(String),
     Stock(crate::version::StockVersion),
-    /// A file: nothing says which build it is.
+    /// A file: nothing says which build it is. It counts as ours.
     Unknown,
+}
+
+impl ImageVersion {
+    #[must_use]
+    pub fn is_stock(&self) -> bool {
+        matches!(self, ImageVersion::Stock(_))
+    }
 }
 
 /// An image ready to flash, and how to name it to the user.
@@ -36,6 +45,28 @@ pub struct Loaded {
     pub name: String,
     pub release: Option<Release>,
     pub version: ImageVersion,
+}
+
+impl Loaded {
+    #[must_use]
+    pub fn payload(&self) -> Payload<'_> {
+        Payload::new(&self.image, &self.version)
+    }
+}
+
+/// An image to install, and what it is: stock's own, which goes on any board, or ours, which
+/// goes only on the boards it declares.
+#[derive(Clone, Copy, Debug)]
+pub struct Payload<'a> {
+    pub image: &'a Image,
+    pub version: &'a ImageVersion,
+}
+
+impl<'a> Payload<'a> {
+    #[must_use]
+    pub fn new(image: &'a Image, version: &'a ImageVersion) -> Payload<'a> {
+        Payload { image, version }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -52,10 +83,14 @@ pub enum LoadError {
     AlreadyRuns { tag: String },
     #[error("the unit runs {build}, which is newer than release {tag}")]
     Newer { build: String, tag: String },
-    #[error(
-        "the unit is {board}, and this firmware is built for the plain MCU-Link only. NXP's stock image can go on it"
-    )]
+    #[error("the unit is {board}, which no image of ours supports. NXP's stock image can go on it")]
     OtherBoard { board: String },
+    #[error(
+        "the unit is {board}, and this image is built for {built_for}. NXP's stock image can go on it"
+    )]
+    NotForBoard { board: String, built_for: String },
+    #[error("{name}: {error}")]
+    Image { name: String, error: ImageError },
 }
 
 fn from_file(path: &std::path::Path) -> Result<Image, LoadError> {
@@ -90,22 +125,66 @@ pub fn check_release(unit: Option<&Unit>, release: &Release, force: bool) -> Res
     }
 }
 
-/// Whether `source` may go on `unit`. Stock's image goes anywhere stock runs; anything else is
-/// ours, a release or a file, and goes only on the plain MCU-Link. A unit that does not say which
-/// board it is, such as one in ISP mode, is not refused.
-pub fn check_board(unit: Option<&Unit>, source: &Source) -> Result<(), LoadError> {
-    if matches!(source, Source::Stock(_)) {
-        return Ok(());
-    }
+/// Whether `source`'s image may go on `unit`, as far as can be told before it is loaded: stock's
+/// own goes anywhere stock runs, and no image of ours goes on a board the tool cannot number.
+pub fn check_unit(unit: Option<&Unit>, source: &Source) -> Result<(), LoadError> {
     match unit.map(Unit::hardware) {
-        Some(Hardware::Other(board)) => Err(LoadError::OtherBoard { board }),
-        Some(Hardware::McuLink | Hardware::Unknown) | None => Ok(()),
+        Some(Hardware::Other(board)) if !matches!(source, Source::Stock(_)) => {
+            Err(LoadError::OtherBoard { board })
+        }
+        _ => Ok(()),
     }
 }
 
-/// Loads the image `source` names. Refuses an image of ours for a unit known to be another
-/// board. For a release, refuses one `unit` already runs or is ahead of unless `force`, and
-/// downloads it with its checksums checked.
+/// Whether `image` may go on `unit`. Stock's own image, as `version` says it is, goes anywhere
+/// stock runs. Anything else is ours, a release or a file, and goes only on a board its
+/// declaration names, or the full MCU-Link where it declares none.
+///
+/// A unit that does not say which board it is passes: one in ISP mode, under
+/// [`crate::paths::ISP_IDENTITY_WARNING`], and a running one under [`board_unknown`], which the
+/// front end puts to the user.
+pub fn check_board(
+    unit: Option<&Unit>,
+    image: &Image,
+    version: &ImageVersion,
+) -> Result<(), LoadError> {
+    let Some(unit) = unit.filter(|_| !version.is_stock()) else {
+        return Ok(());
+    };
+    match unit.hardware() {
+        Hardware::Unknown => Ok(()),
+        Hardware::Other(board) => Err(LoadError::OtherBoard { board }),
+        Hardware::Board(on) => {
+            let boards = image.boards().map_err(|error| LoadError::Image {
+                name: "the image".into(),
+                error,
+            })?;
+            if boards.contains(&on) {
+                Ok(())
+            } else {
+                Err(LoadError::NotForBoard {
+                    board: on.a().to_owned(),
+                    built_for: board::built_for(&boards),
+                })
+            }
+        }
+    }
+}
+
+/// What the question before putting an image of ours on `unit` has to say when the unit runs a
+/// firmware that does not say which board it is. `None` where the board is known, and for a unit
+/// in ISP mode, whose question says [`crate::paths::ISP_IDENTITY_WARNING`] instead.
+#[must_use]
+pub fn board_unknown(unit: &Unit) -> Option<&'static str> {
+    let running = matches!(unit.state, State::Probe { .. } | State::Unreadable { .. });
+    (running && unit.hardware() == Hardware::Unknown).then_some(
+        "This unit's firmware does not say which board it is, so the tool cannot check that the image is built for it.",
+    )
+}
+
+/// Loads the image `source` names. Refuses an image of ours for a unit it is not built for. For a
+/// release, refuses one `unit` already runs or is ahead of unless `force`, and downloads it with
+/// its checksums checked.
 pub fn load<H: Http>(
     source: &Source,
     github: &GitHub<H>,
@@ -113,10 +192,56 @@ pub fn load<H: Http>(
     force: bool,
     progress: &mut dyn Progress,
 ) -> Result<Loaded, LoadError> {
-    check_board(unit, source)?;
+    check_unit(unit, source)?;
+    let loaded = load_unchecked(source, github, unit, force, progress)?;
+    check_board(unit, &loaded.image, &loaded.version)?;
+    Ok(loaded)
+}
+
+/// The command that flashes this image onto a unit in ISP mode, for advice: the release by its
+/// tag, the file by its path, or stock from where it was found.
+#[must_use]
+pub fn flash_command(source: &Source, version: &ImageVersion) -> String {
+    match (source, version) {
+        (Source::Release(_), ImageVersion::Ours(tag)) => format!("verge flash --release {tag}"),
+        (Source::Release(Some(tag)), _) => format!("verge flash --release {tag}"),
+        (Source::Release(None), _) => "verge flash --release".to_owned(),
+        (Source::File(path), _) => format!("verge flash --file {}", shell_word(path)),
+        (Source::Stock(Some(dir)), _) => format!("verge flash --stock {}", shell_word(dir)),
+        (Source::Stock(None), _) => "verge flash --stock".to_owned(),
+    }
+}
+
+/// A path as one word for a shell, quoted where it has to be: in single quotes for a POSIX shell,
+/// in double quotes on Windows, where a path cannot hold one.
+fn shell_word(path: &std::path::Path) -> String {
+    let text = path.display().to_string();
+    let plain = |c: char| {
+        c.is_ascii_alphanumeric() || "/._-+:=@,".contains(c) || (cfg!(windows) && c == '\\')
+    };
+    if !text.is_empty() && text.chars().all(plain) {
+        text
+    } else if cfg!(windows) {
+        format!("\"{text}\"")
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+}
+
+fn load_unchecked<H: Http>(
+    source: &Source,
+    github: &GitHub<H>,
+    unit: Option<&Unit>,
+    force: bool,
+    progress: &mut dyn Progress,
+) -> Result<Loaded, LoadError> {
     match source {
         Source::File(path) => {
             let image = from_file(path)?;
+            image.check_for_mculink().map_err(|error| LoadError::File {
+                path: path.display().to_string(),
+                error,
+            })?;
             let name = format!("{} ({})", path.display(), image.format);
             Ok(Loaded {
                 image,
@@ -157,6 +282,48 @@ pub fn load<H: Http>(
                 version: ImageVersion::Ours(release.tag.clone()),
                 release: Some(release),
             })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A path a shell would split or misread is quoted; a plain one is left as it is.
+    #[test]
+    fn a_flash_command_quotes_a_path_only_where_it_has_to() {
+        let release = ImageVersion::Ours("v0.3.0".into());
+        assert_eq!(
+            flash_command(&Source::Release(None), &release),
+            "verge flash --release v0.3.0"
+        );
+        let file = |path: &str| flash_command(&Source::File(path.into()), &ImageVersion::Unknown);
+        if cfg!(windows) {
+            assert_eq!(
+                file(r"C:\NXP\mculink.s19"),
+                r"verge flash --file C:\NXP\mculink.s19"
+            );
+            assert_eq!(
+                file(r"C:\My images\mculink.s19"),
+                r#"verge flash --file "C:\My images\mculink.s19""#
+            );
+        } else {
+            assert_eq!(
+                file("/tmp/build/mculink.s19"),
+                "verge flash --file /tmp/build/mculink.s19"
+            );
+            assert_eq!(
+                file("/tmp/my images/it's.s19"),
+                r"verge flash --file '/tmp/my images/it'\''s.s19'"
+            );
+            assert_eq!(
+                flash_command(
+                    &Source::Stock(Some("/opt/Link Server/probe_firmware".into())),
+                    &ImageVersion::Unknown
+                ),
+                "verge flash --stock '/opt/Link Server/probe_firmware'"
+            );
         }
     }
 }

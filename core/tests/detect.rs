@@ -2,6 +2,7 @@
 //! identities.
 
 use serde_json::Value;
+use verge_core::board::Board;
 use verge_core::dap::Ours;
 use verge_core::detect::{Guess, Hardware, State};
 use verge_core::sim::{SimBus, SimFirmware};
@@ -192,10 +193,13 @@ fn ours_is_told_from_stock_by_the_identify_reply_alone() {
 fn stocks_product_string_names_the_board() {
     let other = |name: &str| Hardware::Other(name.to_owned());
     for (product, board) in [
-        ("MCU-LINK (r0FB) CMSIS-DAP V3.172", Hardware::McuLink),
+        (
+            "MCU-LINK (r0FB) CMSIS-DAP V3.172",
+            Hardware::Board(Board::McuLink),
+        ),
         (
             "MCU-LINK Pro (r1E2) CMSIS-DAP V3.172",
-            other("an MCU-Link Pro"),
+            Hardware::Board(Board::McuLinkPro),
         ),
         (
             "MCU-LINK MR (r0C3) CMSIS-DAP V3.172",
@@ -234,11 +238,11 @@ fn each_unit_says_which_board_it_is() {
         boards,
         [
             // Format 2, as recorded: built only for the plain board.
-            Hardware::McuLink,
-            Hardware::Other("an MCU-Link Pro".into()),
+            Hardware::Board(Board::McuLink),
+            Hardware::Board(Board::McuLinkPro),
             Hardware::Other("an on-board MCU-Link".into()),
-            Hardware::Other("an MCU-Link Pro".into()),
-            Hardware::McuLink,
+            Hardware::Board(Board::McuLinkPro),
+            Hardware::Board(Board::McuLink),
             Hardware::Unknown,
         ]
     );

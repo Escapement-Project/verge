@@ -8,7 +8,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 
 use verge_core::batch::{
-    Armed, Batch, Entry, Filter, Observer, Record, Status, Tally, open_record,
+    ArmError, Armed, Batch, Entry, Filter, Observer, Record, Status, Tally, open_record,
 };
 use verge_core::progress::{Cancel, Progress, Step};
 use verge_core::release::{GitHub, Http, Release};
@@ -178,7 +178,9 @@ fn load_error(error: &LoadError) -> JobError {
             Some("Tick Install anyway to flash it regardless.")
         }
         LoadError::NoStock { .. } => Some("Install NXP's LinkServer, or pick the image as a file."),
-        LoadError::OtherBoard { .. } => Some("Pick STOCK to put NXP's image on it instead."),
+        LoadError::OtherBoard { .. } | LoadError::NotForBoard { .. } => {
+            Some("Pick STOCK to put NXP's image on it instead.")
+        }
         _ => None,
     };
     JobError {
@@ -186,6 +188,18 @@ fn load_error(error: &LoadError) -> JobError {
         advice,
         left_in_isp: false,
     }
+}
+
+/// Why a batch did not arm, with what to change in the batch view.
+pub fn arm_error(error: &ArmError) -> String {
+    let advice = match error {
+        ArmError::OursUndated => {
+            " Tick \"of any build\" to take every unit running ours, or untick Ours."
+        }
+        ArmError::NotForBoard { .. } => " Pick an image of ours built for it, or STOCK.",
+        ArmError::Image(_) => "",
+    };
+    format!("{}{advice}", crate::app::sentence(&error.to_string()))
 }
 
 fn update_error(error: &UpdateError) -> JobError {
@@ -236,9 +250,10 @@ fn install<B: Bus, H: Http + Clone + Send + 'static>(
     update::install(
         bus,
         unit,
-        &loaded.image,
+        loaded.payload(),
         &Timing::default(),
         progress,
+        cancel,
         cancel,
     )
     .map_err(|error| update_error(&error))
@@ -292,7 +307,7 @@ impl Observer for BatchForward<'_, '_> {
     }
 }
 
-fn state<B: Bus>(batch: &Batch<'_, B>) -> BatchState {
+fn state<B: Bus + Sync>(batch: &Batch<'_, B>) -> BatchState {
     BatchState {
         tally: batch.tally(),
         waiting: batch
@@ -309,7 +324,7 @@ fn state<B: Bus>(batch: &Batch<'_, B>) -> BatchState {
     clippy::too_many_arguments,
     reason = "the request's fields, passed through"
 )]
-fn run_batch<B: Bus, H: Http + Clone + Send + 'static>(
+fn run_batch<B: Bus + Sync, H: Http + Clone + Send + 'static>(
     bus: &B,
     github: &GitHub<H>,
     forward: &mut Forward<'_>,
@@ -320,12 +335,22 @@ fn run_batch<B: Bus, H: Http + Clone + Send + 'static>(
     stop: &Cancel,
     cancel: &Cancel,
 ) -> Result<Tally, String> {
+    filter
+        .check_source(source)
+        .map_err(|error| arm_error(&error))?;
     let Some(loaded) =
         load_stoppable(github, source, None, true, forward, stop).map_err(|e| e.to_string())?
     else {
         tracing::info!("stopped before the batch was armed");
         return Ok(Tally::default());
     };
+    let armed = Armed {
+        image: loaded.image,
+        name: loaded.name,
+        version: loaded.version,
+        source: source.clone(),
+    };
+    armed.check(&filter).map_err(|error| arm_error(&error))?;
     // The default record directory, the user's data directory, need not exist yet.
     if let Some(dir) = record.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)
@@ -334,15 +359,10 @@ fn run_batch<B: Bus, H: Http + Clone + Send + 'static>(
     let file = open_record(record)
         .map_err(|e| format!("opening the record file {}: {e}", record.display()))?;
     forward.send(Event::BatchArmed {
-        name: loaded.name.clone(),
+        name: armed.name.clone(),
         filter: filter.describe(),
     });
-    tracing::info!("armed: {}, for {}", loaded.name, filter.describe());
-    let armed = Armed {
-        image: loaded.image,
-        name: loaded.name,
-        version: loaded.version,
-    };
+    tracing::info!("armed: {}, for {}", armed.name, filter.describe());
     let mut batch = Batch::arm(
         bus,
         armed,
@@ -351,7 +371,8 @@ fn run_batch<B: Bus, H: Http + Clone + Send + 'static>(
         stop.clone(),
         cancel.clone(),
         limit,
-    );
+    )
+    .map_err(|error| arm_error(&error))?;
     let mut observer = BatchForward {
         forward,
         record: std::io::BufWriter::new(file),
@@ -371,7 +392,7 @@ fn run_batch<B: Bus, H: Http + Clone + Send + 'static>(
     Ok(batch.tally())
 }
 
-fn serve<B: Bus, H: Http + Clone + Send + 'static>(
+fn serve<B: Bus + Sync, H: Http + Clone + Send + 'static>(
     bus: &B,
     github: &GitHub<H>,
     requests: &Receiver<Request>,
@@ -441,7 +462,7 @@ pub struct Worker {
 impl Worker {
     pub fn spawn<B, H>(bus: B, github: GitHub<H>, repaint: impl Fn() + Send + 'static) -> Worker
     where
-        B: Bus + Send + 'static,
+        B: Bus + Send + Sync + 'static,
         H: Http + Clone + Send + 'static,
     {
         let (request_tx, request_rx) = channel();

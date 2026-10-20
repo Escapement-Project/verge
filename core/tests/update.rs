@@ -9,8 +9,12 @@ use std::time::Duration;
 use verge_core::image::{Image, PAGE};
 use verge_core::progress::{Cancel, Progress, Step};
 use verge_core::sim::{Mode, SimBus, SimFirmware, firmware_image};
+use verge_core::source::{ImageVersion, Payload};
 use verge_core::update::{self, Outcome, Timing, UpdateError};
 use verge_core::{Firmware, State, Unit, detect};
+
+/// What an image of ours from a file is.
+static FILE: ImageVersion = ImageVersion::Unknown;
 
 #[derive(Default)]
 struct Steps {
@@ -105,7 +109,7 @@ fn ours_updates_itself_without_the_jumper() {
     let outcome = update::update(
         &bus,
         &unit,
-        &image,
+        Payload::new(&image, &FILE),
         &Timing::default(),
         &mut steps,
         &Cancel::new(),
@@ -146,7 +150,7 @@ fn stock_takes_the_request_linkserver_sends() {
     let outcome = update::update(
         &bus,
         &unit,
-        &image,
+        Payload::new(&image, &FILE),
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -185,8 +189,14 @@ fn the_wait_for_stock_bootloader_is_counted_in_bus_time() {
             ..Timing::default()
         };
         let started = std::time::Instant::now();
-        let result =
-            update::enter_bootloader(&bus, &unit, &timing, &mut Steps::default(), &Cancel::new());
+        let result = update::enter_bootloader(
+            &bus,
+            &unit,
+            false,
+            &timing,
+            &mut Steps::default(),
+            &Cancel::new(),
+        );
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "a simulated wait took real time"
@@ -206,7 +216,7 @@ fn old_stock_is_refused_before_anything_is_sent() {
     let result = update::update(
         &bus,
         &unit,
-        &image,
+        Payload::new(&image, &FILE),
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -228,7 +238,7 @@ fn a_unit_already_in_isp_mode_holds_back_another_units_entry() {
     let result = update::update(
         &bus,
         &unit,
-        &image,
+        Payload::new(&image, &FILE),
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -327,10 +337,11 @@ fn back_to_stock_without_the_jumper() {
     let bus = SimBus::scenario("ours").unwrap();
     let unit = the_unit(&bus, "CJ3E7A91C2");
     let image = firmware_image(&stock("3.172"));
+    let version = ImageVersion::Stock("3.172".parse_stock());
     let outcome = update::update(
         &bus,
         &unit,
-        &image,
+        Payload::new(&image, &version),
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -420,7 +431,7 @@ fn an_image_that_cannot_be_firmware_is_refused_before_the_bootloader() {
     let result = update::update(
         &bus,
         &unit,
-        &image,
+        Payload::new(&image, &FILE),
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -474,7 +485,7 @@ fn a_mini_in_isp_mode_holds_back_a_jumper_free_update() {
     let result = update::update(
         &bus,
         &unit,
-        &image,
+        Payload::new(&image, &FILE),
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -595,28 +606,30 @@ fn without_ports_the_unit_back_is_taken_only_as_the_one_new_device() {
 }
 
 /// On Windows a bootloader that comes back to the same port keeps its instance. Seen gone, it is
-/// the unit back with its jumper; back too fast to be seen gone, it is still there at the end.
+/// the unit back with its jumper. Back too fast to be seen gone, it cannot be told from one that
+/// never restarted, so it is not counted as flashed back: the outcome names both causes.
 #[test]
 fn where_a_bootloader_keeps_its_instance_the_jumper_is_still_seen() {
-    for (boot_after_reset, note) in [(1000, false), (100, true)] {
+    for (boot_after_reset, expected) in [
+        (1000, Outcome::JumperStillFitted),
+        (100, Outcome::NotRestarted { maybe_jumper: true }),
+    ] {
         let bus = SimBus::default();
         bus.set_stable_instances(true);
         bus.add_bootloader(true);
         bus.set_boot_after_reset(Duration::from_millis(boot_after_reset));
         let image = firmware_image(&ours("v0.3.0"));
-        let mut steps = Steps::default();
-        let outcome =
-            update::flash_now(&bus, &image, &Timing::default(), &mut steps, &Cancel::new());
-        assert_eq!(
-            outcome.as_ref().ok(),
-            Some(&Outcome::JumperStillFitted),
-            "{boot_after_reset} ms: {outcome:?}"
+        let outcome = update::flash_now(
+            &bus,
+            &image,
+            &Timing::default(),
+            &mut Steps::default(),
+            &Cancel::new(),
         );
         assert_eq!(
-            steps.notes.iter().any(|n| n.contains("not seen to leave")),
-            note,
-            "{boot_after_reset} ms: {:?}",
-            steps.notes
+            outcome.as_ref().ok(),
+            Some(&expected),
+            "{boot_after_reset} ms: {outcome:?}"
         );
     }
     // Without the jumper it comes back as a firmware, under an instance of its own.
@@ -632,4 +645,167 @@ fn where_a_bootloader_keeps_its_instance_the_jumper_is_still_seen() {
     )
     .unwrap();
     assert!(matches!(running(&outcome), Firmware::Ours(o) if o.build == "v0.3.0"));
+}
+
+/// Where a device that comes back gets a new instance, a bootloader still there under its own
+/// instance at the deadline never restarted. Where it keeps its instance, as on Windows, it may
+/// equally have restarted too fast to see with the jumper fitted; it is not restarted either way,
+/// and the outcome says both.
+#[test]
+fn a_bootloader_that_never_restarts_is_its_own_outcome() {
+    for (keeps_instances, expected) in [
+        (
+            false,
+            Outcome::NotRestarted {
+                maybe_jumper: false,
+            },
+        ),
+        (true, Outcome::NotRestarted { maybe_jumper: true }),
+    ] {
+        let bus = SimBus::default();
+        bus.set_stable_instances(keeps_instances);
+        let unit = bus.add_bootloader(false);
+        bus.set_ignores_reset(unit, true);
+        let outcome = update::flash_now(
+            &bus,
+            &firmware_image(&ours("v0.3.0")),
+            &Timing::default(),
+            &mut Steps::default(),
+            &Cancel::new(),
+        );
+        assert_eq!(
+            outcome.as_ref().ok(),
+            Some(&expected),
+            "keeps instances {keeps_instances}: {outcome:?}"
+        );
+        assert_eq!(bus.mode(unit), Mode::Bootloader);
+    }
+}
+
+/// The second review's proof: `enter_bootloader` on a Pro, then `flash_now` with ours, as
+/// `verge bootloader` and the `verge flash` it advised did, put ours on the Pro. A unit in ISP
+/// mode cannot say which board it is, so nothing after the entry can refuse it. The entry refuses
+/// instead, unless stock's own image follows.
+#[test]
+fn a_pro_sent_to_its_bootloader_by_the_tool_is_not_then_flashed_with_ours() {
+    let bus = SimBus::scenario("pro").unwrap();
+    let pro = detect(&bus).unwrap().remove(0);
+    let entered = update::enter_bootloader(
+        &bus,
+        &pro,
+        false,
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    );
+    assert!(
+        matches!(&entered, Err(UpdateError::Refused(reason)) if reason.starts_with("the unit is an MCU-Link Pro")),
+        "{entered:?}"
+    );
+    assert!(!bus.log().iter().any(|l| l.contains("DAP 8101")));
+    let outcome = update::flash_now(
+        &bus,
+        &firmware_image(&ours("v0.3.0")),
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    );
+    assert!(
+        !matches!(&outcome, Ok(Outcome::Running(_))),
+        "ours went on the Pro: {outcome:?}"
+    );
+    // For stock it goes.
+    update::enter_bootloader(
+        &bus,
+        &pro,
+        true,
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_unit_known_to_be_another_board_goes_into_isp_mode_only_for_stock() {
+    let pro = detect(&SimBus::scenario("pro").unwrap()).unwrap().remove(0);
+    let refused = update::check_entry(&pro, false);
+    assert!(
+        matches!(&refused, Err(UpdateError::Refused(reason)) if reason.starts_with("the unit is an MCU-Link Pro")),
+        "{refused:?}"
+    );
+    update::check_entry(&pro, true).unwrap();
+    // The full MCU-Link, and a unit that does not name its board, go either way.
+    for scenario in ["stock", "ours", "unnamed-board"] {
+        let unit = detect(&SimBus::scenario(scenario).unwrap())
+            .unwrap()
+            .remove(0);
+        update::check_entry(&unit, false).unwrap();
+    }
+}
+
+/// The core itself refuses an image of ours that does not declare the unit's board, before
+/// anything is sent to the unit, whichever front end calls it. Stock's own image goes on any
+/// board, as its version says; an image of ours that declares the board goes too.
+#[test]
+fn the_update_itself_checks_the_board() {
+    let bus = SimBus::scenario("pro").unwrap();
+    let pro = detect(&bus).unwrap().remove(0);
+    let plain = firmware_image(&ours("v0.3.0"));
+    for result in [
+        update::install(
+            &bus,
+            &pro,
+            Payload::new(&plain, &FILE),
+            &Timing::default(),
+            &mut Steps::default(),
+            &Cancel::new(),
+            &Cancel::new(),
+        ),
+        update::update(
+            &bus,
+            &pro,
+            Payload::new(&plain, &ImageVersion::Ours("v0.3.0".into())),
+            &Timing::default(),
+            &mut Steps::default(),
+            &Cancel::new(),
+        ),
+    ] {
+        assert!(
+            matches!(&result, Err(UpdateError::Refused(reason))
+                if reason.contains("the unit is an MCU-Link Pro, and this image is built for the full MCU-Link only")),
+            "{result:?}"
+        );
+    }
+    assert!(!bus.log().iter().any(|l| l.contains("DAP 81")));
+
+    let declaring =
+        Image::parse(verge_core::sim::firmware_srecord_declaring(&ours("v0.3.0"), 0b10).as_bytes())
+            .unwrap();
+    let outcome = update::install(
+        &bus,
+        &pro,
+        Payload::new(&declaring, &FILE),
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+        &Cancel::new(),
+    )
+    .unwrap();
+    assert!(matches!(running(&outcome), Firmware::Ours(o) if o.build == "v0.3.0"));
+
+    let back = detect(&bus).unwrap().remove(0);
+    let stock_image = firmware_image(&stock("3.172"));
+    let version = ImageVersion::Stock("3.172".parse_stock());
+    let outcome = update::install(
+        &bus,
+        &back,
+        Payload::new(&stock_image, &version),
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+        &Cancel::new(),
+    )
+    .unwrap();
+    assert!(matches!(running(&outcome), Firmware::Stock { .. }));
 }

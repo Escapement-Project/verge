@@ -227,6 +227,12 @@ impl Bus for UsbBus {
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
     }
+
+    /// nusb's `DeviceId` on Windows is the devnode of the device instance ID, which a device that
+    /// comes back keeps.
+    fn keeps_instances(&self) -> bool {
+        cfg!(windows)
+    }
 }
 
 /// A claimed CMSIS-DAP v2 interface. Dropping it releases the interface.

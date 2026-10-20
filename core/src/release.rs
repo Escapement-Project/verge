@@ -12,7 +12,9 @@
 //!   `sha256sum` writes it (`<hex>  <name>`). A file name after the hash, if present, must be the
 //!   image's.
 //!
-//! The release's tag is the version: a probe built at that tag reports the same string.
+//! The release's tag is the version: a probe built at that tag reports the same string. The
+//! boards the image runs on are in its declaration ([`crate::image::Declaration`]), inside the
+//! signed image.
 //!
 //! The signature is what makes an image ours. The trusted comment is signed with it. Naming the
 //! file there stops a signed image being published under another name, and naming the tag stops

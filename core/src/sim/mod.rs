@@ -77,15 +77,35 @@ impl SimFirmware {
 /// Where the marker sits in page 0.
 const MARKER_AT: usize = 0x40;
 
+/// Where an image that declares its boards carries the declaration: just after CPU 0's vector
+/// table, as the firmware puts it.
+const DECLARATION_AT: usize = 0x130;
+
 /// An S-record for `firmware`: a vector table, the marker, and a second region at `0x40000` where
-/// ours keeps CPU 1's image, so that a flash covers two page runs.
+/// ours keeps CPU 1's image, so that a flash covers two page runs. It declares no boards.
 #[must_use]
 pub fn firmware_srecord(firmware: &SimFirmware) -> String {
+    srecord(firmware, None)
+}
+
+/// [`firmware_srecord`], with a board declaration in format 1 whose boards field is `boards`.
+#[must_use]
+pub fn firmware_srecord_declaring(firmware: &SimFirmware, boards: u32) -> String {
+    srecord(firmware, Some(boards))
+}
+
+fn srecord(firmware: &SimFirmware, boards: Option<u32>) -> String {
     let mut code = Vec::new();
     code.extend_from_slice(&0x2001_0000u32.to_le_bytes());
     code.extend_from_slice(&0x0000_0201u32.to_le_bytes());
     code.resize(MARKER_AT, 0);
     code.extend_from_slice(firmware.marker().as_bytes());
+    if let Some(boards) = boards {
+        code.resize(DECLARATION_AT, 0);
+        code.extend_from_slice(crate::image::DECLARATION_MAGIC);
+        code.extend_from_slice(&[1, 16, 0, 0]);
+        code.extend_from_slice(&boards.to_le_bytes());
+    }
     code.resize(0x200, 0);
     code.extend_from_slice(&[0x70, 0x47]); // bx lr, at the reset vector
     code.resize(0x1234, 0x5A);
@@ -149,6 +169,9 @@ pub struct SimUnit {
     pub plugged: bool,
     /// Its bootloader refuses every write, as a failing flash would.
     pub fail_writes: bool,
+    /// Its bootloader answers the reset command and then stays on the bus, as one whose reset
+    /// failed would.
+    pub ignores_reset: bool,
     /// How many `DAP_HostStatus` commands it has answered: how often its LEDs were set.
     pub host_status: u32,
     /// Whether the last `DAP_HostStatus` turned its LEDs on.
@@ -157,6 +180,8 @@ pub struct SimUnit {
     /// reply. `None` is the plain MCU-Link as recorded: stock's recorded string, and ours
     /// answering in format 2.
     pub board: Option<u8>,
+    /// Stock's USB product string, where it is not the one for its board.
+    pub stock_product: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -379,7 +404,11 @@ impl World {
             Mode::Firmware(SimFirmware::Stock { version }) => (
                 Some(u.stock_serial.clone()),
                 Some(self.stock.vendor.clone()),
-                Some(stock_product(u.board, *version)),
+                Some(
+                    u.stock_product
+                        .clone()
+                        .unwrap_or_else(|| stock_product(u.board, *version)),
+                ),
                 true,
                 true,
             ),
@@ -493,6 +522,18 @@ pub const SCENARIOS: &[(&str, &str)] = &[
         "an empty bench where five units are plugged in over ten seconds, for a batch",
     ),
     ("pro", "one MCU-Link Pro running stock V3.172"),
+    (
+        "pro-old",
+        "one MCU-Link Pro running stock V3.108, which needs the jumper",
+    ),
+    (
+        "fails-writes",
+        "one unit running stock V3.172 whose bootloader refuses every write",
+    ),
+    (
+        "unnamed-board",
+        "one unit running stock V3.172 whose product string names no board",
+    ),
 ];
 
 impl SimBus {
@@ -535,9 +576,11 @@ impl SimBus {
             stale_replies: Vec::new(),
             plugged: true,
             fail_writes: false,
+            ignores_reset: false,
             host_status: 0,
             leds_on: false,
             board: None,
+            stock_product: None,
         });
         world.units[index].mode = mode;
         if world.units[index].mode != Mode::Silent {
@@ -624,8 +667,19 @@ impl SimBus {
         self.world().schedule(after, unit, Event::PlugIn);
     }
 
+    /// Puts `firmware` in a unit's flash, as a flash the tool did not make would. It boots that
+    /// at its next start.
+    pub fn reflash(&self, unit: usize, firmware: &SimFirmware) {
+        self.world().units[unit].flash = programmed(&firmware_image(firmware));
+    }
+
     pub fn set_fail_writes(&self, unit: usize, fail: bool) {
         self.world().units[unit].fail_writes = fail;
+    }
+
+    /// Makes a unit's bootloader answer the reset command without restarting.
+    pub fn set_ignores_reset(&self, unit: usize, ignores: bool) {
+        self.world().units[unit].ignores_reset = ignores;
     }
 
     #[must_use]
@@ -642,6 +696,11 @@ impl SimBus {
     /// Makes a unit a board other than the plain MCU-Link, by the board byte ours reports.
     pub fn set_board(&self, unit: usize, board: u8) {
         self.world().units[unit].board = Some(board);
+    }
+
+    /// Gives a unit's stock firmware this USB product string, whatever its board.
+    pub fn set_stock_product(&self, unit: usize, product: &str) {
+        self.world().units[unit].stock_product = Some(product.to_owned());
     }
 
     /// Makes every device report no port, as on a platform that does not say.
@@ -743,6 +802,18 @@ impl SimBus {
                 let unit = bus.add_stock("3.172");
                 bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK_PRO);
             }
+            "pro-old" => {
+                let unit = bus.add_stock("3.108");
+                bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK_PRO);
+            }
+            "fails-writes" => {
+                let unit = bus.add_stock("3.172");
+                bus.set_fail_writes(unit, true);
+            }
+            "unnamed-board" => {
+                let unit = bus.add_stock("3.172");
+                bus.set_stock_product(unit, "MCU-LINK CMSIS-DAP V3.172");
+            }
             _ => return None,
         }
         Some(bus)
@@ -840,5 +911,9 @@ impl Bus for SimBus {
         if !real.is_zero() {
             std::thread::sleep(real);
         }
+    }
+
+    fn keeps_instances(&self) -> bool {
+        self.world().stable_instances
     }
 }

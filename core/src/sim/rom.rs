@@ -232,9 +232,11 @@ impl SimRom {
                 self.generic(SUCCESS, tag);
             }
             RESET => {
-                let boot = world.boot_after_reset;
-                world.schedule(Duration::from_millis(10), self.unit, Event::Leave);
-                world.schedule(boot, self.unit, Event::Boot);
+                if !world.units[self.unit].ignores_reset {
+                    let boot = world.boot_after_reset;
+                    world.schedule(Duration::from_millis(10), self.unit, Event::Leave);
+                    world.schedule(boot, self.unit, Event::Boot);
+                }
                 drop(world);
                 self.generic(SUCCESS, tag);
             }

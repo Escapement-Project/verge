@@ -146,7 +146,7 @@ fn confirming_a_unit_already_in_isp_mode_says_it_may_not_be_an_mculink() {
     until(&mut h, "INSTALL V0.3.0");
     press(&mut h, "INSTALL V0.3.0");
     h.get_by_label_contains(
-        "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode. Flash release v0.3.0",
+        "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode. A release says which boards it is built for only once it is downloaded. Flash release v0.3.0",
     );
     // A jumper-free update restarts a unit it knows, so its confirmation does not say so.
     let mut h = harness(sim_app(SimBus::scenario("ours").unwrap(), vec![]));
@@ -540,7 +540,7 @@ fn pictures() {
     backend.lock().unwrap().queued.push_back(Event::BatchState(crate::worker::BatchState {
         tally: verge_core::batch::Tally { updated: 1, current: 1, skipped: 1, failed: 1, waiting: 1 },
         waiting: vec![("1-5".into(), Some("CJ3E7AE717".into()))],
-        paused: Some("The unit at 1-2 failed and is in ISP mode, maybe with a partial image. The batch waits until it is unplugged; `verge flash` flashes it again.".into()),
+        paused: Some("The unit at 1-2, a full MCU-Link, failed and is in ISP mode, maybe with a partial image. The batch waits until it is unplugged. In ISP mode the tool cannot tell its board, so flash it again with the batch's image, which is built for it: `verge flash --release v0.3.0`.".into()),
     }));
     shoot(&mut h, "15-batch-paused");
 
@@ -850,12 +850,76 @@ fn the_window_closes_while_a_batch_loads_its_image() {
     );
 }
 
-/// The window shows nothing to press for an image of ours on a Pro, only stock.
+/// A file dropped on the window, as a file manager would drop it.
+#[derive(Debug)]
+struct Dropped(PathBuf);
+
+impl egui::DroppedFile for Dropped {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        std::fs::read(&self.0).map_err(|error| error.to_string())
+    }
+}
+
+fn drop_file(h: &mut Harness<'_, VergeApp>, path: &std::path::Path) {
+    h.input_mut()
+        .dropped_files
+        .push(Arc::new(Dropped(path.to_path_buf())));
+    h.step();
+    h.step();
+}
+
+/// On a Pro an image of ours goes on only where its declaration names the Pro. A release says so
+/// once it is downloaded, and one that does not is refused before the unit is touched. A file
+/// says so as soon as it is picked.
 #[test]
-fn ours_is_not_offered_for_a_pro() {
-    let mut h = harness(sim_app(SimBus::scenario("pro").unwrap(), vec![]));
+fn ours_goes_on_a_pro_only_where_its_image_declares_it() {
+    let bus = SimBus::scenario("pro").unwrap();
+    let mut h = harness(sim_app(bus.clone(), vec![]));
+    until(&mut h, "INSTALL V0.3.0");
+    press(&mut h, "INSTALL V0.3.0");
+    press(&mut h, "CONFIRM");
+    until(&mut h, "FAILED");
+    h.get_by_label_contains(
+        "the unit is an MCU-Link Pro, and this image is built for the full MCU-Link only",
+    );
+    h.get_by_label_contains("Pick STOCK");
+    assert!(!bus.log().iter().any(|l| l.contains("DAP 8101")));
+    press(&mut h, "BACK");
+
+    let dir = record_dir("pro-files");
+    let ours = SimFirmware::Ours {
+        build: "v0.3.0".into(),
+    };
+    let plain = dir.join("plain.s19");
+    std::fs::write(&plain, firmware_srecord(&ours)).unwrap();
+    let pro = dir.join("pro.s19");
+    std::fs::write(
+        &pro,
+        verge_core::sim::firmware_srecord_declaring(&ours, 1 << 1),
+    )
+    .unwrap();
+    drop_file(&mut h, &plain);
     until(&mut h, "NOT FOR THIS BOARD");
     h.get_by_label_contains("The unit is an MCU-Link Pro");
+    drop_file(&mut h, &pro);
+    until(&mut h, "FLASH PRO.S19");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A running unit that does not say which board it is gets an image of ours only after a
+/// question that says so.
+#[test]
+fn a_unit_that_names_no_board_is_asked_about() {
+    let mut h = harness(sim_app(SimBus::scenario("unnamed-board").unwrap(), vec![]));
+    until(&mut h, "INSTALL V0.3.0");
+    press(&mut h, "INSTALL V0.3.0");
+    h.get_by_label_contains(
+        "This unit's firmware does not say which board it is, so the tool cannot check that the image is built for it. A release says which boards it is built for only once it is downloaded. Flash release v0.3.0",
+    );
 }
 
 /// The worker adds a batch's lines to a record file that has some already.
@@ -924,6 +988,7 @@ fn cancel_ends_an_update_still_loading_its_image() {
     h.get_by_label_contains("cancelled before anything was flashed");
     assert!(!h.state().busy());
 }
+
 /// Batch records go in the user's data directory: `$XDG_DATA_HOME/verge`, else
 /// `~/.local/share/verge`, on Linux. Not the directory the window was started from.
 #[cfg(target_os = "linux")]
@@ -983,4 +1048,204 @@ fn a_batch_makes_its_record_files_directory() {
     std::fs::remove_dir_all(&dir).unwrap();
     assert!(matches!(ended, Some(Ok(_))), "{ended:?}");
     assert_eq!(written.unwrap().lines().count(), 2);
+}
+
+/// Stock's image carries no version of ours, so a batch that takes ours older than the image
+/// cannot arm with it, and the view says what to change.
+#[test]
+fn a_batch_that_cannot_date_ours_cannot_arm() {
+    let dir = record_dir("stock-batch");
+    std::fs::write(
+        dir.join("MCU-LINK_CMSIS-DAP_V3_172.s19"),
+        firmware_srecord(&SimFirmware::Stock {
+            version: StockVersion::parse("3.172").unwrap(),
+        }),
+    )
+    .unwrap();
+    let mut h = harness(sim_app(
+        SimBus::scenario("arrivals").unwrap(),
+        vec![dir.clone()],
+    ));
+    until(&mut h, "BATCH");
+    press(&mut h, "BATCH");
+    press(&mut h, "STOCK");
+    until(&mut h, "CANNOT ARM");
+    h.get_by_label_contains("The image carries no version of ours");
+    h.get_by_label_contains("Tick \"of any build\"");
+    press(&mut h, "of any build, not only those older than the image");
+    until(&mut h, "ARM BATCH");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A release's image says which boards it is for only once it is downloaded, so a batch for the
+/// Pro with a release that does not declare it ends there, unarmed.
+#[test]
+fn a_batch_for_the_pro_does_not_arm_with_an_image_not_built_for_it() {
+    let mut h = harness(sim_app(SimBus::scenario("arrivals").unwrap(), vec![]));
+    until(&mut h, "BATCH");
+    press(&mut h, "BATCH");
+    press(&mut h, "MCU-Link Pro");
+    press(&mut h, "ARM BATCH");
+    h.get_by_label_contains("onto every MCU-Link Pro running");
+    press(&mut h, "CONFIRM");
+    until(&mut h, "NOT ARMED");
+    h.get_by_label_contains(
+        "The batch takes the MCU-Link Pro, and the image is built for the full MCU-Link only.",
+    );
+    assert!(!h.state().busy());
+}
+
+/// A Pro that needs the jumper: in ISP mode nothing tells its board, so the view names the board
+/// and the image to flash then, and refuses a file not built for it before the jumper.
+#[test]
+fn the_jumper_advice_names_the_board_and_the_image() {
+    let mut h = harness(sim_app(SimBus::scenario("pro-old").unwrap(), vec![]));
+    until(&mut h, "NEEDS THE JUMPER");
+    h.get_by_label_contains(
+        "This unit is an MCU-Link Pro. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it with STOCK, or with a file built for an MCU-Link Pro.",
+    );
+    let dir = record_dir("jumper-files");
+    let ours = SimFirmware::Ours {
+        build: "v0.3.0".into(),
+    };
+    let plain = dir.join("plain.s19");
+    std::fs::write(&plain, firmware_srecord(&ours)).unwrap();
+    let pro = dir.join("pro.s19");
+    std::fs::write(
+        &pro,
+        verge_core::sim::firmware_srecord_declaring(&ours, 1 << 1),
+    )
+    .unwrap();
+    drop_file(&mut h, &plain);
+    until(&mut h, "NOT FOR THIS BOARD");
+    drop_file(&mut h, &pro);
+    until(&mut h, "NEEDS THE JUMPER");
+    h.get_by_label_contains(
+        "This unit is an MCU-Link Pro. In ISP mode the tool cannot tell its board, so flash it then with pro.s19, which is built for it.",
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The question before flashing a unit in ISP mode names the boards a file is built for, as the
+/// command line's does.
+#[test]
+fn the_question_names_the_boards_a_file_is_built_for() {
+    let mut h = harness(sim_app(SimBus::scenario("isp").unwrap(), vec![]));
+    until(&mut h, "INSTALL V0.3.0");
+    let dir = record_dir("question-file");
+    let pro = dir.join("pro.s19");
+    std::fs::write(
+        &pro,
+        verge_core::sim::firmware_srecord_declaring(
+            &SimFirmware::Ours {
+                build: "v0.3.0".into(),
+            },
+            1 << 1,
+        ),
+    )
+    .unwrap();
+    drop_file(&mut h, &pro);
+    until(&mut h, "FLASH PRO.S19");
+    press(&mut h, "FLASH PRO.S19");
+    h.get_by_label_contains(
+        "board in ISP mode. The image is built for the MCU-Link Pro only. Flash pro.s19",
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A batch that cannot date ours is refused before its image is looked for.
+#[test]
+fn the_worker_refuses_an_undatable_batch_before_loading() {
+    use crate::worker::{Backend, Request};
+    use verge_core::batch::{Board, Filter, OursFilter, StockFilter};
+    let dir = record_dir("undated");
+    let record = dir.join("record.jsonl");
+    let http = SimHttp::new(repo());
+    let mut worker = Worker::spawn(
+        SimBus::scenario("arrivals").unwrap(),
+        GitHub::new(http, repo(), None),
+        || {},
+    );
+    worker.send(Request::Batch {
+        source: verge_core::Source::Stock(Some(PathBuf::from("/nonexistent/probe_firmware"))),
+        filter: Filter {
+            board: Board::McuLink,
+            stock: StockFilter::Any,
+            ours: OursFilter::Older,
+            bootloaders: false,
+            attached: false,
+        },
+        limit: None,
+        record: record.clone(),
+        stop: verge_core::Cancel::new(),
+        cancel: verge_core::Cancel::new(),
+    });
+    let mut ended = None;
+    for _ in 0..2000 {
+        match worker.try_recv() {
+            Some(Event::BatchEnded(result)) => {
+                ended = Some(result);
+                break;
+            }
+            Some(_) => {}
+            None => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    let made = record.exists();
+    std::fs::remove_dir_all(&dir).unwrap();
+    let Some(Err(error)) = ended else {
+        panic!("{ended:?}");
+    };
+    assert!(error.contains("carries no version of ours"), "{error}");
+    assert!(!made);
+}
+
+/// The second review of the fixes: a file dropped while the question is up must not leave a
+/// question that names one file's boards and flashes another. The question goes, and the view
+/// offers the new file instead.
+#[test]
+fn the_question_names_the_boards_of_the_file_it_flashes() {
+    let mut h = harness(sim_app(SimBus::scenario("isp").unwrap(), vec![]));
+    until(&mut h, "INSTALL V0.3.0");
+    let dir = record_dir("question-two-files");
+    let pro = dir.join("pro.s19");
+    let plain = dir.join("plain.s19");
+    let ours = SimFirmware::Ours {
+        build: "v0.3.0".into(),
+    };
+    std::fs::write(
+        &pro,
+        verge_core::sim::firmware_srecord_declaring(&ours, 1 << 1),
+    )
+    .unwrap();
+    std::fs::write(&plain, firmware_srecord(&ours)).unwrap();
+    drop_file(&mut h, &pro);
+    until(&mut h, "FLASH PRO.S19");
+    press(&mut h, "FLASH PRO.S19");
+    h.get_by_label_contains("The image is built for the MCU-Link Pro only. Flash pro.s19");
+    drop_file(&mut h, &plain);
+    h.run();
+    let wrong = h
+        .query_by_label_contains("The image is built for the full MCU-Link only. Flash pro.s19")
+        .is_some();
+    let confirm = h.query_by_label("CONFIRM").is_some();
+    let offered = h.query_by_label("FLASH PLAIN.S19").is_some();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(
+        !wrong,
+        "the question says the full MCU-Link only, and Confirm flashes pro.s19, built for the Pro only"
+    );
+    assert!(!confirm && offered, "confirm {confirm}, offered {offered}");
+}
+
+/// A unit that needs the jumper, with a release chosen: nothing has checked the release's boards,
+/// so the advice does not vouch for it.
+#[test]
+fn the_jumper_advice_does_not_vouch_for_a_release() {
+    let mut h = harness(sim_app(SimBus::scenario("stock-old").unwrap(), vec![]));
+    until(&mut h, "NEEDS THE JUMPER");
+    h.get_by_label_contains(
+        "This unit is a full MCU-Link. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it then with release v0.3.0 only if it is built for a full MCU-Link.",
+    );
+    assert!(h.query_by_label_contains("which is built for it").is_none());
 }
