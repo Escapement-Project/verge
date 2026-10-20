@@ -19,7 +19,9 @@ use verge_core::image::{Image, PAGE};
 use verge_core::paths::ISP_IDENTITY_WARNING;
 use verge_core::progress::{Progress, Step};
 use verge_core::release::{DEFAULT_REPO, GitHub, Http, Repo, Ureq};
+#[cfg(feature = "simulate")]
 use verge_core::sim::http::SimHttp;
+#[cfg(feature = "simulate")]
 use verge_core::sim::{SCENARIOS, SimBus};
 use verge_core::source::{self, LoadError};
 use verge_core::update::{self, Outcome, Timing, UpdateError};
@@ -70,10 +72,12 @@ struct Cli {
     github_token: Option<String>,
 
     /// Use a simulated bench instead of USB. For developing the tool.
+    #[cfg(feature = "simulate")]
     #[arg(long, global = true, hide = true, value_name = "SCENARIO")]
     simulate: Option<String>,
 
     /// Real seconds per simulated second.
+    #[cfg(feature = "simulate")]
     #[arg(long, global = true, hide = true, default_value_t = 0.5)]
     simulate_pace: f64,
 }
@@ -260,29 +264,10 @@ fn main() -> ExitCode {
         tracing::debug!("no Ctrl-C handler: {error}");
     }
 
-    let result = match &cli.simulate {
-        Some(name) => match SimBus::scenario(name) {
-            Some(bus) => {
-                let http = SimHttp::new(cli.repo.clone());
-                http.publish_ours("v0.3.0");
-                let key = http.public_key();
-                let github = GitHub::new(http, cli.repo.clone(), None).with_key(Some(key));
-                run(&cli, &bus.paced(cli.simulate_pace), &github, &cancel, &stop)
-            }
-            None => Err(anyhow::anyhow!(
-                "no simulated bench called {name:?}; there are {}",
-                SCENARIOS
-                    .iter()
-                    .map(|(name, _)| *name)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
-        },
-        None => {
-            let github = GitHub::new(Ureq::default(), cli.repo.clone(), cli.github_token.clone());
-            run(&cli, &UsbBus::default(), &github, &cancel, &stop)
-        }
-    };
+    let result = simulated(&cli, &cancel, &stop).unwrap_or_else(|| {
+        let github = GitHub::new(Ureq::default(), cli.repo.clone(), cli.github_token.clone());
+        run(&cli, &UsbBus::default(), &github, &cancel, &stop)
+    });
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -294,6 +279,35 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+/// Runs the command on the simulated bench `--simulate` names, if it names one.
+#[cfg(feature = "simulate")]
+fn simulated(cli: &Cli, cancel: &Cancel, stop: &Cancel) -> Option<Result<()>> {
+    let name = cli.simulate.as_ref()?;
+    Some(match SimBus::scenario(name) {
+        Some(bus) => {
+            let http = SimHttp::new(cli.repo.clone());
+            http.publish_ours("v0.3.0");
+            let key = http.public_key();
+            let github = GitHub::new(http, cli.repo.clone(), None).with_key(Some(key));
+            run(cli, &bus.paced(cli.simulate_pace), &github, cancel, stop)
+        }
+        None => Err(anyhow::anyhow!(
+            "no simulated bench called {name:?}; there are {}",
+            SCENARIOS
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    })
+}
+
+/// Without the `simulate` feature there is no simulated bench.
+#[cfg(not(feature = "simulate"))]
+fn simulated(_: &Cli, _: &Cancel, _: &Cancel) -> Option<Result<()>> {
+    None
 }
 
 fn run<B: Bus, H: Http>(

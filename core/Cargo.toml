@@ -8,7 +8,7 @@ version.workspace = true
 hex = "0.4.3"
 hidapi = "2.6.7"
 humantime = "2.4.0"
-minisign = "0.10.0"
+minisign = { version = "0.10.0", optional = true }
 minisign-verify = "0.3.0"
 nusb = "0.2.8"
 object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
@@ -24,3 +24,11 @@ ureq = "3.4.2"
 
 [lints]
 workspace = true
+
+[features]
+# The simulated bench, `sim`, and the signing it needs. On for the tests, through the
+# dev-dependency below, and for development with `--features simulate`; off in release builds.
+simulate = ["dep:minisign"]
+
+[dev-dependencies]
+verge-core = { path = ".", features = ["simulate"] }

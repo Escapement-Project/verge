@@ -4797,6 +4797,7 @@ dependencies = [
  "tracing",
  "tracing-indicatif",
  "tracing-subscriber",
+ "verge",
  "verge-core",
 ]
 
@@ -4820,6 +4821,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "ureq",
+ "verge-core",
 ]
 
 [[package]]

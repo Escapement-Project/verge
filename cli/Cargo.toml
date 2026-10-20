@@ -20,9 +20,19 @@ verge-core = { version = "0.1.0", path = "../core" }
 [lints]
 workspace = true
 
+[features]
+# `--simulate`, the simulated bench. On for the tests, through the dev-dependency below, and for
+# development with `--features simulate`; off in release builds.
+simulate = ["verge-core/simulate"]
+
 [dev-dependencies]
+verge = { path = ".", features = ["simulate"] }
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
+
+[lib]
+name = "verge_cli"
+path = "src/lib.rs"
 
 [[bin]]
 name = "verge"

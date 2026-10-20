@@ -21,9 +21,15 @@ verge-core = { version = "0.1.0", path = "../core" }
 [lints]
 workspace = true
 
+[features]
+# `--simulate`, the simulated bench, for development with `--features simulate`; off in release
+# builds. The tests take the simulator from verge-core's dev-dependency below.
+simulate = ["verge-core/simulate"]
+
 [dev-dependencies]
 egui_kittest = { version = "0.37.0", features = ["wgpu", "snapshot"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+verge-core = { path = "../core", features = ["simulate"] }
 
 [[bin]]
 name = "verge-gui"
