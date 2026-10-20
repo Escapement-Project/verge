@@ -11,7 +11,7 @@ use verge_core::batch::{
     ArmError, Armed, Batch, Entry, Filter, Observer, Record, Status, Tally, open_record,
 };
 use verge_core::progress::{Cancel, Progress, Step};
-use verge_core::release::{GitHub, Http, Release};
+use verge_core::release::{Download, GitHub, Http, Release};
 use verge_core::source::{self, LoadError, Loaded, Source};
 use verge_core::update::{self, Outcome, Timing, UpdateError};
 use verge_core::{Bus, Unit, detect};
@@ -23,12 +23,14 @@ pub enum Request {
         unit: Box<Unit>,
         source: Source,
         force: bool,
+        download: Download,
         cancel: Cancel,
     },
     /// Arms a batch and runs it until `stop`. `cancel` stops the unit under way.
     Batch {
         source: Source,
         filter: Filter,
+        download: Download,
         limit: Option<usize>,
         record: PathBuf,
         stop: Cancel,
@@ -143,6 +145,7 @@ fn load_stoppable<H: Http + Clone + Send + 'static>(
     source: &Source,
     unit: Option<&Unit>,
     force: bool,
+    download: Download,
     forward: &Forward<'_>,
     stop: &Cancel,
 ) -> Result<Option<Loaded>, LoadError> {
@@ -155,7 +158,7 @@ fn load_stoppable<H: Http + Clone + Send + 'static>(
     let thread = std::thread::Builder::new()
         .name("load".into())
         .spawn(move || {
-            let loaded = source::load(&source, &github, unit.as_ref(), force, &mut relay);
+            let loaded = source::load(&source, &github, unit.as_ref(), force, download, &mut relay);
             let _ = done.send(loaded);
         })
         .expect("the load thread starts");
@@ -229,22 +232,35 @@ fn update_error(error: &UpdateError) -> JobError {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the request's fields, passed through"
+)]
 fn install<B: Bus, H: Http + Clone + Send + 'static>(
     bus: &B,
     github: &GitHub<H>,
     unit: &Unit,
     source: &Source,
     force: bool,
+    download: Download,
     cancel: &Cancel,
     progress: &mut Forward<'_>,
 ) -> Result<Outcome, JobError> {
-    let loaded = load_stoppable(github, source, Some(unit), force, progress, cancel)
-        .map_err(|error| load_error(&error))?
-        .ok_or_else(|| JobError {
-            message: "cancelled before anything was flashed".into(),
-            advice: None,
-            left_in_isp: false,
-        })?;
+    let loaded = load_stoppable(
+        github,
+        source,
+        Some(unit),
+        force,
+        download,
+        progress,
+        cancel,
+    )
+    .map_err(|error| load_error(&error))?
+    .ok_or_else(|| JobError {
+        message: "cancelled before anything was flashed".into(),
+        advice: None,
+        left_in_isp: false,
+    })?;
     progress.send(Event::Loaded(loaded.name.clone()));
     tracing::info!("installing {}", loaded.name);
     update::install(
@@ -330,6 +346,7 @@ fn run_batch<B: Bus + Sync, H: Http + Clone + Send + 'static>(
     forward: &mut Forward<'_>,
     source: &Source,
     filter: Filter,
+    download: Download,
     limit: Option<usize>,
     record: &std::path::Path,
     stop: &Cancel,
@@ -338,9 +355,8 @@ fn run_batch<B: Bus + Sync, H: Http + Clone + Send + 'static>(
     filter
         .check_source(source)
         .map_err(|error| arm_error(&error))?;
-    let Some(loaded) =
-        load_stoppable(github, source, None, true, forward, stop).map_err(|e| e.to_string())?
-    else {
+    let loaded = load_stoppable(github, source, None, true, download, forward, stop);
+    let Some(loaded) = loaded.map_err(|e| e.to_string())? else {
         tracing::info!("stopped before the batch was armed");
         return Ok(Tally::default());
     };
@@ -415,9 +431,19 @@ fn serve<B: Bus + Sync, H: Http + Clone + Send + 'static>(
                 unit,
                 source,
                 force,
+                download,
                 cancel,
             } => {
-                let result = install(bus, github, &unit, &source, force, &cancel, &mut forward);
+                let result = install(
+                    bus,
+                    github,
+                    &unit,
+                    &source,
+                    force,
+                    download,
+                    &cancel,
+                    &mut forward,
+                );
                 match &result {
                     Ok(_) => tracing::info!("the update finished"),
                     Err(error) => tracing::error!("{}", error.message),
@@ -427,6 +453,7 @@ fn serve<B: Bus + Sync, H: Http + Clone + Send + 'static>(
             Request::Batch {
                 source,
                 filter,
+                download,
                 limit,
                 record,
                 stop,
@@ -438,6 +465,7 @@ fn serve<B: Bus + Sync, H: Http + Clone + Send + 'static>(
                     &mut forward,
                     &source,
                     filter,
+                    download,
                     limit,
                     &record,
                     &stop,
@@ -537,13 +565,23 @@ impl Backend for Manual {
         self.sent.push(match request {
             Request::Detect => "detect".into(),
             Request::Release => "release".into(),
-            Request::Install { source, cancel, .. } => {
+            Request::Install {
+                source,
+                download,
+                cancel,
+                ..
+            } => {
                 self.last_cancel = Some(cancel);
-                format!("install {source:?}")
+                format!("install {source:?} {download:?}")
             }
-            Request::Batch { source, stop, .. } => {
+            Request::Batch {
+                source,
+                download,
+                stop,
+                ..
+            } => {
                 self.last_cancel = Some(stop);
-                format!("batch {source:?}")
+                format!("batch {source:?} {download:?}")
             }
         });
     }

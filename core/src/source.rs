@@ -6,7 +6,7 @@ use crate::board;
 use crate::detect::{Hardware, State, Unit};
 use crate::image::{Image, ImageError};
 use crate::progress::Progress;
-use crate::release::{GitHub, Http, Release, ReleaseError};
+use crate::release::{Download, GitHub, Http, Release, ReleaseError, Repo};
 use crate::stock;
 use crate::version::Relation;
 
@@ -183,19 +183,127 @@ pub fn board_unknown(unit: &Unit) -> Option<&'static str> {
 }
 
 /// Loads the image `source` names. Refuses an image of ours for a unit it is not built for. For a
-/// release, refuses one `unit` already runs or is ahead of unless `force`, and downloads it with
-/// its checksums checked.
+/// release, refuses one `unit` already runs or is ahead of unless `force`, before anything is
+/// downloaded; then downloads it, where `download` agrees to it ([`GitHub::download`]).
 pub fn load<H: Http>(
     source: &Source,
     github: &GitHub<H>,
     unit: Option<&Unit>,
     force: bool,
+    download: Download,
     progress: &mut dyn Progress,
 ) -> Result<Loaded, LoadError> {
-    check_unit(unit, source)?;
-    let loaded = load_unchecked(source, github, unit, force, progress)?;
+    let loaded = match source {
+        Source::Release(tag) => {
+            let release = find_release(github, tag.as_deref(), unit, force)?;
+            return load_release(github, release, unit, download, progress);
+        }
+        Source::File(path) => {
+            check_unit(unit, source)?;
+            load_file(path)?
+        }
+        Source::Stock(dir) => load_stock(dir.as_ref())?,
+    };
     check_board(unit, &loaded.image, &loaded.version)?;
     Ok(loaded)
+}
+
+/// [`load`], asking `agree` before a release is downloaded, with what downloading it fetches
+/// ([`download_what`]). What is refused without a download, such as a build with no release key,
+/// is refused before the question. `agree`'s error is the outer one: nothing is downloaded once it
+/// says no.
+pub fn load_asking<H: Http, E>(
+    source: &Source,
+    github: &GitHub<H>,
+    unit: Option<&Unit>,
+    force: bool,
+    agree: impl FnOnce(&str) -> Result<(), E>,
+    progress: &mut dyn Progress,
+) -> Result<Result<Loaded, LoadError>, E> {
+    let Source::Release(tag) = source else {
+        return Ok(load(
+            source,
+            github,
+            unit,
+            force,
+            Download::CachedOnly,
+            progress,
+        ));
+    };
+    let release = match find_release(github, tag.as_deref(), unit, force) {
+        Ok(release) => release,
+        Err(error) => return Ok(Err(error)),
+    };
+    match load_release(
+        github,
+        release.clone(),
+        unit,
+        Download::CachedOnly,
+        progress,
+    ) {
+        Err(LoadError::Release(ReleaseError::NotAgreed { .. })) => {
+            agree(&download_what(github.repo(), &release))?;
+            Ok(load_release(
+                github,
+                release,
+                unit,
+                Download::Agreed,
+                progress,
+            ))
+        }
+        loaded => Ok(loaded),
+    }
+}
+
+/// The release `tag` names, the latest without one, looked up and judged for `unit` before
+/// anything is downloaded: refused for a board no image of ours can name, and for a unit that
+/// runs it already or a newer build unless `force`.
+fn find_release<H: Http>(
+    github: &GitHub<H>,
+    tag: Option<&str>,
+    unit: Option<&Unit>,
+    force: bool,
+) -> Result<Release, LoadError> {
+    check_unit(unit, &Source::Release(tag.map(str::to_owned)))?;
+    let release = release(github, tag)?;
+    check_release(unit, &release, force)?;
+    Ok(release)
+}
+
+/// `release`'s image, downloaded where `download` agrees to it, with its
+/// signature and checksums checked, and refused for a unit whose board it does not declare.
+fn load_release<H: Http>(
+    github: &GitHub<H>,
+    release: Release,
+    unit: Option<&Unit>,
+    download: Download,
+    progress: &mut dyn Progress,
+) -> Result<Loaded, LoadError> {
+    let image = github.download(&release, download, progress)?;
+    let loaded = Loaded {
+        image,
+        name: release_name(&release),
+        version: ImageVersion::Ours(release.tag.clone()),
+        release: Some(release),
+    };
+    check_board(unit, &loaded.image, &loaded.version)?;
+    Ok(loaded)
+}
+
+/// A release's image as the questions and reports name it.
+fn release_name(release: &Release) -> String {
+    format!("release {} ({})", release.tag, release.image.name)
+}
+
+/// What downloading `release` of `repo` fetches, for the question that asks first: the
+/// repository, the tag and how much.
+#[must_use]
+pub fn download_what(repo: &Repo, release: &Release) -> String {
+    format!(
+        "release {} of {repo} from GitHub ({:.1} KiB)",
+        release.tag,
+        release.download_size() as f64 / 1024.0
+    )
 }
 
 /// The command that flashes this image onto a unit in ISP mode, for advice: the release by its
@@ -228,62 +336,42 @@ fn shell_word(path: &std::path::Path) -> String {
     }
 }
 
-fn load_unchecked<H: Http>(
-    source: &Source,
-    github: &GitHub<H>,
-    unit: Option<&Unit>,
-    force: bool,
-    progress: &mut dyn Progress,
-) -> Result<Loaded, LoadError> {
-    match source {
-        Source::File(path) => {
-            let image = from_file(path)?;
-            image.check_for_mculink().map_err(|error| LoadError::File {
-                path: path.display().to_string(),
-                error,
-            })?;
-            let name = format!("{} ({})", path.display(), image.format);
-            Ok(Loaded {
-                image,
-                name,
-                release: None,
-                version: ImageVersion::Unknown,
-            })
-        }
-        Source::Stock(dir) => {
-            let dirs = match dir {
-                Some(dir) => vec![dir.clone()],
-                None => stock::search_dirs(),
-            };
-            let Some(found) = stock::find(&dirs).into_iter().next() else {
-                let searched = if dirs.is_empty() {
-                    "found no LinkServer install".to_owned()
-                } else {
-                    let names: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
-                    format!("looked in {}", names.join(", "))
-                };
-                return Err(LoadError::NoStock { searched });
-            };
-            let image = from_file(&found.path)?;
-            Ok(Loaded {
-                image,
-                name: format!("stock V{} from {}", found.version, found.path.display()),
-                release: None,
-                version: ImageVersion::Stock(found.version),
-            })
-        }
-        Source::Release(tag) => {
-            let release = release(github, tag.as_deref())?;
-            check_release(unit, &release, force)?;
-            let image = github.download(&release, progress)?;
-            Ok(Loaded {
-                image,
-                name: format!("release {} ({})", release.tag, release.image.name),
-                version: ImageVersion::Ours(release.tag.clone()),
-                release: Some(release),
-            })
-        }
-    }
+fn load_file(path: &std::path::Path) -> Result<Loaded, LoadError> {
+    let image = from_file(path)?;
+    image.check_for_mculink().map_err(|error| LoadError::File {
+        path: path.display().to_string(),
+        error,
+    })?;
+    let name = format!("{} ({})", path.display(), image.format);
+    Ok(Loaded {
+        image,
+        name,
+        release: None,
+        version: ImageVersion::Unknown,
+    })
+}
+
+fn load_stock(dir: Option<&PathBuf>) -> Result<Loaded, LoadError> {
+    let dirs = match dir {
+        Some(dir) => vec![dir.clone()],
+        None => stock::search_dirs(),
+    };
+    let Some(found) = stock::find(&dirs).into_iter().next() else {
+        let searched = if dirs.is_empty() {
+            "found no LinkServer install".to_owned()
+        } else {
+            let names: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+            format!("looked in {}", names.join(", "))
+        };
+        return Err(LoadError::NoStock { searched });
+    };
+    let image = from_file(&found.path)?;
+    Ok(Loaded {
+        image,
+        name: format!("stock V{} from {}", found.version, found.path.display()),
+        release: None,
+        version: ImageVersion::Stock(found.version),
+    })
 }
 
 #[cfg(test)]

@@ -197,26 +197,57 @@ fn help_has_examples() {
 
 #[test]
 fn flashing_a_unit_already_in_isp_mode_says_it_may_not_be_an_mculink() {
+    let image = sim_image("isp-warning", None);
     for command in ["flash", "update"] {
         tool("isp")
-            .arg(command)
+            .args([command, "--file"])
+            .arg(&image)
             .assert()
             .failure()
             .stderr(predicate::str::contains(
                 "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode.",
             ));
     }
+    std::fs::remove_file(&image).unwrap();
 }
 
 /// The warning is for a unit that was in ISP mode already; a jumper-free update knows its unit.
 #[test]
 fn a_jumper_free_update_does_not_carry_the_isp_warning() {
+    let image = sim_image("no-isp-warning", None);
     tool("ours")
-        .arg("update")
+        .args(["update", "--file"])
+        .arg(&image)
         .assert()
         .failure()
+        .stderr(predicate::str::contains("Flash "))
         .stderr(predicate::str::contains("Pass --yes"))
         .stderr(predicate::str::contains("cannot tell an MCU-Link").not());
+    std::fs::remove_file(&image).unwrap();
+}
+
+/// A release is downloaded only after a question naming the repository, the tag and the size,
+/// which `--yes` answers; without either, nothing is downloaded. Then the install's own question.
+#[test]
+fn a_release_is_downloaded_only_when_agreed() {
+    for command in ["update", "flash"] {
+        let scenario = if command == "flash" { "isp" } else { "stock" };
+        tool(scenario)
+            .arg(command)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "Download release v0.3.0 of Escapement-Project/mculink-verge from GitHub (",
+            ))
+            .stderr(predicate::str::contains(" KiB)? Pass --yes"))
+            .stderr(predicate::str::contains("Flash ").not());
+    }
+    tool("stock")
+        .args(["update", "--yes"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Download release").not())
+        .stdout(predicate::str::contains("now runs ours, build v0.3.0"));
 }
 
 #[test]
@@ -282,8 +313,12 @@ fn a_batch_asks_once_and_says_what_it_takes() {
         .args(["batch", "--stock-below", "V3.200", "--take", "isp"])
         .assert()
         .failure()
+        // The release has to be downloaded first, and the one question says so.
         .stderr(predicate::str::contains(
-            "every full MCU-Link running stock below V3.200 or in ISP mode, attached from now on?",
+            "Download release v0.3.0 of Escapement-Project/mculink-verge from GitHub (",
+        ))
+        .stderr(predicate::str::contains(
+            " KiB), and flash it onto every full MCU-Link running stock below V3.200 or in ISP mode, attached from now on?",
         ))
         .stderr(predicate::str::contains(
             "cannot tell an MCU-Link from any other",
@@ -688,4 +723,18 @@ fn a_batch_that_cannot_date_ours_is_refused_before_loading() {
             "the image carries no version of ours",
         ))
         .stderr(predicate::str::contains("no MCU-LINK_CMSIS-DAP_V*.s19").not());
+}
+
+/// On a unit that needs the jumper, `update` still loads the release, to check it is built for the
+/// unit, and asks first. The question says why, so a no still tells the user about the jumper.
+#[test]
+fn the_jumper_path_asks_before_it_downloads_and_says_why() {
+    tool("stock-old")
+        .arg("update")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "This unit cannot be updated without the jumper now. Download release v0.3.0 of Escapement-Project/mculink-verge from GitHub (",
+        ))
+        .stderr(predicate::str::contains("Pass --yes"));
 }

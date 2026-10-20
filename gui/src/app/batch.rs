@@ -39,7 +39,14 @@ pub(in crate::app) struct BatchForm {
     count: String,
     record: String,
     dir: PathBuf,
-    pub(in crate::app) confirming: bool,
+    pub(in crate::app) confirming: Option<Arming>,
+}
+
+/// The arming question while it is open. What it says is downloaded first is fixed when it
+/// opens, as [`super::Confirming`]'s is, so it holds only for the image it was opened for.
+pub(in crate::app) struct Arming {
+    source: Source,
+    download: Option<String>,
 }
 
 impl BatchForm {
@@ -56,7 +63,7 @@ impl BatchForm {
             count: String::new(),
             record: record_path(dir),
             dir: dir.to_path_buf(),
-            confirming: false,
+            confirming: None,
         }
     }
 
@@ -368,9 +375,23 @@ impl VergeApp {
                 return;
             }
         };
-        if self.batch_form.confirming {
+        // A question asked about another image no longer stands.
+        if self
+            .batch_form
+            .confirming
+            .as_ref()
+            .is_some_and(|arming| arming.source != source)
+        {
+            self.batch_form.confirming = None;
+        }
+        if let Some(Arming { download, .. }) = &self.batch_form.confirming {
+            let download = download.clone();
+            let lead = match &download {
+                Some(download) => format!("Download {download}, and flash it"),
+                None => format!("Flash {what}"),
+            };
             let mut question = format!(
-                "Flash {what} onto {}? Each goes through its bootloader on its own, without being asked again, until you stop the batch.",
+                "{lead} onto {}? Each goes through its bootloader on its own, without being asked again, until you stop the batch.",
                 filter.describe()
             );
             if filter.bootloaders {
@@ -395,10 +416,11 @@ impl VergeApp {
                         ended: None,
                         started: now,
                     });
-                    self.batch_form.confirming = false;
+                    self.batch_form.confirming = None;
                     self.backend.send(Request::Batch {
                         source: source.clone(),
                         filter: filter.clone(),
+                        download: super::agreed(download.as_ref()),
                         limit,
                         record,
                         stop,
@@ -406,13 +428,16 @@ impl VergeApp {
                     });
                 }
                 if slot(ui, "Back", None).clicked() {
-                    self.batch_form.confirming = false;
+                    self.batch_form.confirming = None;
                 }
             });
             return;
         }
         if slot(ui, "Arm batch", Some(color::OURS)).clicked() {
-            self.batch_form.confirming = true;
+            self.batch_form.confirming = Some(Arming {
+                download: self.download(&source),
+                source,
+            });
         }
     }
 

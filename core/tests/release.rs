@@ -10,7 +10,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use verge_core::progress::Quiet;
 use verge_core::release::{
-    GitHub, Http, HttpError, ReleaseError, Repo, Timeouts, Ureq, parse_checksum, verify_signature,
+    Download, GitHub, Http, HttpError, ReleaseError, Repo, Timeouts, Ureq, parse_checksum,
+    verify_signature,
 };
 use verge_core::sim::http::{SimAsset, SimHttp, SimKey, SimRelease};
 use verge_core::sim::{SimBus, SimFirmware, firmware_image, firmware_srecord};
@@ -215,7 +216,9 @@ fn download(http: &SimHttp, assets: Vec<SimAsset>) -> Result<(), ReleaseError> {
     });
     let github = github(http);
     let release = github.latest()?;
-    github.download(&release, &mut Quiet).map(|_| ())
+    github
+        .download(&release, Download::Agreed, &mut Quiet)
+        .map(|_| ())
 }
 
 #[test]
@@ -232,7 +235,9 @@ fn the_latest_release_downloads_and_checks_out() {
     let release = github.latest().unwrap();
     assert_eq!(release.tag, "v0.3.0");
     assert_eq!(release.image.name, IMAGE);
-    let image = github.download(&release, &mut Quiet).unwrap();
+    let image = github
+        .download(&release, Download::Agreed, &mut Quiet)
+        .unwrap();
     assert_eq!(
         image.chunks,
         firmware_image(&SimFirmware::Ours {
@@ -376,7 +381,9 @@ fn a_build_without_a_release_key_installs_no_release() {
     let github = GitHub::new(http.clone(), repo(), None).with_key(None);
     let release = github.latest().unwrap();
     assert_eq!(
-        github.download(&release, &mut Quiet).unwrap_err(),
+        github
+            .download(&release, Download::Agreed, &mut Quiet)
+            .unwrap_err(),
         ReleaseError::NoKey
     );
     // Refused before any asset was fetched.
@@ -492,7 +499,9 @@ fn a_missing_release_and_a_private_repository() {
     let with_token =
         GitHub::new(http.clone(), repo(), Some("t".into())).with_key(Some(http.public_key()));
     let release = with_token.latest().unwrap();
-    with_token.download(&release, &mut Quiet).unwrap();
+    with_token
+        .download(&release, Download::Agreed, &mut Quiet)
+        .unwrap();
     assert!(
         http.requests()
             .iter()
@@ -522,6 +531,7 @@ fn a_bad_signature_flashes_nothing() {
         &github(&http),
         Some(&units[0]),
         false,
+        Download::Agreed,
         &mut Quiet,
     );
     assert!(
@@ -548,7 +558,9 @@ fn from_release_to_running() {
         unit.build().unwrap().compare(&release.tag),
         Relation::Unknown
     );
-    let image = github.download(&release, &mut Quiet).unwrap();
+    let image = github
+        .download(&release, Download::Agreed, &mut Quiet)
+        .unwrap();
     let version = source::ImageVersion::Ours(release.tag.clone());
     let outcome = update::update(
         &bus,
@@ -596,6 +608,7 @@ fn an_old_signed_image_republished_under_a_newer_tag_is_refused() {
         &github(&http),
         Some(&unit),
         false,
+        Download::Agreed,
         &mut Quiet,
     );
     match loaded {
@@ -758,7 +771,14 @@ fn an_image_of_ours_goes_only_on_a_board_it_declares() {
         };
         std::fs::write(&file, image).unwrap();
         for source in [Source::Release(None), Source::File(file.clone())] {
-            let result = source::load(&source, &github(&http), Some(unit), false, &mut Quiet);
+            let result = source::load(
+                &source,
+                &github(&http),
+                Some(unit),
+                false,
+                Download::Agreed,
+                &mut Quiet,
+            );
             match (&result, &refused) {
                 (Ok(_), None) => {}
                 (Err(error), Some(expected)) if error.to_string() == expected.to_string() => {}
@@ -784,6 +804,7 @@ fn a_board_no_image_can_name_is_refused_before_the_download() {
         &github(&http),
         Some(&unit),
         false,
+        Download::Agreed,
         &mut Quiet,
     );
     let Err(LoadError::OtherBoard { board }) = &result else {
@@ -810,9 +831,70 @@ fn a_board_no_image_can_name_is_refused_before_the_download() {
             &github(&http),
             Some(&unit),
             false,
+            Download::CachedOnly,
             &mut Quiet,
         );
         assert!(stock.is_ok(), "{:?}", stock.map(|l| l.name));
     }
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Nothing is downloaded until the user agrees: `CachedOnly` fetches nothing, a no to the question
+/// fetches nothing, and a build without the release key refuses before it asks.
+#[test]
+fn a_release_is_downloaded_only_when_agreed() {
+    let http = SimHttp::new(repo());
+    http.publish_ours("v0.3.0");
+    let github = github(&http);
+    let release = github.latest().unwrap();
+    let downloads = || {
+        http.requests()
+            .iter()
+            .filter(|url| url.contains("/download/"))
+            .count()
+    };
+    assert_eq!(
+        github
+            .download(&release, Download::CachedOnly, &mut Quiet)
+            .unwrap_err(),
+        ReleaseError::NotAgreed {
+            tag: "v0.3.0".into()
+        }
+    );
+    let load = |github: &GitHub<SimHttp>, answer: Result<(), &'static str>| {
+        let mut asked = Vec::new();
+        let loaded = source::load_asking(
+            &Source::Release(None),
+            github,
+            None,
+            true,
+            |what: &str| {
+                asked.push(what.to_owned());
+                answer
+            },
+            &mut Quiet,
+        );
+        (loaded, asked)
+    };
+
+    let (loaded, asked) = load(&github, Err("no"));
+    assert_eq!(loaded.unwrap_err(), "no");
+    let what = format!(
+        "release v0.3.0 of someone/mculink-verge from GitHub ({:.1} KiB)",
+        release.download_size() as f64 / 1024.0
+    );
+    assert_eq!(asked, [what]);
+    assert_eq!(downloads(), 0);
+    let (loaded, _) = load(&github, Ok(()));
+    loaded.unwrap().unwrap();
+    assert_eq!(downloads(), 3);
+
+    let (loaded, asked) = load(&github.clone().with_key(None), Ok(()));
+    assert!(
+        matches!(loaded, Ok(Err(LoadError::Release(ReleaseError::NoKey)))),
+        "{:?}",
+        loaded.map(|l| l.map(|l| l.name))
+    );
+    assert!(asked.is_empty());
+    assert_eq!(downloads(), 3);
 }

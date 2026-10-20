@@ -410,29 +410,42 @@ impl Source {
     }
 }
 
-/// The image to flash, and how to name it to the user.
+/// The image to flash, and how to name it to the user. A release is downloaded only once `agree`
+/// says yes to what downloading it fetches, as [`source::load_asking`] says.
 fn load<H: Http>(
     source: &Source,
     github: &GitHub<H>,
     unit: Option<&Unit>,
     force: bool,
+    agree: impl FnOnce(&str) -> Result<()>,
 ) -> Result<Loaded> {
-    match source::load(&source.to_core(), github, unit, force, &mut Bars::default()) {
-        Ok(loaded) => Ok(loaded),
-        Err(error @ LoadError::AlreadyRuns { .. }) => {
-            bail!("{error}. Pass --force to flash it again")
+    let progress = &mut Bars::default();
+    source::load_asking(&source.to_core(), github, unit, force, agree, progress)?
+        .map_err(|error| load_error(error, github))
+}
+
+/// Why an image did not load, with the flags that change it.
+fn load_error<H: Http>(error: LoadError, github: &GitHub<H>) -> anyhow::Error {
+    match error {
+        error @ LoadError::AlreadyRuns { .. } => {
+            anyhow::anyhow!("{error}. Pass --force to flash it again")
         }
-        Err(error @ LoadError::Newer { .. }) => {
-            bail!("{error}. Pass --force to install the release anyway")
+        error @ LoadError::Newer { .. } => {
+            anyhow::anyhow!("{error}. Pass --force to install the release anyway")
         }
-        Err(error @ LoadError::NoStock { .. }) => bail!("{error} with --stock DIR"),
-        Err(error @ (LoadError::OtherBoard { .. } | LoadError::NotForBoard { .. })) => {
-            bail!("{error} with --stock")
+        error @ LoadError::NoStock { .. } => anyhow::anyhow!("{error} with --stock DIR"),
+        error @ (LoadError::OtherBoard { .. } | LoadError::NotForBoard { .. }) => {
+            anyhow::anyhow!("{error} with --stock")
         }
-        Err(LoadError::Release(error)) => Err(anyhow::Error::new(error))
-            .with_context(|| format!("looking up releases of ours in {}", github.repo())),
-        Err(error) => Err(error.into()),
+        LoadError::Release(error) => anyhow::Error::new(error)
+            .context(format!("looking up releases of ours in {}", github.repo())),
+        error => error.into(),
     }
+}
+
+/// The question before a release is downloaded for one unit.
+fn download_question(yes: bool) -> impl FnOnce(&str) -> Result<()> {
+    move |what| confirm(&format!("Download {what}?"), yes)
 }
 
 fn confirm(question: &str, yes: bool) -> Result<()> {
@@ -525,8 +538,16 @@ fn update_unit<B: Bus, H: Http>(
     };
     if path == Path::Jumper {
         // Loaded first, so that a known board is refused here as on the jumper-free path, and the
-        // advice names an image checked for it.
-        let loaded = load(&args.source, github, Some(unit), args.force)?;
+        // advice names an image checked for it. The question says why, so that a no still tells
+        // the user about the jumper.
+        let loaded = load(&args.source, github, Some(unit), args.force, |what| {
+            confirm(
+                &format!(
+                    "This unit cannot be updated without the jumper now. Download {what} first, to check that it is built for this unit?"
+                ),
+                args.yes,
+            )
+        })?;
         let again = source::flash_command(&args.source.to_core(), &loaded.version);
         bail!(
             "this unit cannot be updated without the jumper now. {} To use the jumper: unplug the unit, fit the ISP jumper, plug it back in, and run `{again}`. {}",
@@ -536,14 +557,26 @@ fn update_unit<B: Bus, H: Http>(
     }
     let stock = args.source.stock.is_some();
     let unknown = source::board_unknown(unit).filter(|_| !stock);
-    if let Some(unknown) = unknown
-        && args.yes
-    {
-        bail!(
-            "{unknown} The tool asks before putting ours on such a unit, and --yes does not answer that: run it without --yes, at a terminal"
-        );
+    if let Some(unknown) = unknown {
+        if args.yes {
+            bail!(
+                "{unknown} The tool asks before putting ours on such a unit, and --yes does not answer that: run it without --yes, at a terminal"
+            );
+        }
+        // Before anything is downloaded for a question nobody could answer.
+        if !std::io::stdin().is_terminal() {
+            bail!(
+                "{unknown} Only an answer at a terminal says yes to putting ours on such a unit; --yes does not"
+            );
+        }
     }
-    let loaded = load(&args.source, github, Some(unit), args.force)?;
+    let loaded = load(
+        &args.source,
+        github,
+        Some(unit),
+        args.force,
+        download_question(args.yes),
+    )?;
     let (image, name) = (&loaded.image, &loaded.name);
     log_image(image);
     let target = unit.serial().unwrap_or("the unit in ISP mode");
@@ -597,7 +630,13 @@ fn flash<B: Bus, H: Http>(
     cancel: &Cancel,
 ) -> Result<()> {
     let rom = update::only_bootloader(&bus.devices()?)?;
-    let loaded = load(&args.source, github, None, true)?;
+    let loaded = load(
+        &args.source,
+        github,
+        None,
+        true,
+        download_question(args.yes),
+    )?;
     let (image, name) = (&loaded.image, &loaded.name);
     log_image(image);
     let location = rom.location.as_deref().unwrap_or("?");
@@ -738,15 +777,32 @@ fn batch<B: Bus + Sync, H: Http>(
     filter
         .check_source(&core_source)
         .map_err(|error| arm_refusal(&error))?;
-    let (image, name, version) =
-        match source::load(&core_source, github, None, true, &mut Bars::default()) {
-            Ok(loaded) => (loaded.image, loaded.name, loaded.version),
-            Err(LoadError::Release(error)) => {
-                return Err(anyhow::Error::new(error))
-                    .with_context(|| format!("looking up releases of ours in {}", github.repo()));
-            }
-            Err(error) => return Err(error.into()),
-        };
+    // One question arms the batch. Where the release has to be downloaded first, it asks before
+    // the download, and says so.
+    let question = |lead: &str| {
+        let question = format!(
+            "{lead} onto {}? Each goes through its bootloader on its own, without being asked again.",
+            filter.describe()
+        );
+        if filter.bootloaders {
+            format!("{ISP_IDENTITY_WARNING} {question}")
+        } else {
+            question
+        }
+    };
+    let mut asked = false;
+    let Loaded {
+        image,
+        name,
+        version,
+        ..
+    } = load(&args.source, github, None, true, |what| {
+        asked = true;
+        confirm(
+            &question(&format!("Download {what}, and flash it")),
+            args.yes,
+        )
+    })?;
     if stop.is_cancelled() {
         indicatif_println!("Stopped before the batch was armed. Nothing was flashed.");
         return Ok(());
@@ -766,17 +822,12 @@ fn batch<B: Bus + Sync, H: Http>(
             .replace(':', "");
         PathBuf::from(format!("verge-batch-{stamp}.jsonl"))
     });
-    let mut question = format!(
-        "Flash {name} onto {}? Each goes through its bootloader on its own, without being asked again.",
-        filter.describe()
-    );
-    if filter.bootloaders {
-        question = format!("{ISP_IDENTITY_WARNING} {question}");
-        if args.yes {
-            tracing::warn!("{ISP_IDENTITY_WARNING} Taking units in ISP mode, as --yes says.");
-        }
+    if filter.bootloaders && args.yes {
+        tracing::warn!("{ISP_IDENTITY_WARNING} Taking units in ISP mode, as --yes says.");
     }
-    confirm(&question, args.yes)?;
+    if !asked {
+        confirm(&question(&format!("Flash {name}")), args.yes)?;
+    }
     let file = open_record(&path)
         .with_context(|| format!("opening the record file {}", path.display()))?;
     let mut output = BatchOutput {

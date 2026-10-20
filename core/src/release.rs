@@ -19,7 +19,10 @@
 //! The signature is what makes an image ours. The trusted comment is signed with it. Naming the
 //! file there stops a signed image being published under another name, and naming the tag stops
 //! an old image being published again as a newer release, under its own name. The checksum file
-//! and the SHA-256 GitHub keeps of every asset (`digest`) are checked as well.
+//! is checked as well, and so is the SHA-256 GitHub keeps of the image (`digest`), where it
+//! reports one.
+//!
+//! A release is downloaded only once the user agrees to it ([`Download`]).
 
 use std::fmt;
 use std::str::FromStr;
@@ -176,6 +179,10 @@ pub enum ReleaseError {
     Refused(u16),
     #[error(transparent)]
     Http(HttpError),
+    #[error(
+        "release {tag} would have to be downloaded, and that was not asked. Nothing was downloaded or flashed"
+    )]
+    NotAgreed { tag: String },
     #[error("GitHub's reply did not parse: {0}")]
     Json(String),
     #[error("release {tag} has {found} .s19 assets; the convention is exactly one")]
@@ -269,6 +276,30 @@ pub struct Release {
     pub image: Asset,
     pub checksum: Asset,
     pub signature: Asset,
+}
+
+impl Release {
+    /// The assets using the release takes: its signature, its checksum and its image, in the
+    /// order [`GitHub::download`] fetches them.
+    #[must_use]
+    pub fn assets(&self) -> [&Asset; 3] {
+        [&self.signature, &self.checksum, &self.image]
+    }
+
+    /// How many bytes downloading the release fetches.
+    #[must_use]
+    pub fn download_size(&self) -> u64 {
+        self.assets().iter().map(|asset| asset.size).sum()
+    }
+}
+
+/// Whether [`GitHub::download`] may fetch a release, or only take it from the cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Download {
+    /// The user agreed to the download, in answer to a question that named it.
+    Agreed,
+    /// Nothing was asked, so nothing may be downloaded.
+    CachedOnly,
 }
 
 #[derive(Deserialize)]
@@ -412,59 +443,79 @@ impl<H: Http> GitHub<H> {
         Ok(bytes)
     }
 
-    /// Downloads the release's image, its signature and its checksum, and parses the image only
-    /// once all of them check out.
+    /// Downloads the release's image, its signature and its checksum, where `download` agrees to
+    /// it, and parses the image only once all of them check out.
     pub fn download(
         &self,
         release: &Release,
+        download: Download,
         progress: &mut dyn Progress,
     ) -> Result<Image, ReleaseError> {
-        let total = release.image.size + release.checksum.size + release.signature.size;
-        progress.start(Step::Download, total);
         let key = self.key.as_ref().ok_or(ReleaseError::NoKey)?;
-        let signature = self.fetch(&release.signature)?;
-        let sums = self.fetch(&release.checksum)?;
-        progress.advance(release.signature.size + release.checksum.size);
-        let expected = parse_checksum(&sums, &release.checksum.name, &release.image.name)?;
-        let bytes = self.fetch(&release.image)?;
-        progress.advance(total);
-        verify_signature(
-            key,
-            &release.signature.name,
-            &signature,
-            &release.image.name,
-            &release.tag,
-            &bytes,
-        )?;
-        let got = hex::encode(Sha256::digest(&bytes));
-        if got != expected {
-            return Err(ReleaseError::ChecksumMismatch {
-                name: release.image.name.clone(),
-                expected,
-                got,
+        if download == Download::CachedOnly {
+            return Err(ReleaseError::NotAgreed {
+                tag: release.tag.clone(),
             });
         }
-        if let Some(digest) = &release.image.sha256
-            && *digest != got
-        {
-            return Err(ReleaseError::DigestMismatch {
-                name: release.image.name.clone(),
-                expected: digest.clone(),
-                got,
-            });
-        }
-        let image = Image::parse(&bytes).map_err(|error| ReleaseError::Image {
+        progress.start(Step::Download, release.download_size());
+        let mut done = 0;
+        let mut fetch = |asset: &Asset| {
+            let bytes = self.fetch(asset)?;
+            done += asset.size;
+            progress.advance(done);
+            Ok::<_, ReleaseError>(bytes)
+        };
+        let [signature, checksum, image] = release.assets();
+        let fetched = [fetch(signature)?, fetch(checksum)?, fetch(image)?];
+        check(key, release, &fetched)
+    }
+}
+
+/// Checks a release's image against its signature, its checksum file and GitHub's digest, and
+/// parses it. `assets` are the contents of [`Release::assets`], in that order.
+fn check(
+    key: &minisign_verify::PublicKey,
+    release: &Release,
+    assets: &[Vec<u8>; 3],
+) -> Result<Image, ReleaseError> {
+    let [signature, sums, bytes] = assets;
+    let expected = parse_checksum(sums, &release.checksum.name, &release.image.name)?;
+    verify_signature(
+        key,
+        &release.signature.name,
+        signature,
+        &release.image.name,
+        &release.tag,
+        bytes,
+    )?;
+    let got = hex::encode(Sha256::digest(bytes));
+    if got != expected {
+        return Err(ReleaseError::ChecksumMismatch {
+            name: release.image.name.clone(),
+            expected,
+            got,
+        });
+    }
+    if let Some(digest) = &release.image.sha256
+        && *digest != got
+    {
+        return Err(ReleaseError::DigestMismatch {
+            name: release.image.name.clone(),
+            expected: digest.clone(),
+            got,
+        });
+    }
+    let image = Image::parse(bytes).map_err(|error| ReleaseError::Image {
+        name: release.image.name.clone(),
+        error,
+    })?;
+    image
+        .check_for_mculink()
+        .map_err(|error| ReleaseError::Image {
             name: release.image.name.clone(),
             error,
         })?;
-        image
-            .check_for_mculink()
-            .map_err(|error| ReleaseError::Image {
-                name: release.image.name.clone(),
-                error,
-            })?;
-        Ok(image)
-    }
+    Ok(image)
 }
 
 fn conventional(release: ApiRelease) -> Result<Release, ReleaseError> {

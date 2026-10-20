@@ -13,7 +13,7 @@ use verge_core::detect::{Firmware, Guess, Hardware, State};
 use verge_core::image::{Image, PAGE};
 use verge_core::paths::ISP_IDENTITY_WARNING;
 use verge_core::progress::{Cancel, Step, Unit as StepUnit};
-use verge_core::release::{Release, Repo};
+use verge_core::release::{Download, Release, Repo};
 use verge_core::source::{self, ImageVersion, LoadError, Source};
 use verge_core::stock::{self, StockImage};
 use verge_core::update::Outcome;
@@ -109,6 +109,25 @@ enum Action {
     },
 }
 
+/// The question before an update. What it says is downloaded first is fixed when it opens, so
+/// that Confirm agrees to the download the user read about, and one that named none downloads
+/// nothing.
+#[derive(Clone)]
+struct Confirming {
+    unit: Box<Unit>,
+    source: Source,
+    what: String,
+    download: Option<String>,
+}
+
+/// The worker's leave to download, from what the question said.
+fn agreed(download: Option<&String>) -> Download {
+    match download {
+        Some(_) => Download::Agreed,
+        None => Download::CachedOnly,
+    }
+}
+
 pub struct VergeApp {
     backend: Box<dyn Backend>,
     log: Log,
@@ -121,7 +140,7 @@ pub struct VergeApp {
     choice: Choice,
     picked: Option<Picked>,
     force: bool,
-    confirming: Option<(Box<Unit>, Source, String)>,
+    confirming: Option<Confirming>,
     job: Option<Job>,
     ended: Option<Ended>,
     close_pending: bool,
@@ -618,7 +637,16 @@ impl VergeApp {
         }
     }
 
-    fn start(&mut self, unit: Box<Unit>, source: Source, now: f64) {
+    /// What confirming `source` downloads first, for its question: the release the window looked
+    /// up. Where this says nothing, the worker is told to download nothing.
+    fn download(&self, source: &Source) -> Option<String> {
+        let (Source::Release(Some(tag)), Some(Ok(release))) = (source, &self.release) else {
+            return None;
+        };
+        (release.tag == *tag).then(|| source::download_what(&self.config.repo, release))
+    }
+
+    fn start(&mut self, unit: Box<Unit>, source: Source, download: Download, now: f64) {
         let cancel = Cancel::new();
         self.job = Some(Job {
             target: unit_name(&unit),
@@ -637,6 +665,7 @@ impl VergeApp {
             unit,
             source,
             force: self.force,
+            download,
             cancel,
         });
         self.force = false;
@@ -760,7 +789,7 @@ impl VergeApp {
                 if response.clicked() && !selected {
                     self.view = view;
                     self.confirming = None;
-                    self.batch_form.confirming = false;
+                    self.batch_form.confirming = None;
                 }
                 response.on_disabled_hover_text("Wait for what is running to finish.");
             }
@@ -963,9 +992,19 @@ impl VergeApp {
         ui.add_space(space::L);
 
         let action = self.action();
-        if let Some((unit, source, what)) = self.confirming.clone() {
+        if let Some(Confirming {
+            unit,
+            source,
+            what,
+            download,
+        }) = self.confirming.clone()
+        {
+            let lead = match &download {
+                Some(download) => format!("Download {download}, and flash it"),
+                None => format!("Flash {what}"),
+            };
             let mut question = format!(
-                "Flash {what} onto {}? Keep it plugged in until the tool says it is done.",
+                "{lead} onto {}? Keep it plugged in until the tool says it is done.",
                 unit_name(&unit)
             );
             let unknown =
@@ -989,7 +1028,7 @@ impl VergeApp {
                     Action::Blocked { .. } => color::ACCENT,
                 };
                 if slot(ui, "Confirm", Some(fill)).clicked() {
-                    self.start(unit, source, now);
+                    self.start(unit, source, agreed(download.as_ref()), now);
                 }
                 if slot(ui, "Back", None).clicked() {
                     self.confirming = None;
@@ -1005,7 +1044,12 @@ impl VergeApp {
                 what,
             } => {
                 if slot(ui, &words, Some(fill)).clicked() {
-                    self.confirming = Some((Box::new(unit), source, what));
+                    self.confirming = Some(Confirming {
+                        unit: Box::new(unit),
+                        download: self.download(&source),
+                        source,
+                        what,
+                    });
                 }
             }
             Action::Blocked {

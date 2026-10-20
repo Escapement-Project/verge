@@ -12,7 +12,7 @@ use egui::{Role, ViewportCommand, ViewportEvent, ViewportId, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use verge_core::Unit;
-use verge_core::release::{GitHub, Repo};
+use verge_core::release::{Download, GitHub, Repo};
 use verge_core::sim::http::SimHttp;
 use verge_core::sim::{SimBus, SimFirmware, firmware_srecord};
 use verge_core::update::Outcome;
@@ -26,6 +26,10 @@ use crate::worker::{Event, Manual, Shared, Worker};
 fn repo() -> Repo {
     "someone/mculink-verge".parse().unwrap()
 }
+
+/// How a question opens where the simulated release has to be downloaded first. The size
+/// follows it.
+const DOWNLOAD: &str = "Download release v0.3.0 of someone/mculink-verge from GitHub (";
 
 fn sim_app(bus: SimBus, stock_dirs: Vec<PathBuf>) -> VergeApp {
     let http = SimHttp::new(repo());
@@ -111,7 +115,8 @@ fn an_update_is_confirmed_runs_and_reports_the_unit_back() {
     until(&mut h, "INSTALL V0.3.0");
     press(&mut h, "INSTALL V0.3.0");
     // Nothing runs until the user confirms.
-    h.get_by_label_contains("Flash release v0.3.0 onto QK7RM2VTX8D41 at 1-1?");
+    h.get_by_label_contains(DOWNLOAD);
+    h.get_by_label_contains(" KiB), and flash it onto QK7RM2VTX8D41 at 1-1?");
     assert!(!h.state().busy());
     press(&mut h, "CONFIRM");
     assert!(h.state().busy());
@@ -145,14 +150,14 @@ fn confirming_a_unit_already_in_isp_mode_says_it_may_not_be_an_mculink() {
     let mut h = harness(sim_app(SimBus::scenario("isp").unwrap(), vec![]));
     until(&mut h, "INSTALL V0.3.0");
     press(&mut h, "INSTALL V0.3.0");
-    h.get_by_label_contains(
-        "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode. A release says which boards it is built for only once it is downloaded. Flash release v0.3.0",
-    );
+    h.get_by_label_contains(&format!(
+        "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode. A release says which boards it is built for only once it is downloaded. {DOWNLOAD}"
+    ));
     // A jumper-free update restarts a unit it knows, so its confirmation does not say so.
     let mut h = harness(sim_app(SimBus::scenario("ours").unwrap(), vec![]));
     until(&mut h, "UPDATE TO V0.3.0");
     press(&mut h, "UPDATE TO V0.3.0");
-    h.get_by_label_contains("Flash release v0.3.0 onto CJ3E7A91C2");
+    h.get_by_label_contains("and flash it onto CJ3E7A91C2");
     assert!(
         h.query_by_label_contains("cannot tell an MCU-Link")
             .is_none()
@@ -278,7 +283,7 @@ fn the_window_stays_open_while_an_update_writes() {
     press(&mut h, "CONFIRM");
     assert_eq!(
         backend.lock().unwrap().sent.last().unwrap(),
-        "install Release(Some(\"v0.3.0\"))"
+        "install Release(Some(\"v0.3.0\")) Agreed"
     );
 
     request_close(&mut h);
@@ -592,8 +597,9 @@ fn a_batch_updates_units_as_they_arrive_and_records_each() {
     press(&mut h, "BATCH");
     until(&mut h, "ARM BATCH");
     press(&mut h, "ARM BATCH");
+    h.get_by_label_contains(DOWNLOAD);
     h.get_by_label_contains(
-        "Flash release v0.3.0 onto every full MCU-Link running stock or ours older than the image, attached from now on?",
+        " KiB), and flash it onto every full MCU-Link running stock or ours older than the image, attached from now on?",
     );
     assert!(
         h.query_by_label_contains("cannot tell an MCU-Link")
@@ -704,8 +710,11 @@ fn a_batch_that_takes_units_in_isp_mode_says_it_may_not_be_flashing_an_mculink()
         "Units that arrive in ISP mode, as after fitting the jumper",
     );
     press(&mut h, "ARM BATCH");
+    h.get_by_label_contains(&format!(
+        "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode. {DOWNLOAD}"
+    ));
     h.get_by_label_contains(
-        "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode. Flash release v0.3.0 onto every full MCU-Link running stock or ours older than the image or in ISP mode",
+        "and flash it onto every full MCU-Link running stock or ours older than the image or in ISP mode",
     );
 }
 
@@ -917,9 +926,9 @@ fn a_unit_that_names_no_board_is_asked_about() {
     let mut h = harness(sim_app(SimBus::scenario("unnamed-board").unwrap(), vec![]));
     until(&mut h, "INSTALL V0.3.0");
     press(&mut h, "INSTALL V0.3.0");
-    h.get_by_label_contains(
-        "This unit's firmware does not say which board it is, so the tool cannot check that the image is built for it. A release says which boards it is built for only once it is downloaded. Flash release v0.3.0",
-    );
+    h.get_by_label_contains(&format!(
+        "This unit's firmware does not say which board it is, so the tool cannot check that the image is built for it. A release says which boards it is built for only once it is downloaded. {DOWNLOAD}"
+    ));
 }
 
 /// The worker adds a batch's lines to a record file that has some already.
@@ -947,6 +956,7 @@ fn a_batch_adds_to_an_existing_record_file() {
             bootloaders: false,
             attached: false,
         },
+        download: Download::Agreed,
         limit: Some(1),
         record: record.clone(),
         stop: verge_core::Cancel::new(),
@@ -1028,6 +1038,7 @@ fn a_batch_makes_its_record_files_directory() {
             bootloaders: false,
             attached: false,
         },
+        download: Download::Agreed,
         limit: Some(1),
         record: record.clone(),
         stop: verge_core::Cancel::new(),
@@ -1175,6 +1186,7 @@ fn the_worker_refuses_an_undatable_batch_before_loading() {
             bootloaders: false,
             attached: false,
         },
+        download: Download::Agreed,
         limit: None,
         record: record.clone(),
         stop: verge_core::Cancel::new(),
@@ -1248,4 +1260,34 @@ fn the_jumper_advice_does_not_vouch_for_a_release() {
         "This unit is a full MCU-Link. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it then with release v0.3.0 only if it is built for a full MCU-Link.",
     );
     assert!(h.query_by_label_contains("which is built for it").is_none());
+}
+
+/// The arming question's download is fixed when it opens, so picking another image closes it
+/// rather than leave it naming a download for an image no longer chosen.
+#[test]
+fn another_image_closes_the_arming_question() {
+    let dir = record_dir("arming-stock");
+    let version = StockVersion::parse("3.172").unwrap();
+    std::fs::write(
+        dir.join("MCU-LINK_CMSIS-DAP_V3_172.s19"),
+        firmware_srecord(&SimFirmware::Stock { version }),
+    )
+    .unwrap();
+    let mut h = harness(sim_app(
+        SimBus::scenario("ours").unwrap(),
+        vec![dir.clone()],
+    ));
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "BATCH");
+    // Stock carries no version of ours to compare, so the batch takes ours of any build.
+    press(&mut h, "of any build, not only those older than the image");
+    until(&mut h, "ARM BATCH");
+    press(&mut h, "ARM BATCH");
+    h.get_by_label_contains(DOWNLOAD);
+    press(&mut h, "STOCK");
+    assert!(h.query_by_label_contains("Download release").is_none());
+    assert!(h.query_by_label("CONFIRM").is_none());
+    press(&mut h, "ARM BATCH");
+    h.get_by_label_contains("Flash stock V3.172 onto every full MCU-Link");
+    std::fs::remove_dir_all(&dir).unwrap();
 }
