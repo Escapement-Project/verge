@@ -200,6 +200,7 @@ pub(crate) struct World {
     pub stock: RecordedInfo,
     /// The most LPC55S69 bootloaders that were ever on the bus at once.
     pub max_bootloaders: usize,
+    pub boot_after_reset: Duration,
 }
 
 impl World {
@@ -226,6 +227,7 @@ impl World {
             ours: (gcc.dap_info, gcc.ours.expect("the gcc record ran ours")),
             stock: stock.dap_info,
             max_bootloaders: 0,
+            boot_after_reset: Duration::from_millis(1000),
         }
     }
 
@@ -597,6 +599,12 @@ impl SimBus {
 
     pub fn set_jumper(&self, unit: usize, jumper: bool) {
         self.world().units[unit].jumper = jumper;
+    }
+
+    /// How long after the bootloader's reset command a unit enumerates again. It leaves the bus
+    /// 10 ms after the command, so this is more than that.
+    pub fn set_boot_after_reset(&self, after: Duration) {
+        self.world().boot_after_reset = after;
     }
 
     /// Leaves replies on a unit's bulk IN endpoint, as a host that stopped early would.

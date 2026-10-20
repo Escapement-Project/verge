@@ -224,8 +224,9 @@ impl SimRom {
                 self.generic(SUCCESS, tag);
             }
             RESET => {
+                let boot = world.boot_after_reset;
                 world.schedule(Duration::from_millis(10), self.unit, Event::Leave);
-                world.schedule(Duration::from_millis(1000), self.unit, Event::Boot);
+                world.schedule(boot, self.unit, Event::Boot);
                 drop(world);
                 self.generic(SUCCESS, tag);
             }

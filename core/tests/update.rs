@@ -299,6 +299,30 @@ fn the_jumper_path_flashes_and_says_the_jumper_is_still_on() {
 }
 
 #[test]
+fn a_unit_back_between_two_looks_at_the_bus_is_seen() {
+    // On the bench our firmware is back about 0.4 s after the reset, so its port can be empty
+    // for less than one poll.
+    for jumper in [false, true] {
+        let bus = SimBus::scenario(if jumper { "isp-jumper" } else { "isp" }).unwrap();
+        bus.set_boot_after_reset(Duration::from_millis(100));
+        let image = firmware_image(&ours("v0.3.0"));
+        let outcome = update::flash_now(
+            &bus,
+            &image,
+            &Timing::default(),
+            &mut Steps::default(),
+            &Cancel::new(),
+        )
+        .unwrap();
+        if jumper {
+            assert_eq!(outcome, Outcome::JumperStillFitted);
+        } else {
+            assert!(matches!(running(&outcome), Firmware::Ours(o) if o.build == "v0.3.0"));
+        }
+    }
+}
+
+#[test]
 fn back_to_stock_without_the_jumper() {
     let bus = SimBus::scenario("ours").unwrap();
     let unit = the_unit(&bus, "CJ3E7A91C2");

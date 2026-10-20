@@ -223,14 +223,22 @@ pub fn only_bootloader(devices: &[UsbDevice]) -> Result<UsbDevice, UpdateError> 
     }
 }
 
-/// Flashes the one unit in ISP mode, verifies it, and resets it. Returns the bootloader's device.
+/// A unit flashed and reset in ISP mode, for [`wait_for_return`].
+#[derive(Clone, Debug)]
+pub struct Flashed {
+    pub rom: UsbDevice,
+    /// Every instance on the bus just before the reset.
+    before: Vec<String>,
+}
+
+/// Flashes the one unit in ISP mode, verifies it, and resets it.
 pub fn flash_bootloader<B: Bus>(
     bus: &B,
     image: &Image,
     timing: &Timing,
     progress: &mut dyn Progress,
     cancel: &Cancel,
-) -> Result<UsbDevice, UpdateError> {
+) -> Result<Flashed, UpdateError> {
     image.check_for_mculink()?;
     let rom = only_bootloader(&bus.devices()?)?;
 
@@ -262,31 +270,27 @@ pub fn flash_bootloader<B: Bus>(
 
     isp::program(&mut boot, image, &info, progress, cancel)?;
     progress.start(Step::Reset, 0);
+    let before = bus.devices()?.into_iter().map(|d| d.instance).collect();
     isp::reset(&mut boot);
-    Ok(rom)
+    Ok(Flashed { rom, before })
 }
 
-/// Waits for a reset unit to leave the bus and come back, and says what it came back as.
+/// Waits for a reset unit to come back, and says what it came back as.
 pub fn wait_for_return<B: Bus>(
     bus: &B,
-    rom: &UsbDevice,
+    flashed: &Flashed,
     timing: &Timing,
     progress: &mut dyn Progress,
     cancel: &Cancel,
 ) -> Result<Outcome, UpdateError> {
     progress.start(Step::WaitForFirmware, 0);
-    let start = bus.now();
-    let left = wait_until(bus, timing, timing.firmware_returns, cancel, |devices| {
-        (!devices.iter().any(|d| d.instance == rom.instance)).then_some(devices.to_vec())
-    })?;
-    let Some(others) = left else {
-        return Err(UpdateError::NoReturn(timing.firmware_returns));
-    };
-    let remaining = timing.firmware_returns.saturating_sub(bus.now() - start);
-    let back = wait_until(bus, timing, remaining, cancel, |devices| {
+    let rom = &flashed.rom;
+    // A unit can leave and come back between two looks at the bus, so its leaving is not waited
+    // for: any instance on the ROM's port that was not there before the reset is the unit.
+    let back = wait_until(bus, timing, timing.firmware_returns, cancel, |devices| {
         devices
             .iter()
-            .find(|d| same_port(d, rom) && !others.iter().any(|o| o.instance == d.instance))
+            .find(|d| same_port(d, rom) && !flashed.before.contains(&d.instance))
             .cloned()
     })?;
     let Some(device) = back else {
@@ -327,8 +331,8 @@ pub fn update<B: Bus>(
         Step::WaitForFirmware,
     ]);
     enter_bootloader(bus, unit, timing, progress, cancel)?;
-    let rom = flash_bootloader(bus, image, timing, progress, cancel)?;
-    wait_for_return(bus, &rom, timing, progress, cancel)
+    let flashed = flash_bootloader(bus, image, timing, progress, cancel)?;
+    wait_for_return(bus, &flashed, timing, progress, cancel)
 }
 
 /// Installs `image` on `unit` by the best path its state allows: the jumper-free update, or a
@@ -375,6 +379,6 @@ pub fn flash_now<B: Bus>(
         Step::Reset,
         Step::WaitForFirmware,
     ]);
-    let rom = flash_bootloader(bus, image, timing, progress, cancel)?;
-    wait_for_return(bus, &rom, timing, progress, cancel)
+    let flashed = flash_bootloader(bus, image, timing, progress, cancel)?;
+    wait_for_return(bus, &flashed, timing, progress, cancel)
 }
