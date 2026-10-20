@@ -1,7 +1,5 @@
-# verge's own checks: rustfmt, clippy with warnings denied, the tests, and the Windows build,
-# compiled but not run. This file sits in updater/ so that it becomes the repository's own once
-# updater/ is split out as verge. GitHub runs workflows only from a repository's root, so nothing
-# runs it before then.
+# verge's own checks: rustfmt, clippy with warnings denied, the tests, a release build without
+# the simulator, and the Windows build, compiled but not run.
 
 name: check
 
@@ -35,10 +33,29 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: clippy, warnings denied
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # Without --all-targets nothing turns the `simulate` feature on, as in a release build.
+      - name: clippy as a release is built, without the simulator
+        run: cargo clippy --workspace -- -D warnings
 
       - name: Tests
         run: cargo test --workspace
 
+      - name: A release build leaves the simulator out
+        run: |
+          if cargo tree --workspace --edges normal --invert minisign 2>/dev/null | grep -q minisign; then
+            echo "a release build pulls in minisign, which only the simulator needs"
+            exit 1
+          fi
+          cargo build --workspace
+          # --help keeps the window shut; a build that knows --simulate accepts it and exits 0.
+          for tool in verge verge-gui; do
+            if ./target/debug/$tool --simulate bench --help > /dev/null; then
+              echo "$tool, built as a release is, takes --simulate"
+              exit 1
+            fi
+          done
+
       - name: Windows build, compiled only
-        run: cargo check --workspace --all-targets --target x86_64-pc-windows-gnu
+        run: cargo check --workspace --all-targets --all-features --target x86_64-pc-windows-gnu
