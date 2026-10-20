@@ -18,7 +18,7 @@ use verge_core::sim::{SimBus, SimFirmware, firmware_srecord};
 use verge_core::update::Outcome;
 use verge_core::version::StockVersion;
 
-use crate::app::{Config, UpdaterApp};
+use crate::app::{Config, VergeApp};
 use crate::log::Log;
 use crate::style::{self, color};
 use crate::worker::{Event, Manual, Shared, Worker};
@@ -27,7 +27,7 @@ fn repo() -> Repo {
     "someone/mculink-verge".parse().unwrap()
 }
 
-fn sim_app(bus: SimBus, stock_dirs: Vec<PathBuf>) -> UpdaterApp {
+fn sim_app(bus: SimBus, stock_dirs: Vec<PathBuf>) -> VergeApp {
     let http = SimHttp::new(repo());
     http.publish_ours("v0.3.0");
     let key = http.public_key();
@@ -39,12 +39,12 @@ fn sim_app(bus: SimBus, stock_dirs: Vec<PathBuf>) -> UpdaterApp {
 }
 
 /// A window on `bus`, with releases from `github`.
-fn app_on<H>(bus: SimBus, github: GitHub<H>, stock_dirs: Vec<PathBuf>) -> UpdaterApp
+fn app_on<H>(bus: SimBus, github: GitHub<H>, stock_dirs: Vec<PathBuf>) -> VergeApp
 where
     H: verge_core::release::Http + Clone + Send + 'static,
 {
     let worker = Worker::spawn(bus, github, || {});
-    UpdaterApp::new(
+    VergeApp::new(
         Box::new(worker),
         Log::default(),
         Config {
@@ -56,15 +56,15 @@ where
     )
 }
 
-fn harness(app: UpdaterApp) -> Harness<'static, UpdaterApp> {
+fn harness(app: VergeApp) -> Harness<'static, VergeApp> {
     Harness::builder()
         .with_size(vec2(1080.0, 700.0))
         .with_context_setup(style::install)
-        .build_ui_state(|ui, app: &mut UpdaterApp| app.show(ui), app)
+        .build_ui_state(|ui, app: &mut VergeApp| app.show(ui), app)
 }
 
 /// Steps until a widget labelled `label` shows, or fails after 400 frames.
-fn until(h: &mut Harness<'_, UpdaterApp>, label: &str) {
+fn until(h: &mut Harness<'_, VergeApp>, label: &str) {
     for _ in 0..400 {
         h.step();
         if h.query_by_label(label).is_some() {
@@ -75,7 +75,7 @@ fn until(h: &mut Harness<'_, UpdaterApp>, label: &str) {
     panic!("no {label:?} after 400 frames");
 }
 
-fn until_contains(h: &mut Harness<'_, UpdaterApp>, label: &str) {
+fn until_contains(h: &mut Harness<'_, VergeApp>, label: &str) {
     for _ in 0..400 {
         h.step();
         if h.query_by_label_contains(label).is_some() {
@@ -86,7 +86,7 @@ fn until_contains(h: &mut Harness<'_, UpdaterApp>, label: &str) {
     panic!("nothing containing {label:?} after 400 frames");
 }
 
-fn press(h: &mut Harness<'_, UpdaterApp>, label: &str) {
+fn press(h: &mut Harness<'_, VergeApp>, label: &str) {
     // Scrolling animates; a press and release that land on a moving widget are no click.
     h.get_by_label(label).scroll_to_me();
     h.run_steps(20);
@@ -222,7 +222,7 @@ fn a_unit_on_the_release_needs_install_anyway() {
 }
 
 /// A window whose backend the test drives by hand, showing the one unit of `scenario`.
-fn manual_app(scenario: &str, release: bool) -> (UpdaterApp, Shared) {
+fn manual_app(scenario: &str, release: bool) -> (VergeApp, Shared) {
     let bus = SimBus::scenario(scenario).unwrap();
     let units: Vec<Unit> = verge_core::detect(&bus).unwrap();
     let backend: Shared = Arc::new(Mutex::new(Manual::default()));
@@ -238,7 +238,7 @@ fn manual_app(scenario: &str, release: bool) -> (UpdaterApp, Shared) {
                 .push_back(Event::Release(Ok(Box::new(latest))));
         }
     }
-    let app = UpdaterApp::new(
+    let app = VergeApp::new(
         Box::new(backend.clone()),
         Log::default(),
         Config {
@@ -251,7 +251,7 @@ fn manual_app(scenario: &str, release: bool) -> (UpdaterApp, Shared) {
     (app, backend)
 }
 
-fn root_commands(h: &Harness<'_, UpdaterApp>) -> Vec<ViewportCommand> {
+fn root_commands(h: &Harness<'_, VergeApp>) -> Vec<ViewportCommand> {
     h.output()
         .viewport_output
         .get(&ViewportId::ROOT)
@@ -259,7 +259,7 @@ fn root_commands(h: &Harness<'_, UpdaterApp>) -> Vec<ViewportCommand> {
         .unwrap_or_default()
 }
 
-fn request_close(h: &mut Harness<'_, UpdaterApp>) {
+fn request_close(h: &mut Harness<'_, VergeApp>) {
     h.input_mut()
         .viewports
         .entry(ViewportId::ROOT)
@@ -371,17 +371,17 @@ fn ink_reads_on_every_fill() {
 fn pictures() {
     let dir = PathBuf::from(std::env::var("VERGE_GUI_SHOTS").expect("VERGE_GUI_SHOTS"));
     std::fs::create_dir_all(&dir).unwrap();
-    let shoot = |h: &mut Harness<'_, UpdaterApp>, name: &str| {
+    let shoot = |h: &mut Harness<'_, VergeApp>, name: &str| {
         h.step();
         let image = h.render().expect("wgpu renders the window");
         image.save(dir.join(format!("{name}.png"))).unwrap();
     };
-    let rendered = |app: UpdaterApp| {
+    let rendered = |app: VergeApp| {
         Harness::builder()
             .with_size(vec2(1080.0, 700.0))
             .with_context_setup(style::install)
             .wgpu()
-            .build_ui_state(|ui, app: &mut UpdaterApp| app.show(ui), app)
+            .build_ui_state(|ui, app: &mut VergeApp| app.show(ui), app)
     };
 
     let mut h = rendered(sim_app(SimBus::scenario("bench").unwrap(), vec![]));
@@ -577,7 +577,7 @@ fn a_batch_updates_units_as_they_arrive_and_records_each() {
         GitHub::new(http, repo(), None).with_key(Some(key)),
         || {},
     );
-    let app = UpdaterApp::new(
+    let app = VergeApp::new(
         Box::new(worker),
         Log::default(),
         Config {
@@ -787,7 +787,7 @@ impl verge_core::release::Http for Stalled {
     }
 }
 
-fn stalled_app() -> (UpdaterApp, verge_core::Cancel) {
+fn stalled_app() -> (VergeApp, verge_core::Cancel) {
     let http = SimHttp::new(repo());
     http.publish_ours("v0.3.0");
     let release = verge_core::Cancel::new();

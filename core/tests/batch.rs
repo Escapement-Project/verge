@@ -518,7 +518,7 @@ fn stock_probe(product: &str) -> verge_core::Unit {
 }
 
 /// LinkServer's Readme: one stock image for every LPC55S69 MCU-Link, product string
-/// `MCU-LINK [Pro|MR|on-board|<board>] (r<RRR>) CMSIS-DAP V<V>.<BBB>`. PRO.md: do not flash
+/// `MCU-LINK [Pro|MR|on-board|<board>] (r<RRR>) CMSIS-DAP V<V>.<BBB>`. The firmware's PRO.md: do not flash
 /// today's image on a Pro. The batch's board is "the full MCU-Link".
 #[test]
 fn a_batch_for_the_full_mculink_does_not_take_a_pro() {

@@ -1,5 +1,6 @@
 //! Detection, update paths, the ROM bootloader flash sequence, firmware images and release lookup
-//! for an MCU-Link running NXP's CMSIS-DAP firmware or this repository's. No user interface.
+//! for an MCU-Link running NXP's CMSIS-DAP firmware or the `mculink-verge` firmware, which this
+//! tool calls ours. No user interface.
 //!
 //! Everything that touches USB goes through [`bus::Bus`]: [`usb::UsbBus`] is the real one, and
 //! `sim::SimBus` a simulated bench, which the tests and `--simulate` use. The simulator is built

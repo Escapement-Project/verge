@@ -41,7 +41,7 @@ Examples:
   verge flash --file build/mculink_cjtag.elf
                            flash a unit you put into ISP mode with the jumper";
 
-/// Update the firmware on an MCU-Link: NXP's stock firmware, or this repository's.
+/// Update the firmware on an MCU-Link: NXP's stock firmware, or ours from mculink-verge.
 ///
 /// The tool finds every attached MCU-Link, says what it runs, and picks the best way to update
 /// it. A unit running ours, or stock V3.122 or later, restarts into its bootloader when asked,

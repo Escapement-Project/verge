@@ -108,7 +108,7 @@ enum Action {
     },
 }
 
-pub struct UpdaterApp {
+pub struct VergeApp {
     backend: Box<dyn Backend>,
     log: Log,
     config: Config,
@@ -278,11 +278,11 @@ fn outline(ui: &mut Ui, words: &str, enabled: bool) -> egui::Response {
     ui.add_enabled(enabled, button)
 }
 
-impl UpdaterApp {
-    pub fn new(backend: Box<dyn Backend>, log: Log, config: Config) -> UpdaterApp {
+impl VergeApp {
+    pub fn new(backend: Box<dyn Backend>, log: Log, config: Config) -> VergeApp {
         let stock = stock::find(&config.stock_dirs).into_iter().next();
         let batch_form = BatchForm::new(&config.record_dir);
-        let mut app = UpdaterApp {
+        let mut app = VergeApp {
             backend,
             log,
             config,
@@ -1401,7 +1401,7 @@ fn sentence(message: &str) -> String {
     out
 }
 
-impl eframe::App for UpdaterApp {
+impl eframe::App for VergeApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
     }

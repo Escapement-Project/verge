@@ -1,5 +1,5 @@
-//! Image reading held to `objcopy`, which is what `tools/flash.py` used to turn an ELF into the
-//! S-record that `rblhost` flashed.
+//! Image reading held to `objcopy`, which is what the firmware repository's `tools/flash.py` used
+//! to turn an ELF into the S-record that `rblhost` flashed.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -49,7 +49,7 @@ fn objcopy_srec(input: &Path, input_format: Option<&str>) -> Image {
     image
 }
 
-/// Our real image, from the main checkout's last build.
+/// Our real image, from a firmware build.
 #[test]
 #[ignore = "needs a firmware build at $VERGE_FIRMWARE_ELF and arm-none-eabi-objcopy"]
 fn our_firmware_elf_reads_as_objcopy_writes_it() {

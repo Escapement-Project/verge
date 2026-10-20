@@ -20,7 +20,8 @@ pub const STOCK_BOOTLOADER_REQUEST: [u8; 2] = [0x81, 0x01];
 pub const STOCK_BOOTLOADER_ACCEPTED: [u8; 3] = [0x81, 0x00, 0x01];
 
 /// Ours reboots on a vendor request on endpoint 0, answered by CPU 0 even while a DAP command
-/// runs. `wValue` 1 asks for the bootloader, 0 for a plain reboot (`src/reboot_usb.h`).
+/// runs. `wValue` 1 asks for the bootloader, 0 for a plain reboot (the firmware's
+/// `src/reboot_usb.h`).
 pub const REBOOT_REQUEST_TYPE: u8 = 0x40;
 pub const REBOOT_REQUEST: u8 = 0x03;
 pub const REBOOT_TO_BOOTLOADER: u16 = 1;

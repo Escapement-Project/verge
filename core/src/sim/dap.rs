@@ -170,7 +170,7 @@ impl DapLink for SimDap {
         {
             return Err(LinkError::Usb("the request stalled".into()));
         }
-        // The firmware holds the disconnect for 20 ms before it resets (src/reboot.c).
+        // The firmware holds the disconnect for 20 ms before it resets (its src/reboot.c).
         world.schedule(Duration::from_millis(20), self.unit, Event::Leave);
         let after = Duration::from_millis(500);
         if value == dap::REBOOT_TO_BOOTLOADER {

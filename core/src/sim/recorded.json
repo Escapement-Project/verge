@@ -1,5 +1,5 @@
 {
- "source": "bench/throughput/2026-10-20-{clang,gcc,stock}.json in the firmware repository's main checkout, the 'firmware' block of each, copied verbatim",
+ "source": "bench/throughput/2026-10-20-{clang,gcc,stock}.json in the firmware repository, the 'firmware' block of each, copied verbatim",
  "records": [
   {
    "file": "2026-10-20-gcc.json",

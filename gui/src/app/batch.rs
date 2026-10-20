@@ -11,7 +11,7 @@ use verge_core::source::Source;
 use verge_core::version::StockVersion;
 
 use super::{
-    Choice, Current, Picked, UpdaterApp, edged, field, frame, kib, label, outline, slot, wrapping,
+    Choice, Current, Picked, VergeApp, edged, field, frame, kib, label, outline, slot, wrapping,
 };
 use crate::glyph::{self, Glyph};
 use crate::style::{Role, color, space, text};
@@ -186,7 +186,7 @@ fn mark(result: Settled) -> (Glyph, Color32) {
     }
 }
 
-impl UpdaterApp {
+impl VergeApp {
     /// The image chosen above, as a batch's source, or why there is none.
     fn batch_source(&self) -> Result<(Source, String), String> {
         match self.choice {

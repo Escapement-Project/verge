@@ -21,7 +21,7 @@ use verge_core::release::{DEFAULT_REPO, GitHub, Repo, Ureq};
 use verge_core::sim::http::SimHttp;
 use verge_core::usb::UsbBus;
 
-use crate::app::{Config, UpdaterApp};
+use crate::app::{Config, VergeApp};
 use crate::worker::Worker;
 
 /// Update the firmware on an MCU-Link, in a window.
@@ -167,7 +167,7 @@ fn main() -> eframe::Result {
             }) {
                 tracing::debug!("no signal handler: {error}");
             }
-            Ok(Box::new(UpdaterApp::new(Box::new(worker), log, config)))
+            Ok(Box::new(VergeApp::new(Box::new(worker), log, config)))
         }),
     )
 }
