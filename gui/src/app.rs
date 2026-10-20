@@ -9,6 +9,7 @@ use egui::{
     Color32, CornerRadius, Frame, Margin, ScrollArea, Stroke, Ui, ViewportCommand, pos2, vec2,
 };
 use verge_core::board::{self, Board};
+use verge_core::cache::Cache;
 use verge_core::detect::{Firmware, Guess, Hardware, State};
 use verge_core::image::{Image, PAGE};
 use verge_core::paths::ISP_IDENTITY_WARNING;
@@ -37,6 +38,9 @@ pub struct Config {
     pub stock_dirs: Vec<PathBuf>,
     /// Where a batch's record file goes unless the user names another.
     pub record_dir: PathBuf,
+    /// Where the worker keeps the releases it downloads, so a question can say whether one has
+    /// to be downloaded first.
+    pub cache: Option<Cache>,
 }
 
 /// The window's two views: one unit at a time, or a batch.
@@ -637,13 +641,19 @@ impl VergeApp {
         }
     }
 
-    /// What confirming `source` downloads first, for its question: the release the window looked
-    /// up. Where this says nothing, the worker is told to download nothing.
+    /// What confirming `source` downloads first, for its question: a release the cache does not
+    /// hold. Where this says nothing, the worker is told to use only the cache, so a release
+    /// that left the cache since is refused rather than downloaded unasked.
     fn download(&self, source: &Source) -> Option<String> {
         let (Source::Release(Some(tag)), Some(Ok(release))) = (source, &self.release) else {
             return None;
         };
-        (release.tag == *tag).then(|| source::download_what(&self.config.repo, release))
+        let cached = self
+            .config
+            .cache
+            .as_ref()
+            .is_some_and(|cache| cache.holds(&self.config.repo, release));
+        (release.tag == *tag && !cached).then(|| source::download_what(&self.config.repo, release))
     }
 
     fn start(&mut self, unit: Box<Unit>, source: Source, download: Download, now: f64) {

@@ -4862,6 +4862,7 @@ dependencies = [
 name = "verge-core"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "hex",
  "hidapi",
  "humantime",

@@ -12,6 +12,7 @@ use egui::{Role, ViewportCommand, ViewportEvent, ViewportId, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use verge_core::Unit;
+use verge_core::cache::Cache;
 use verge_core::release::{Download, GitHub, Repo};
 use verge_core::sim::http::SimHttp;
 use verge_core::sim::{SimBus, SimFirmware, firmware_srecord};
@@ -56,6 +57,7 @@ where
             simulated: Some("test".into()),
             stock_dirs,
             record_dir: std::env::temp_dir(),
+            cache: None,
         },
     )
 }
@@ -251,6 +253,7 @@ fn manual_app(scenario: &str, release: bool) -> (VergeApp, Shared) {
             simulated: None,
             stock_dirs: vec![],
             record_dir: std::env::temp_dir(),
+            cache: None,
         },
     );
     (app, backend)
@@ -590,6 +593,7 @@ fn a_batch_updates_units_as_they_arrive_and_records_each() {
             simulated: Some("arrivals".into()),
             stock_dirs: vec![],
             record_dir: dir.clone(),
+            cache: None,
         },
     );
     let mut h = harness(app);
@@ -1262,6 +1266,143 @@ fn the_jumper_advice_does_not_vouch_for_a_release() {
     assert!(h.query_by_label_contains("which is built for it").is_none());
 }
 
+/// A window whose worker keeps releases in `cache`, as the real one does, on the bench
+/// `scenario`, with the simulated GitHub it downloads from.
+fn cached_app(scenario: &str, cache: &Cache) -> (VergeApp, SimHttp) {
+    let http = SimHttp::new(repo());
+    http.publish_ours("v0.3.0");
+    let github = GitHub::new(http.clone(), repo(), None)
+        .with_key(Some(http.public_key()))
+        .with_cache(Some(cache.clone()));
+    let worker = Worker::spawn(SimBus::scenario(scenario).unwrap(), github, || {});
+    let app = VergeApp::new(
+        Box::new(worker),
+        Log::default(),
+        Config {
+            repo: repo(),
+            simulated: Some(scenario.into()),
+            stock_dirs: vec![],
+            record_dir: std::env::temp_dir(),
+            cache: Some(cache.clone()),
+        },
+    );
+    (app, http)
+}
+
+/// Puts `http`'s latest release in `cache`, as an earlier run would have.
+fn keep(http: &SimHttp, cache: &Cache) -> verge_core::release::Release {
+    let github = GitHub::new(http.clone(), repo(), None)
+        .with_key(Some(http.public_key()))
+        .with_cache(Some(cache.clone()));
+    let release = github.latest().unwrap();
+    github
+        .download(&release, Download::Agreed, &mut verge_core::progress::Quiet)
+        .unwrap();
+    release
+}
+
+fn downloads(http: &SimHttp) -> usize {
+    http.requests()
+        .iter()
+        .filter(|url| url.contains("/download/"))
+        .count()
+}
+
+/// The first install downloads the release after a question that says so; the next takes it
+/// from the cache, and its question, and the batch's, say nothing of a download.
+#[test]
+fn a_release_in_the_cache_is_not_asked_about_again() {
+    let cache = Cache::at(record_dir("cache-kept"));
+    let (app, http) = cached_app("bench", &cache);
+    let mut h = harness(app);
+    until(&mut h, "UPDATE TO V0.3.0");
+    h.get_by_role_and_label(Role::ListBoxOption, "QK7RM2VTX8D41")
+        .click();
+    h.step();
+    h.step();
+    press(&mut h, "INSTALL V0.3.0");
+    h.get_by_label_contains(DOWNLOAD);
+    press(&mut h, "CONFIRM");
+    until(&mut h, "DONE");
+    press(&mut h, "BACK");
+    assert_eq!(downloads(&http), 3);
+
+    h.get_by_role_and_label(Role::ListBoxOption, "CJ3E7A91C2")
+        .click();
+    h.step();
+    h.step();
+    press(&mut h, "UPDATE TO V0.3.0");
+    h.get_by_label_contains("Flash release v0.3.0 onto CJ3E7A91C2 at");
+    assert!(h.query_by_label_contains("Download release").is_none());
+    press(&mut h, "CONFIRM");
+    until(&mut h, "DONE");
+    press(&mut h, "BACK");
+    assert_eq!(downloads(&http), 3);
+
+    press(&mut h, "BATCH");
+    press(&mut h, "ARM BATCH");
+    h.get_by_label_contains("Flash release v0.3.0 onto every full MCU-Link");
+    assert!(h.query_by_label_contains("Download release").is_none());
+    std::fs::remove_dir_all(cache.root()).unwrap();
+}
+
+/// A cached copy that fails its check ends the job, and is deleted, so the next install asks to
+/// download the release afresh.
+#[test]
+fn a_cached_copy_that_fails_is_downloaded_again_only_when_asked() {
+    let cache = Cache::at(record_dir("cache-spoilt"));
+    let (app, http) = cached_app("stock", &cache);
+    let release = keep(&http, &cache);
+    let image = cache.path(&repo(), "v0.3.0", &release.image.name);
+    let mut bytes = std::fs::read(&image).unwrap();
+    let at = bytes.len() / 2
+        + bytes[bytes.len() / 2..]
+            .iter()
+            .position(u8::is_ascii_hexdigit)
+            .unwrap();
+    bytes[at] = if bytes[at] == b'0' { b'1' } else { b'0' };
+    std::fs::write(&image, bytes).unwrap();
+
+    let mut h = harness(app);
+    until(&mut h, "INSTALL V0.3.0");
+    press(&mut h, "INSTALL V0.3.0");
+    h.get_by_label_contains("Flash release v0.3.0 onto QK7RM2VTX8D41 at 1-1?");
+    press(&mut h, "CONFIRM");
+    until(&mut h, "FAILED");
+    h.get_by_label_contains("the copy of release v0.3.0 in the cache failed its check");
+    h.get_by_label_contains("Try again: the question then asks to download the release.");
+    assert_eq!(downloads(&http), 3);
+    press(&mut h, "BACK");
+
+    until(&mut h, "INSTALL V0.3.0");
+    press(&mut h, "INSTALL V0.3.0");
+    h.get_by_label_contains(DOWNLOAD);
+    press(&mut h, "CONFIRM");
+    until(&mut h, "DONE");
+    assert_eq!(downloads(&http), 6);
+    std::fs::remove_dir_all(cache.root()).unwrap();
+}
+
+/// The question said nothing of a download, so the job downloads nothing, even where the release
+/// has left the cache since.
+#[test]
+fn a_release_gone_from_the_cache_since_the_question_is_not_downloaded() {
+    let cache = Cache::at(record_dir("cache-gone"));
+    let (app, http) = cached_app("stock", &cache);
+    keep(&http, &cache);
+    let mut h = harness(app);
+    until(&mut h, "INSTALL V0.3.0");
+    press(&mut h, "INSTALL V0.3.0");
+    h.get_by_label_contains("Flash release v0.3.0 onto QK7RM2VTX8D41 at 1-1?");
+    std::fs::remove_dir_all(cache.root()).unwrap();
+    h.run_steps(2);
+    h.get_by_label_contains("Flash release v0.3.0 onto QK7RM2VTX8D41 at 1-1?");
+    press(&mut h, "CONFIRM");
+    until(&mut h, "FAILED");
+    h.get_by_label_contains("release v0.3.0 would have to be downloaded, and that was not asked");
+    assert_eq!(downloads(&http), 3);
+}
+
 /// The arming question's download is fixed when it opens, so picking another image closes it
 /// rather than leave it naming a download for an image no longer chosen.
 #[test]
@@ -1290,4 +1431,234 @@ fn another_image_closes_the_arming_question() {
     press(&mut h, "ARM BATCH");
     h.get_by_label_contains("Flash stock V3.172 onto every full MCU-Link");
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Serves `before` until `switched` is set, then `after`: a release published again under its
+/// tag while the window is open.
+#[derive(Clone)]
+struct Republished {
+    before: SimHttp,
+    after: SimHttp,
+    switched: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl verge_core::release::Http for Republished {
+    fn get(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<Vec<u8>, verge_core::release::HttpError> {
+        if self.switched.load(std::sync::atomic::Ordering::SeqCst) {
+            self.after.get(url, headers)
+        } else {
+            self.before.get(url, headers)
+        }
+    }
+}
+
+/// A window on the `stock` bench whose cache keeps v0.3.0, and whose GitHub serves v0.3.0 again,
+/// signed by the same key for the same name and tag but of another size, once the flag is set.
+fn republished_app(name: &str) -> (VergeApp, Arc<std::sync::atomic::AtomicBool>, Cache) {
+    use verge_core::sim::firmware_image;
+    use verge_core::sim::http::{SimAsset, SimRelease};
+
+    let cache = Cache::at(record_dir(name));
+    let _ = std::fs::remove_dir_all(cache.root());
+    let before = SimHttp::new(repo());
+    before.publish_ours("v0.3.0");
+    keep(&before, &cache);
+    let image = firmware_image(&SimFirmware::Ours {
+        build: "v0.3.0".into(),
+    })
+    .to_srecord("simulated, built again");
+    let sha = verge_core::image::Image::parse(image.as_bytes())
+        .unwrap()
+        .sha256_hex();
+    let file = "mculink-verge-v0.3.0.s19";
+    let after = SimHttp::new(repo());
+    after.publish(SimRelease {
+        tag: "v0.3.0".into(),
+        prerelease: false,
+        assets: vec![
+            SimAsset::new(file, image.clone().into_bytes()),
+            SimAsset::new(
+                &format!("{file}.sha256"),
+                format!("{sha}  {file}\n").into_bytes(),
+            ),
+            before.key().sign(
+                &format!("{file}.minisig"),
+                image.as_bytes(),
+                &format!("file:{file} tag:v0.3.0"),
+            ),
+        ],
+    });
+    let switched = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let http = Republished {
+        before: before.clone(),
+        after,
+        switched: switched.clone(),
+    };
+    let github = GitHub::new(http, repo(), None)
+        .with_key(Some(before.public_key()))
+        .with_cache(Some(cache.clone()));
+    let worker = Worker::spawn(SimBus::scenario("stock").unwrap(), github, || {});
+    let app = VergeApp::new(
+        Box::new(worker),
+        Log::default(),
+        Config {
+            repo: repo(),
+            simulated: Some("stock".into()),
+            stock_dirs: vec![],
+            record_dir: cache.root().to_path_buf(),
+            cache: Some(cache.clone()),
+        },
+    );
+    (app, switched, cache)
+}
+
+/// The window's question judges the cache by the release the window looked up, and the worker by
+/// a lookup of its own. Where the release was published again since, the job ends asking to try
+/// again, and the worker looks the release up again for the window, so the next question names
+/// the download. (The F10/F11 review's proof.)
+#[test]
+fn a_release_published_again_is_asked_about_after_try_again() {
+    let (app, switched, cache) = republished_app("republished");
+    let mut h = harness(app);
+    until(&mut h, "INSTALL V0.3.0");
+    switched.store(true, std::sync::atomic::Ordering::SeqCst);
+    press(&mut h, "INSTALL V0.3.0");
+    h.get_by_label_contains("Flash release v0.3.0 onto QK7RM2VTX8D41 at 1-1?");
+    press(&mut h, "CONFIRM");
+    until(&mut h, "FAILED");
+    h.get_by_label_contains("would have to be downloaded, and that was not asked");
+    h.get_by_label_contains("Try again: the question then asks to download the release.");
+    press(&mut h, "BACK");
+    until(&mut h, "INSTALL V0.3.0");
+    press(&mut h, "INSTALL V0.3.0");
+    h.get_by_label_contains(DOWNLOAD);
+    press(&mut h, "CONFIRM");
+    until(&mut h, "DONE");
+    std::fs::remove_dir_all(cache.root()).unwrap();
+}
+
+/// The same for a batch: the arming question that named no download arms nothing new, and the
+/// next one names the download.
+#[test]
+fn a_batch_of_a_release_published_again_is_asked_about_after_try_again() {
+    let (app, switched, cache) = republished_app("republished-batch");
+    let mut h = harness(app);
+    until(&mut h, "INSTALL V0.3.0");
+    switched.store(true, std::sync::atomic::Ordering::SeqCst);
+    press(&mut h, "BATCH");
+    press(&mut h, "ARM BATCH");
+    h.get_by_label_contains("Flash release v0.3.0 onto every full MCU-Link");
+    press(&mut h, "CONFIRM");
+    until(&mut h, "NOT ARMED");
+    h.get_by_label_contains("would have to be downloaded, and that was not asked");
+    h.get_by_label_contains("Try again: the question then asks to download the release.");
+    press(&mut h, "BACK");
+    until(&mut h, "ARM BATCH");
+    press(&mut h, "ARM BATCH");
+    h.get_by_label_contains(DOWNLOAD);
+    std::fs::remove_dir_all(cache.root()).unwrap();
+}
+
+/// The batch view's question, like the unit view's, fixes its download when it opens: a release
+/// that left the cache since is not downloaded, and the advice says what to do.
+#[test]
+fn a_batch_release_gone_from_the_cache_since_its_question_is_not_downloaded() {
+    let cache = Cache::at(record_dir("cache-gone-batch"));
+    let (app, http) = cached_app("arrivals", &cache);
+    keep(&http, &cache);
+    let mut h = harness(app);
+    until(&mut h, "BATCH");
+    press(&mut h, "BATCH");
+    until(&mut h, "ARM BATCH");
+    press(&mut h, "ARM BATCH");
+    h.get_by_label_contains("Flash release v0.3.0 onto every full MCU-Link");
+    std::fs::remove_dir_all(cache.root()).unwrap();
+    h.run_steps(2);
+    h.get_by_label_contains("Flash release v0.3.0 onto every full MCU-Link");
+    assert!(h.query_by_label_contains("Download release").is_none());
+    press(&mut h, "CONFIRM");
+    until(&mut h, "NOT ARMED");
+    h.get_by_label_contains("would have to be downloaded, and that was not asked");
+    h.get_by_label_contains("Try again: the question then asks to download the release.");
+    assert_eq!(downloads(&http), 3);
+}
+
+/// A kept copy the window cannot read, though it is there at its size, is not taken as kept: the
+/// question names the download. Where the permissions do not bind, as for root, a directory in
+/// its place stands in, which has another size too.
+#[test]
+fn a_kept_copy_that_cannot_be_read_is_asked_about() {
+    let cache = Cache::at(record_dir("cache-unreadable"));
+    let (app, http) = cached_app("stock", &cache);
+    let release = keep(&http, &cache);
+    let image = cache.path(&repo(), "v0.3.0", &release.image.name);
+    unreadable(&image);
+    let mut h = harness(app);
+    until(&mut h, "INSTALL V0.3.0");
+    press(&mut h, "INSTALL V0.3.0");
+    h.get_by_label_contains(DOWNLOAD);
+    std::fs::remove_dir_all(cache.root()).unwrap();
+}
+
+/// Makes the file at `path` unreadable to this user, keeping its size where the permissions bind.
+fn unreadable(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o0)).unwrap();
+        if std::fs::read(path).is_err() {
+            return;
+        }
+    }
+    std::fs::remove_file(path).unwrap();
+    std::fs::create_dir(path).unwrap();
+}
+
+/// A failed copy the tool could not delete, as in a cache another user wrote, would be read
+/// again by every job, so the advice is to delete it rather than to try again. Needs a user the
+/// permissions bind, so it passes without checking anything as root.
+#[cfg(unix)]
+#[test]
+fn a_failed_copy_that_cannot_be_deleted_is_left_to_the_user() {
+    use std::os::unix::fs::PermissionsExt;
+    let chmod = |path: &std::path::Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let cache = Cache::at(record_dir("cache-undeletable"));
+    let (app, http) = cached_app("stock", &cache);
+    let release = keep(&http, &cache);
+    let image = cache.path(&repo(), "v0.3.0", &release.image.name);
+    let mut bytes = std::fs::read(&image).unwrap();
+    let at = bytes.len() / 2
+        + bytes[bytes.len() / 2..]
+            .iter()
+            .position(u8::is_ascii_hexdigit)
+            .unwrap();
+    bytes[at] = if bytes[at] == b'0' { b'1' } else { b'0' };
+    std::fs::write(&image, bytes).unwrap();
+    let dir = cache.release_dir(&repo(), "v0.3.0");
+    chmod(&dir, 0o555);
+    if std::fs::write(dir.join("probe"), b"").is_ok() {
+        eprintln!("the permissions do not bind this user; nothing checked");
+        chmod(&dir, 0o755);
+        std::fs::remove_dir_all(cache.root()).unwrap();
+        return;
+    }
+    let mut h = harness(app);
+    until(&mut h, "INSTALL V0.3.0");
+    press(&mut h, "INSTALL V0.3.0");
+    press(&mut h, "CONFIRM");
+    until(&mut h, "FAILED");
+    chmod(&dir, 0o755);
+    h.get_by_label_contains("failed its check, and could not be deleted");
+    h.get_by_label_contains("Delete that copy, then try again.");
+    assert!(
+        h.query_by_label_contains("Try again: the question")
+            .is_none()
+    );
+    std::fs::remove_dir_all(cache.root()).unwrap();
 }

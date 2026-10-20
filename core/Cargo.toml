@@ -5,6 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+dirs = "7.0.0"
 hex = "0.4.3"
 hidapi = "2.6.7"
 humantime = "2.4.0"

@@ -184,7 +184,8 @@ pub fn board_unknown(unit: &Unit) -> Option<&'static str> {
 
 /// Loads the image `source` names. Refuses an image of ours for a unit it is not built for. For a
 /// release, refuses one `unit` already runs or is ahead of unless `force`, before anything is
-/// downloaded; then downloads it, where `download` agrees to it ([`GitHub::download`]).
+/// downloaded; then takes it from the cache or downloads it, as `download` allows
+/// ([`GitHub::download`]).
 pub fn load<H: Http>(
     source: &Source,
     github: &GitHub<H>,
@@ -210,8 +211,10 @@ pub fn load<H: Http>(
 
 /// [`load`], asking `agree` before a release is downloaded, with what downloading it fetches
 /// ([`download_what`]). What is refused without a download, such as a build with no release key,
-/// is refused before the question. `agree`'s error is the outer one: nothing is downloaded once it
-/// says no.
+/// is refused before the question. A release whose copy in the cache checks out needs no
+/// question. One the cache cannot give, because it holds none, cannot read it, or holds a copy
+/// that fails its check (deleted where it can be), is downloaded afresh after the question.
+/// `agree`'s error is the outer one: nothing is downloaded once it says no.
 pub fn load_asking<H: Http, E>(
     source: &Source,
     github: &GitHub<H>,
@@ -241,7 +244,12 @@ pub fn load_asking<H: Http, E>(
         Download::CachedOnly,
         progress,
     ) {
-        Err(LoadError::Release(ReleaseError::NotAgreed { .. })) => {
+        Err(LoadError::Release(
+            error @ (ReleaseError::NotAgreed { .. } | ReleaseError::CachedCopyFailed { .. }),
+        )) => {
+            if let ReleaseError::CachedCopyFailed { .. } = error {
+                tracing::warn!("{error}");
+            }
             agree(&download_what(github.repo(), &release))?;
             Ok(load_release(
                 github,
@@ -270,7 +278,7 @@ fn find_release<H: Http>(
     Ok(release)
 }
 
-/// `release`'s image, downloaded where `download` agrees to it, with its
+/// `release`'s image, from the cache or downloaded where `download` agrees to it, with its
 /// signature and checksums checked, and refused for a unit whose board it does not declare.
 fn load_release<H: Http>(
     github: &GitHub<H>,

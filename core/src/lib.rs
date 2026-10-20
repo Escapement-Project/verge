@@ -9,6 +9,7 @@
 pub mod batch;
 pub mod board;
 pub mod bus;
+pub mod cache;
 pub mod dap;
 pub mod detect;
 pub mod hid;

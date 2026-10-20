@@ -16,6 +16,7 @@ use verge_core::batch::{
     open_record,
 };
 use verge_core::board;
+use verge_core::cache::Cache;
 use verge_core::detect::{Guess, Hardware, State};
 use verge_core::image::{Image, PAGE};
 use verge_core::paths::ISP_IDENTITY_WARNING;
@@ -25,7 +26,7 @@ use verge_core::release::{DEFAULT_REPO, GitHub, Http, Repo, Ureq};
 use verge_core::sim::http::SimHttp;
 #[cfg(feature = "simulate")]
 use verge_core::sim::{SCENARIOS, SimBus};
-use verge_core::source::{self, LoadError, Loaded};
+use verge_core::source::{self, ImageVersion, LoadError, Loaded};
 use verge_core::update::{self, Outcome, Timing, UpdateError};
 use verge_core::usb::UsbBus;
 use verge_core::version::Relation;
@@ -276,7 +277,8 @@ fn main() -> ExitCode {
     }
 
     let result = simulated(&cli, &cancel, &stop).unwrap_or_else(|| {
-        let github = GitHub::new(Ureq::default(), cli.repo.clone(), cli.github_token.clone());
+        let github = GitHub::new(Ureq::default(), cli.repo.clone(), cli.github_token.clone())
+            .with_cache(Cache::user());
         run(&cli, &UsbBus::default(), &github, &cancel, &stop)
     });
     match result {
@@ -297,6 +299,8 @@ fn main() -> ExitCode {
 fn simulated(cli: &Cli, cancel: &Cancel, stop: &Cancel) -> Option<Result<()>> {
     let name = cli.simulate.as_ref()?;
     Some(match SimBus::scenario(name) {
+        // No cache: a simulated GitHub signs with a key made for the run, so a copy kept from
+        // another run would never check out.
         Some(bus) => {
             let http = SimHttp::new(cli.repo.clone());
             http.publish_ours("v0.3.0");
@@ -448,6 +452,19 @@ fn download_question(yes: bool) -> impl FnOnce(&str) -> Result<()> {
     move |what| confirm(&format!("Download {what}?"), yes)
 }
 
+/// The command that flashes the same image again, for advice. A release names its repository
+/// where it is not the default, so that the command finds the same release, and its kept copy.
+fn again<H: Http>(source: &Source, version: &ImageVersion, github: &GitHub<H>) -> String {
+    let core = source.to_core();
+    let command = source::flash_command(&core, version);
+    match core {
+        source::Source::Release(_) if *github.repo() != Repo::default() => {
+            format!("{command} --repo {}", github.repo())
+        }
+        _ => command,
+    }
+}
+
 fn confirm(question: &str, yes: bool) -> Result<()> {
     if yes {
         return Ok(());
@@ -548,7 +565,7 @@ fn update_unit<B: Bus, H: Http>(
                 args.yes,
             )
         })?;
-        let again = source::flash_command(&args.source.to_core(), &loaded.version);
+        let again = again(&args.source, &loaded.version, github);
         bail!(
             "this unit cannot be updated without the jumper now. {} To use the jumper: unplug the unit, fit the ISP jumper, plug it back in, and run `{again}`. {}",
             offer.notes.join(" "),
@@ -607,7 +624,7 @@ fn update_unit<B: Bus, H: Http>(
         cancel,
     );
     drop(bars);
-    let again = source::flash_command(&args.source.to_core(), &loaded.version);
+    let again = again(&args.source, &loaded.version, github);
     report(&outcome.map_err(|error| explain(error, &again, Some(unit)))?);
     Ok(())
 }
@@ -655,7 +672,7 @@ fn flash<B: Bus, H: Http>(
     let mut bars = Bars::default();
     let outcome = update::flash_now(bus, image, &Timing::default(), &mut bars, cancel);
     drop(bars);
-    let again = source::flash_command(&args.source.to_core(), &loaded.version);
+    let again = again(&args.source, &loaded.version, github);
     report(&outcome.map_err(|error| explain(error, &again, None))?);
     Ok(())
 }

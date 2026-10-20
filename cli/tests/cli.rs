@@ -738,3 +738,23 @@ fn the_jumper_path_asks_before_it_downloads_and_says_why() {
         ))
         .stderr(predicate::str::contains("Pass --yes"));
 }
+
+/// The advised `verge flash` names the repository the release came from where it is not the
+/// default, so that it finds the same release, and the copy `update` kept of it.
+#[test]
+fn the_advice_names_a_repository_given_on_the_command_line() {
+    tool("stock-old")
+        .args(["--repo", "someone/fork", "update", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "run `verge flash --release v0.3.0 --repo someone/fork`",
+        ));
+    tool("stock-old")
+        .args(["update", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "run `verge flash --release v0.3.0`",
+        ));
+}

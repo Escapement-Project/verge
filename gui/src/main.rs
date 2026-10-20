@@ -16,6 +16,7 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use verge_core::cache::Cache;
 use verge_core::release::{DEFAULT_REPO, GitHub, Repo, Ureq};
 #[cfg(feature = "simulate")]
 use verge_core::sim::http::SimHttp;
@@ -121,11 +122,18 @@ fn main() -> eframe::Result {
         .init();
 
     let simulated = simulated(&args);
+    // A simulated GitHub signs with a key made for the run, so a copy kept from another run
+    // would never check out.
+    let cache = match simulated {
+        Some(_) => None,
+        None => Cache::user(),
+    };
     let config = Config {
         repo: args.repo.clone(),
         simulated: simulated.as_ref().map(|(name, _)| name.clone()),
         stock_dirs: verge_core::stock::search_dirs(),
         record_dir: record_dir(),
+        cache: cache.clone(),
     };
 
     let options = eframe::NativeOptions {
@@ -155,7 +163,8 @@ fn main() -> eframe::Result {
                         Ureq::default(),
                         args.repo.clone(),
                         args.github_token.clone(),
-                    ),
+                    )
+                    .with_cache(cache),
                     repaint,
                 ),
             };

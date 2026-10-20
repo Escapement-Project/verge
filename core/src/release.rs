@@ -22,7 +22,9 @@
 //! is checked as well, and so is the SHA-256 GitHub keeps of the image (`digest`), where it
 //! reports one.
 //!
-//! A release is downloaded only once the user agrees to it ([`Download`]).
+//! A release is downloaded only once the user agrees to it ([`Download`]), and kept in a
+//! [`Cache`] for the next run. A cached copy is checked as a fresh download is, every time it is
+//! used. Looking a release up always asks GitHub.
 
 use std::fmt;
 use std::str::FromStr;
@@ -31,6 +33,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::cache::Cache;
 use crate::image::{Image, ImageError};
 use crate::progress::{Progress, Step};
 
@@ -180,6 +183,17 @@ pub enum ReleaseError {
     #[error(transparent)]
     Http(HttpError),
     #[error(
+        "{0}. A release is looked up on GitHub every time it is used, even one downloaded already"
+    )]
+    Unreachable(HttpError),
+    #[error("the copy of release {tag} in the cache failed its check, {}: {reason}", deleted(.left))]
+    CachedCopyFailed {
+        tag: String,
+        reason: String,
+        /// Why the copy is still there, where it could not be deleted.
+        left: Option<String>,
+    },
+    #[error(
         "release {tag} would have to be downloaded, and that was not asked. Nothing was downloaded or flashed"
     )]
     NotAgreed { tag: String },
@@ -253,6 +267,13 @@ pub enum ReleaseError {
     SignatureNamesNoRelease { name: String, tag: String },
 }
 
+fn deleted(left: &Option<String>) -> String {
+    match left {
+        None => "so it was deleted".to_owned(),
+        Some(error) => format!("and could not be deleted ({error})"),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Asset {
     pub name: String,
@@ -296,9 +317,10 @@ impl Release {
 /// Whether [`GitHub::download`] may fetch a release, or only take it from the cache.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Download {
-    /// The user agreed to the download, in answer to a question that named it.
+    /// The user agreed to the download, in answer to a question that named it. The release is
+    /// downloaded whatever the cache holds.
     Agreed,
-    /// Nothing was asked, so nothing may be downloaded.
+    /// Nothing was asked: only a cached copy may be used.
     CachedOnly,
 }
 
@@ -352,6 +374,7 @@ pub struct GitHub<H> {
     repo: Repo,
     token: Option<String>,
     key: Option<minisign_verify::PublicKey>,
+    cache: Option<Cache>,
 }
 
 impl<H: Http> GitHub<H> {
@@ -362,7 +385,15 @@ impl<H: Http> GitHub<H> {
             repo,
             token,
             key: release_key(),
+            cache: None,
         }
+    }
+
+    /// Keeps the releases it downloads in `cache`, and takes them from there next time.
+    #[must_use]
+    pub fn with_cache(mut self, cache: Option<Cache>) -> GitHub<H> {
+        self.cache = cache;
+        self
     }
 
     /// Checks signatures against `key` instead of the built-in one. For a simulated bench and the
@@ -403,6 +434,9 @@ impl<H: Http> GitHub<H> {
                     status: status @ (401 | 403 | 429),
                     ..
                 } => ReleaseError::Refused(status),
+                unreachable @ (HttpError::Transport(_) | HttpError::Timeout { .. }) => {
+                    ReleaseError::Unreachable(unreachable)
+                }
                 other => ReleaseError::Http(other),
             })?;
         let release: ApiRelease =
@@ -443,8 +477,10 @@ impl<H: Http> GitHub<H> {
         Ok(bytes)
     }
 
-    /// Downloads the release's image, its signature and its checksum, where `download` agrees to
-    /// it, and parses the image only once all of them check out.
+    /// The release's image, its signature and its checksum, with the image parsed only once all
+    /// of them check out. `CachedOnly` takes them from the cache, where it holds them all; a copy
+    /// that fails its check is deleted, and [`ReleaseError::CachedCopyFailed`] says so. `Agreed`
+    /// downloads them whatever the cache holds, and keeps them there once they check out.
     pub fn download(
         &self,
         release: &Release,
@@ -452,9 +488,30 @@ impl<H: Http> GitHub<H> {
         progress: &mut dyn Progress,
     ) -> Result<Image, ReleaseError> {
         let key = self.key.as_ref().ok_or(ReleaseError::NoKey)?;
+        let assets = release.assets();
         if download == Download::CachedOnly {
-            return Err(ReleaseError::NotAgreed {
+            let kept = self.cache.as_ref().and_then(|cache| {
+                let [a, b, c] = assets.map(|asset| cache.read(&self.repo, &release.tag, asset));
+                Some((cache, [a?, b?, c?]))
+            });
+            let Some((cache, kept)) = kept else {
+                return Err(ReleaseError::NotAgreed {
+                    tag: release.tag.clone(),
+                });
+            };
+            let dir = cache.release_dir(&self.repo, &release.tag);
+            tracing::info!(
+                "release {} from the cache in {}",
+                release.tag,
+                dir.display()
+            );
+            return check(key, release, &kept).map_err(|error| ReleaseError::CachedCopyFailed {
                 tag: release.tag.clone(),
+                reason: error.to_string(),
+                left: cache
+                    .discard(&self.repo, &release.tag)
+                    .err()
+                    .map(|error| format!("{}: {error}", dir.display())),
             });
         }
         progress.start(Step::Download, release.download_size());
@@ -465,9 +522,17 @@ impl<H: Http> GitHub<H> {
             progress.advance(done);
             Ok::<_, ReleaseError>(bytes)
         };
-        let [signature, checksum, image] = release.assets();
+        let [signature, checksum, image] = assets;
         let fetched = [fetch(signature)?, fetch(checksum)?, fetch(image)?];
-        check(key, release, &fetched)
+        let parsed = check(key, release, &fetched)?;
+        if let Some(cache) = &self.cache {
+            for (asset, bytes) in assets.iter().zip(&fetched) {
+                if let Err(error) = cache.write(&self.repo, &release.tag, &asset.name, bytes) {
+                    tracing::warn!("could not keep {} in the cache: {error}", asset.name);
+                }
+            }
+        }
+        Ok(parsed)
     }
 }
 

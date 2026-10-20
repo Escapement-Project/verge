@@ -11,7 +11,7 @@ use verge_core::batch::{
     ArmError, Armed, Batch, Entry, Filter, Observer, Record, Status, Tally, open_record,
 };
 use verge_core::progress::{Cancel, Progress, Step};
-use verge_core::release::{Download, GitHub, Http, Release};
+use verge_core::release::{Download, GitHub, Http, Release, ReleaseError};
 use verge_core::source::{self, LoadError, Loaded, Source};
 use verge_core::update::{self, Outcome, Timing, UpdateError};
 use verge_core::{Bus, Unit, detect};
@@ -184,6 +184,10 @@ fn load_error(error: &LoadError) -> JobError {
         LoadError::OtherBoard { .. } | LoadError::NotForBoard { .. } => {
             Some("Pick STOCK to put NXP's image on it instead.")
         }
+        error if download_again(error) => Some(DOWNLOAD_AGAIN),
+        LoadError::Release(ReleaseError::CachedCopyFailed { left: Some(_), .. }) => {
+            Some(CLEAR_THE_COPY)
+        }
         _ => None,
     };
     JobError {
@@ -191,6 +195,31 @@ fn load_error(error: &LoadError) -> JobError {
         advice,
         left_in_isp: false,
     }
+}
+
+/// Whether `error` is a release that could not come from the cache and was not to be downloaded.
+/// The next question asks to download it. A failed copy the tool could not delete is not one: the
+/// cache would still hold it.
+fn download_again(error: &LoadError) -> bool {
+    matches!(
+        error,
+        LoadError::Release(
+            ReleaseError::CachedCopyFailed { left: None, .. } | ReleaseError::NotAgreed { .. }
+        )
+    )
+}
+
+const DOWNLOAD_AGAIN: &str = "Try again: the question then asks to download the release.";
+const CLEAR_THE_COPY: &str = "Delete that copy, then try again.";
+
+/// Looks the latest release up again for the window. Its questions judge the cache by its own
+/// lookup, and a release the cache could not give may have been published again since, so
+/// without this the next question would still name no download.
+fn look_up_again<H: Http>(github: &GitHub<H>, forward: &Forward<'_>) {
+    let release = source::release(github, None)
+        .map(Box::new)
+        .map_err(|e| e.to_string());
+    forward.send(Event::Release(release));
 }
 
 /// Why a batch did not arm, with what to change in the batch view.
@@ -255,7 +284,12 @@ fn install<B: Bus, H: Http + Clone + Send + 'static>(
         progress,
         cancel,
     )
-    .map_err(|error| load_error(&error))?
+    .map_err(|error| {
+        if download_again(&error) {
+            look_up_again(github, progress);
+        }
+        load_error(&error)
+    })?
     .ok_or_else(|| JobError {
         message: "cancelled before anything was flashed".into(),
         advice: None,
@@ -356,7 +390,18 @@ fn run_batch<B: Bus + Sync, H: Http + Clone + Send + 'static>(
         .check_source(source)
         .map_err(|error| arm_error(&error))?;
     let loaded = load_stoppable(github, source, None, true, download, forward, stop);
-    let Some(loaded) = loaded.map_err(|e| e.to_string())? else {
+    let Some(loaded) = loaded.map_err(|error| {
+        if download_again(&error) {
+            look_up_again(github, forward);
+        }
+        match load_error(&error).advice {
+            Some(advice @ (DOWNLOAD_AGAIN | CLEAR_THE_COPY)) => {
+                format!("{} {advice}", crate::app::sentence(&error.to_string()))
+            }
+            _ => error.to_string(),
+        }
+    })?
+    else {
         tracing::info!("stopped before the batch was armed");
         return Ok(Tally::default());
     };
