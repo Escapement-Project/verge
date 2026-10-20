@@ -1,5 +1,5 @@
 [package]
-name = "updater-cli"
+name = "verge"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -9,11 +9,13 @@ anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive", "env", "wrap_help"] }
 ctrlc = { version = "3.5.2", features = ["termination"] }
 dialoguer = "0.12.0"
+humantime = "2.4.0"
 indicatif = "0.18.6"
+serde_json = "1.0.154"
 tracing = "0.1.44"
 tracing-indicatif = "0.3.14"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-updater-core = { version = "0.1.0", path = "../core" }
+verge-core = { version = "0.1.0", path = "../core" }
 
 [lints]
 workspace = true
@@ -23,5 +25,5 @@ assert_cmd = "2.2.2"
 predicates = "3.1.4"
 
 [[bin]]
-name = "verge-update"
+name = "verge"
 path = "src/main.rs"

@@ -1,0 +1,44 @@
+# verge's own checks: rustfmt, clippy with warnings denied, the tests, and the Windows build,
+# compiled but not run. This file sits in updater/ so that it becomes the repository's own once
+# updater/ is split out as verge. GitHub runs workflows only from a repository's root, so nothing
+# runs it before then.
+
+name: check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Arch, where these checks have been run. hidapi's build compiles C against libudev, and for
+    # the Windows target it compiles that C with MinGW.
+    container: archlinux:latest
+    steps:
+      - name: Install the toolchain
+        run: >
+          pacman -Syu --noconfirm --needed
+          git gcc pkgconf systemd-libs mingw-w64-gcc rustup
+
+      - uses: actions/checkout@v7
+
+      - name: Install Rust, with the Windows target
+        run: |
+          rustup default stable
+          rustup component add rustfmt clippy
+          rustup target add x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy, warnings denied
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: Windows build, compiled only
+        run: cargo check --workspace --all-targets --target x86_64-pc-windows-gnu

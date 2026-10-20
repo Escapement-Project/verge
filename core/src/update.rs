@@ -194,16 +194,25 @@ pub fn enter_bootloader<B: Bus>(
 }
 
 /// The one unit in ISP mode, or why there is not exactly one.
+///
+/// A mini in ISP mode refuses the flash too, whichever unit was asked for, as the firmware
+/// repository's `tools/flash.py` does.
 pub fn only_bootloader(devices: &[UsbDevice]) -> Result<UsbDevice, UpdateError> {
     let roms: Vec<&UsbDevice> = devices
         .iter()
         .filter(|d| d.role() == Some(Role::Bootloader))
         .collect();
+    let mini = devices
+        .iter()
+        .any(|d| d.role() == Some(Role::MiniBootloader));
     match roms.as_slice() {
-        [rom] => Ok((*rom).clone()),
-        [] if devices.iter().any(|d| d.role() == Some(Role::MiniBootloader)) => Err(UpdateError::Refused(
+        [] if mini => Err(UpdateError::Refused(
             "the unit in ISP mode is an MCU-Link mini, a different board; this firmware is for the full MCU-Link".into(),
         )),
+        [_] if mini => Err(UpdateError::Refused(
+            "an MCU-Link mini is in ISP mode too. The tool flashes only while one bootloader, and no other, is attached: unplug the mini first".into(),
+        )),
+        [rom] => Ok((*rom).clone()),
         [] => Err(UpdateError::Refused(
             "no unit is in ISP mode. Fit the ISP jumper, then plug the unit in: the bootloader samples the pin at reset, so a jumper fitted afterwards does nothing".into(),
         )),

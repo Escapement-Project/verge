@@ -1,5 +1,5 @@
 [package]
-name = "updater-gui"
+name = "verge-gui"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -10,11 +10,13 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 ctrlc = { version = "3.5.2", features = ["termination"] }
 eframe = "0.37.0"
 egui = "0.37.0"
+humantime = "2.4.0"
 pollster = "1.0.1"
 rfd = "0.17.2"
+serde_json = "1.0.154"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-updater-core = { version = "0.1.0", path = "../core" }
+verge-core = { version = "0.1.0", path = "../core" }
 
 [lints]
 workspace = true
@@ -24,5 +26,5 @@ egui_kittest = { version = "0.37.0", features = ["wgpu", "snapshot"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 
 [[bin]]
-name = "verge-update-gui"
+name = "verge-gui"
 path = "src/main.rs"

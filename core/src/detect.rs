@@ -133,6 +133,13 @@ pub fn detect<B: Bus>(bus: &B) -> Result<Vec<Unit>, BusError> {
         .collect())
 }
 
+/// What one device runs, asked as [`detect`] asks every device. `None` for a device this tool
+/// ignores.
+pub fn query_device<B: Bus>(bus: &B, device: UsbDevice) -> Option<Unit> {
+    let role = device.role()?;
+    Some(query(bus, device, role))
+}
+
 fn query<B: Bus>(bus: &B, device: UsbDevice, role: Role) -> Unit {
     let state = match role {
         Role::Bootloader => State::Bootloader,

@@ -8,19 +8,24 @@ use std::time::Duration;
 use egui::{
     Color32, CornerRadius, Frame, Margin, ScrollArea, Stroke, Ui, ViewportCommand, pos2, vec2,
 };
-use updater_core::detect::{Firmware, Guess, State};
-use updater_core::image::{Image, PAGE};
-use updater_core::progress::{Cancel, Step, Unit as StepUnit};
-use updater_core::release::{Release, Repo};
-use updater_core::source::{self, LoadError, Source};
-use updater_core::stock::{self, StockImage};
-use updater_core::update::Outcome;
-use updater_core::{Path, Unit, offer};
+use verge_core::detect::{Firmware, Guess, State};
+use verge_core::image::{Image, PAGE};
+use verge_core::paths::ISP_IDENTITY_WARNING;
+use verge_core::progress::{Cancel, Step, Unit as StepUnit};
+use verge_core::release::{Release, Repo};
+use verge_core::source::{self, LoadError, Source};
+use verge_core::stock::{self, StockImage};
+use verge_core::update::Outcome;
+use verge_core::{Path, Unit, offer};
 
 use crate::glyph::{self, Glyph};
 use crate::log::Log;
 use crate::style::{self, Role, color, space, text};
 use crate::worker::{Backend, Event, JobError, Request};
+
+mod batch;
+
+use batch::{BatchForm, BatchRun};
 
 /// What the window is started with.
 pub struct Config {
@@ -29,6 +34,15 @@ pub struct Config {
     pub simulated: Option<String>,
     /// Where to look for LinkServer's stock images.
     pub stock_dirs: Vec<PathBuf>,
+    /// Where a batch's record file goes unless the user names another.
+    pub record_dir: PathBuf,
+}
+
+/// The window's two views: one unit at a time, or a batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum View {
+    Units,
+    Batch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,6 +128,9 @@ pub struct UpdaterApp {
     about_open: bool,
     picker: Option<Receiver<Option<PathBuf>>>,
     notice: Option<String>,
+    view: View,
+    batch_form: BatchForm,
+    batch: Option<BatchRun>,
 }
 
 fn kib(bytes: u64) -> String {
@@ -264,6 +281,7 @@ fn outline(ui: &mut Ui, words: &str, enabled: bool) -> egui::Response {
 impl UpdaterApp {
     pub fn new(backend: Box<dyn Backend>, log: Log, config: Config) -> UpdaterApp {
         let stock = stock::find(&config.stock_dirs).into_iter().next();
+        let batch_form = BatchForm::new(&config.record_dir);
         let mut app = UpdaterApp {
             backend,
             log,
@@ -284,17 +302,19 @@ impl UpdaterApp {
             about_open: false,
             picker: None,
             notice: None,
+            view: View::Units,
+            batch_form,
+            batch: None,
         };
         app.backend.send(Request::Detect);
         app.backend.send(Request::Release);
         app
     }
 
-    /// Whether an update is running, which holds the window open.
-    #[cfg(test)]
+    /// Whether an update or a batch is running, which holds the window open.
     #[must_use]
     pub fn busy(&self) -> bool {
-        self.job.is_some()
+        self.job.is_some() || self.batch.as_ref().is_some_and(BatchRun::running)
     }
 
     fn rescan(&mut self) {
@@ -336,6 +356,26 @@ impl UpdaterApp {
             Event::Loaded(name) => {
                 if let Some(job) = &mut self.job {
                     job.image = Some(name);
+                }
+            }
+            Event::Plan(_) | Event::Start { .. } | Event::Advance(_)
+                if self.job.is_none() && self.batch.is_some() =>
+            {
+                if let Some(run) = &mut self.batch {
+                    run.progress(event, now);
+                }
+            }
+            Event::BatchArmed { .. }
+            | Event::BatchStarting(_)
+            | Event::BatchRecord(_)
+            | Event::BatchState(_)
+            | Event::BatchEnded(_) => {
+                let ended = matches!(event, Event::BatchEnded(_));
+                if let Some(run) = &mut self.batch {
+                    run.handle(event, now);
+                }
+                if ended {
+                    self.rescan();
                 }
             }
             Event::Plan(steps) => {
@@ -559,11 +599,14 @@ impl UpdaterApp {
         }
         self.poll_picker();
 
-        if ctx.input(|i| i.viewport().close_requested()) && self.job.is_some() {
+        if ctx.input(|i| i.viewport().close_requested()) && self.busy() {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.close_pending = true;
+            if let Some(run) = &self.batch {
+                run.stop.cancel();
+            }
         }
-        if self.close_pending && self.job.is_none() {
+        if self.close_pending && !self.busy() {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }
         for dropped in ctx.input(|i| i.raw.dropped_files.clone()) {
@@ -572,7 +615,7 @@ impl UpdaterApp {
                 self.take_file(path);
             }
         }
-        if self.job.is_some() {
+        if self.busy() {
             // The elapsed time moves even when no event arrives.
             ctx.request_repaint_after(Duration::from_millis(250));
         }
@@ -591,21 +634,28 @@ impl UpdaterApp {
                     .inner_margin(Margin::symmetric(space::M as i8, space::XS as i8)),
             )
             .show(ui, |ui| self.log_drawer(ui));
-        egui::Panel::left("units")
-            .exact_size(300.0)
-            .frame(
-                Frame::new()
-                    .fill(color::SUNKEN)
-                    .inner_margin(Margin::same(space::M as i8)),
-            )
-            .show(ui, |ui| self.unit_list(ui));
+        if self.view == View::Units {
+            egui::Panel::left("units")
+                .exact_size(300.0)
+                .frame(
+                    Frame::new()
+                        .fill(color::SUNKEN)
+                        .inner_margin(Margin::same(space::M as i8)),
+                )
+                .show(ui, |ui| self.unit_list(ui));
+        }
         egui::CentralPanel::default()
             .frame(
                 Frame::new()
                     .fill(color::BACKGROUND)
                     .inner_margin(Margin::same(space::L as i8)),
             )
-            .show(ui, |ui| self.main(ui, now));
+            .show(ui, |ui| {
+                ScrollArea::vertical().show(ui, |ui| match self.view {
+                    View::Units => self.main(ui, now),
+                    View::Batch => self.batch_view(ui, now),
+                });
+            });
 
         if self.about_open {
             let mut open = true;
@@ -614,7 +664,7 @@ impl UpdaterApp {
                 .default_size(vec2(560.0, 420.0))
                 .show(&ctx, |ui| {
                     ScrollArea::vertical().show(ui, |ui| {
-                        ui.label(text(Role::Body, "verge-update is licensed under Apache-2.0. Its fonts are under the SIL Open Font License 1.1, unmodified:"));
+                        ui.label(text(Role::Body, "verge is licensed under Apache-2.0. Its fonts are under the SIL Open Font License 1.1, unmodified:"));
                         for (faces, licence) in style::FONT_LICENCES {
                             ui.add_space(space::S);
                             label(ui, faces);
@@ -628,7 +678,40 @@ impl UpdaterApp {
 
     fn strip(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.label(text(Role::Title, "VERGE UPDATE").color(color::TEXT));
+            ui.label(text(Role::Title, "VERGE").color(color::TEXT));
+            ui.add_space(space::M);
+            let idle = !self.busy();
+            for (view, words) in [(View::Units, "Units"), (View::Batch, "Batch")] {
+                let selected = self.view == view;
+                let button = egui::Button::new(
+                    text(Role::Action, words.to_uppercase()).color(if selected {
+                        color::INK
+                    } else {
+                        color::TEXT
+                    }),
+                )
+                .fill(if selected {
+                    color::ACCENT
+                } else {
+                    Color32::TRANSPARENT
+                })
+                .stroke(Stroke::new(
+                    1.0,
+                    if selected {
+                        color::ACCENT
+                    } else {
+                        color::BORDER
+                    },
+                ))
+                .selected(selected);
+                let response = ui.add_enabled(idle || selected, button);
+                if response.clicked() && !selected {
+                    self.view = view;
+                    self.confirming = None;
+                    self.batch_form.confirming = false;
+                }
+                response.on_disabled_hover_text("Wait for what is running to finish.");
+            }
             ui.add_space(space::M);
             label(ui, "releases");
             ui.label(text(Role::Data, self.config.repo.to_string()).color(color::TEXT));
@@ -659,10 +742,9 @@ impl UpdaterApp {
                 if outline(ui, "Licences", true).clicked() {
                     self.about_open = true;
                 }
-                let idle = self.job.is_none();
                 let rescan = outline(ui, "Rescan", idle);
                 if !idle {
-                    rescan.on_disabled_hover_text("An update is running.");
+                    rescan.on_disabled_hover_text("Wait for what is running to finish.");
                 } else if rescan.clicked() {
                     self.ended = None;
                     self.rescan();
@@ -674,7 +756,11 @@ impl UpdaterApp {
             edged(
                 ui,
                 color::ATTENTION,
-                "The window closes when this update finishes. Cancel stops it at the next safe point and leaves the unit in ISP mode for the next flash.",
+                if self.batch.is_some() {
+                    "The window closes when the batch's unit under way finishes. The batch takes no new units."
+                } else {
+                    "The window closes when this update finishes. Cancel stops it at the next safe point and leaves the unit in ISP mode for the next flash."
+                },
             );
         }
     }
@@ -821,19 +907,19 @@ impl UpdaterApp {
             edged(ui, color::ATTENTION, note);
         }
         ui.add_space(space::M);
-        self.image_choice(ui, &unit);
+        self.image_choice(ui, Some(&unit));
         ui.add_space(space::L);
 
         let action = self.action();
         if let Some((unit, source, what)) = self.confirming.clone() {
-            edged(
-                ui,
-                color::ATTENTION,
-                &format!(
-                    "Flash {what} onto {}? Keep it plugged in until the tool says it is done.",
-                    unit_name(&unit)
-                ),
+            let mut question = format!(
+                "Flash {what} onto {}? Keep it plugged in until the tool says it is done.",
+                unit_name(&unit)
             );
+            if unit.is_bootloader() {
+                question = format!("{ISP_IDENTITY_WARNING} {question}");
+            }
+            edged(ui, color::ATTENTION, &question);
             ui.add_space(space::S);
             ui.horizontal(|ui| {
                 let fill = match &action {
@@ -931,7 +1017,7 @@ impl UpdaterApp {
         });
     }
 
-    fn image_choice(&mut self, ui: &mut Ui, unit: &Unit) {
+    fn image_choice(&mut self, ui: &mut Ui, unit: Option<&Unit>) {
         let ctx = ui.ctx().clone();
         field(ui, "image", |ui| {
             ui.horizontal(|ui| {
@@ -980,29 +1066,31 @@ impl UpdaterApp {
                     None => "Looking up the latest release.".to_owned(),
                     Some(Err(_)) => "No release to install.".to_owned(),
                     Some(Ok(release)) => {
-                        let standing =
-                            unit.build().map(|build| match build.compare(&release.tag) {
-                                updater_core::version::Relation::UpToDate => {
+                        let standing = unit.and_then(Unit::build).map(|build| {
+                            match build.compare(&release.tag) {
+                                verge_core::version::Relation::UpToDate => {
                                     "runs this release".to_owned()
                                 }
-                                updater_core::version::Relation::OtherVariant => {
+                                verge_core::version::Relation::OtherVariant => {
                                     format!("runs this release built as {build}")
                                 }
-                                updater_core::version::Relation::Behind => {
+                                verge_core::version::Relation::Behind => {
                                     format!("runs {build}, older")
                                 }
-                                updater_core::version::Relation::Ahead => {
+                                verge_core::version::Relation::Ahead => {
                                     format!("runs {build}, newer than this release")
                                 }
-                                updater_core::version::Relation::Unknown => {
+                                verge_core::version::Relation::Unknown => {
                                     format!("runs {build}, which carries no version to compare")
                                 }
-                            });
+                            }
+                        });
                         let mut words = format!(
-                            "{} · {} · {} bytes · checked against {}",
+                            "{} · {} · {} bytes · checked against {} and {}",
                             release.tag,
                             release.image.name,
                             release.image.size,
+                            release.signature.name,
                             release.checksum.name
                         );
                         if let Some(standing) = standing {
@@ -1047,9 +1135,9 @@ impl UpdaterApp {
             edged(ui, color::ATTENTION, notice);
         }
         let release_refused = self.choice == Choice::Release
-            && matches!((&self.release, unit.build()), (Some(Ok(release)), Some(build))
-                if matches!(build.compare(&release.tag), updater_core::version::Relation::UpToDate | updater_core::version::Relation::Ahead));
-        if release_refused || (self.force && self.choice == Choice::Release) {
+            && matches!((&self.release, unit.and_then(Unit::build)), (Some(Ok(release)), Some(build))
+                if matches!(build.compare(&release.tag), verge_core::version::Relation::UpToDate | verge_core::version::Relation::Ahead));
+        if unit.is_some() && (release_refused || (self.force && self.choice == Choice::Release)) {
             Frame::new()
                 .stroke(Stroke::new(1.0, color::ATTENTION))
                 .inner_margin(Margin::same(space::S as i8))

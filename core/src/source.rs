@@ -19,12 +19,23 @@ pub enum Source {
     Stock(Option<PathBuf>),
 }
 
+/// What an image is, as far as telling a unit that runs it already.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImageVersion {
+    /// A release of ours, by its tag.
+    Ours(String),
+    Stock(crate::version::StockVersion),
+    /// A file: nothing says which build it is.
+    Unknown,
+}
+
 /// An image ready to flash, and how to name it to the user.
 #[derive(Clone, Debug)]
 pub struct Loaded {
     pub image: Image,
     pub name: String,
     pub release: Option<Release>,
+    pub version: ImageVersion,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -92,6 +103,7 @@ pub fn load<H: Http>(
                 image,
                 name,
                 release: None,
+                version: ImageVersion::Unknown,
             })
         }
         Source::Stock(dir) => {
@@ -113,6 +125,7 @@ pub fn load<H: Http>(
                 image,
                 name: format!("stock V{} from {}", found.version, found.path.display()),
                 release: None,
+                version: ImageVersion::Stock(found.version),
             })
         }
         Source::Release(tag) => {
@@ -122,6 +135,7 @@ pub fn load<H: Http>(
             Ok(Loaded {
                 image,
                 name: format!("release {} ({})", release.tag, release.image.name),
+                version: ImageVersion::Ours(release.tag.clone()),
                 release: Some(release),
             })
         }

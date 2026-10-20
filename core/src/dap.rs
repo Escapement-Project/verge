@@ -6,6 +6,7 @@
 use crate::version::StockVersion;
 
 pub const DAP_INFO: u8 = 0x00;
+pub const DAP_HOST_STATUS: u8 = 0x01;
 pub const DAP_DISCONNECT: u8 = 0x03;
 pub const ID_DAP_INVALID: u8 = 0xFF;
 pub const DAP_OK: u8 = 0x00;
@@ -266,6 +267,21 @@ pub fn request_stock_bootloader(
         Ok(reply) => Some(hex::encode(&reply[..reply.len().min(8)])),
         Err(error) => Some(error.to_string()),
     })
+}
+
+/// Sets both LEDs `DAP_HostStatus` drives, the connect and the running one. Every CMSIS-DAP
+/// firmware answers it, stock included, so toggling it shows a person which unit is which.
+pub fn set_leds(link: &mut dyn DapLink, on: bool) -> Result<(), DapError> {
+    for led in [0, 1] {
+        let reply = command(link, &[DAP_HOST_STATUS, led, u8::from(on)])?;
+        if reply.get(1) != Some(&DAP_OK) {
+            return Err(DapError::Short {
+                command: DAP_HOST_STATUS,
+                len: reply.len(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Asks ours to enter the ROM bootloader through its endpoint 0 request.

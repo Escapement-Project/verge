@@ -2,6 +2,10 @@
 //!
 //! The JSON carries the fields the API returns that the tool reads, plus a few it ignores. The
 //! tests hold the parser to a recorded reply as well (`tests/fixtures/github-release-probe-rs.json`).
+//!
+//! Its releases are signed with a key pair it generates when it is made, so no secret key exists
+//! anywhere but in memory. A [`GitHub`](crate::release::GitHub) reading it needs that key's
+//! public half, from [`SimHttp::public_key`].
 
 use std::sync::{Arc, Mutex};
 
@@ -45,40 +49,97 @@ struct Inner {
     requests: Vec<String>,
 }
 
-#[derive(Clone)]
-pub struct SimHttp(Arc<Mutex<Inner>>);
+/// A minisign key pair made for a simulated GitHub or a test, and never written anywhere.
+pub struct SimKey(minisign::KeyPair);
 
-/// The image and checksum assets a release of ours carries, by the convention in
-/// [`crate::release`].
-#[must_use]
-pub fn ours_assets(tag: &str) -> Vec<SimAsset> {
-    let image = firmware_srecord(&SimFirmware::Ours {
-        build: tag.to_owned(),
-    })
-    .into_bytes();
-    let name = format!("mculink-cjtag-fw-{tag}.s19");
-    let sums = format!("{}  {name}\n", hex::encode(Sha256::digest(&image)));
-    vec![
-        SimAsset::new(&name, image),
-        SimAsset::new(&format!("{name}.sha256"), sums.into_bytes()),
-    ]
+impl SimKey {
+    #[must_use]
+    pub fn generate() -> SimKey {
+        SimKey(
+            minisign::KeyPair::generate_unencrypted_keypair().expect("the system has randomness"),
+        )
+    }
+
+    /// The public half, as the tool takes a key.
+    #[must_use]
+    pub fn public_key(&self) -> minisign_verify::PublicKey {
+        minisign_verify::PublicKey::from_base64(&self.0.pk.to_base64())
+            .expect("minisign writes keys minisign-verify reads")
+    }
+
+    /// A `.minisig` asset for `bytes`, with `trusted_comment` signed along with them.
+    #[must_use]
+    pub fn sign(&self, name: &str, bytes: &[u8], trusted_comment: &str) -> SimAsset {
+        let signature = minisign::sign(
+            Some(&self.0.pk),
+            &self.0.sk,
+            std::io::Cursor::new(bytes),
+            Some(trusted_comment),
+            None,
+        )
+        .expect("an unencrypted key signs");
+        SimAsset::new(name, signature.into_string().into_bytes())
+    }
+}
+
+#[derive(Clone)]
+pub struct SimHttp {
+    inner: Arc<Mutex<Inner>>,
+    key: Arc<SimKey>,
 }
 
 impl SimHttp {
     #[must_use]
     pub fn new(repo: Repo) -> SimHttp {
-        SimHttp(Arc::new(Mutex::new(Inner {
-            repo,
-            private: false,
-            releases: Vec::new(),
-            requests: Vec::new(),
-        })))
+        SimHttp {
+            inner: Arc::new(Mutex::new(Inner {
+                repo,
+                private: false,
+                releases: Vec::new(),
+                requests: Vec::new(),
+            })),
+            key: Arc::new(SimKey::generate()),
+        }
     }
 
     fn inner(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.0
+        self.inner
             .lock()
             .expect("the simulated GitHub lock is not poisoned")
+    }
+
+    /// The key this GitHub's releases are signed with.
+    #[must_use]
+    pub fn key(&self) -> &SimKey {
+        &self.key
+    }
+
+    /// The public half of [`SimHttp::key`], for [`GitHub::with_key`](crate::release::GitHub::with_key).
+    #[must_use]
+    pub fn public_key(&self) -> minisign_verify::PublicKey {
+        self.key.public_key()
+    }
+
+    /// The image, checksum and signature assets a release of ours carries, by the convention in
+    /// [`crate::release`].
+    #[must_use]
+    pub fn ours_assets(&self, tag: &str) -> Vec<SimAsset> {
+        let image = firmware_srecord(&SimFirmware::Ours {
+            build: tag.to_owned(),
+        })
+        .into_bytes();
+        let name = format!("mculink-verge-{tag}.s19");
+        let sums = format!("{}  {name}\n", hex::encode(Sha256::digest(&image)));
+        let signature = self.key.sign(
+            &format!("{name}.minisig"),
+            &image,
+            &format!("file:{name} tag:{tag}"),
+        );
+        vec![
+            SimAsset::new(&name, image),
+            SimAsset::new(&format!("{name}.sha256"), sums.into_bytes()),
+            signature,
+        ]
     }
 
     /// A repository that answers only requests carrying a token.
@@ -95,7 +156,7 @@ impl SimHttp {
         self.publish(SimRelease {
             tag: tag.to_owned(),
             prerelease: false,
-            assets: ours_assets(tag),
+            assets: self.ours_assets(tag),
         });
     }
 

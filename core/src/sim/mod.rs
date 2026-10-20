@@ -141,6 +141,12 @@ pub struct SimUnit {
     pub mini: bool,
     /// Replies an earlier host left unread on the bulk IN endpoint.
     pub stale_replies: Vec<Vec<u8>>,
+    /// In a USB port. An unplugged unit stays off the bus whatever is scheduled for it.
+    pub plugged: bool,
+    /// Its bootloader refuses every write, as a failing flash would.
+    pub fail_writes: bool,
+    /// How many `DAP_HostStatus` commands it has answered: how often its LEDs were set.
+    pub host_status: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -148,6 +154,8 @@ pub(crate) enum Event {
     Leave,
     Appear(Mode),
     Boot,
+    PlugIn,
+    Unplug,
 }
 
 #[derive(Deserialize)]
@@ -190,6 +198,8 @@ pub(crate) struct World {
     pub log: Vec<String>,
     pub ours: (RecordedInfo, RecordedOurs),
     pub stock: RecordedInfo,
+    /// The most LPC55S69 bootloaders that were ever on the bus at once.
+    pub max_bootloaders: usize,
 }
 
 impl World {
@@ -215,6 +225,7 @@ impl World {
             log: Vec::new(),
             ours: (gcc.dap_info, gcc.ours.expect("the gcc record ran ours")),
             stock: stock.dap_info,
+            max_bootloaders: 0,
         }
     }
 
@@ -225,6 +236,12 @@ impl World {
         u.instance = Some(instance);
         self.log
             .push(format!("{}: enumerates as {:?}", u.location, u.mode));
+        let bootloaders = self
+            .units
+            .iter()
+            .filter(|u| u.instance.is_some() && u.mode == Mode::Bootloader && !u.mini)
+            .count();
+        self.max_bootloaders = self.max_bootloaders.max(bootloaders);
     }
 
     pub fn schedule(&mut self, after: Duration, unit: usize, event: Event) {
@@ -244,7 +261,22 @@ impl World {
     }
 
     fn apply(&mut self, unit: usize, event: Event) {
+        if !self.units[unit].plugged && !matches!(event, Event::PlugIn) {
+            return;
+        }
         match event {
+            Event::PlugIn => {
+                let u = &mut self.units[unit];
+                u.plugged = true;
+                self.log.push(format!("{}: plugged in", u.location));
+                self.apply(unit, Event::Boot);
+            }
+            Event::Unplug => {
+                self.apply(unit, Event::Leave);
+                let u = &mut self.units[unit];
+                u.plugged = false;
+                self.log.push(format!("{}: unplugged", u.location));
+            }
             Event::Leave => {
                 let u = &mut self.units[unit];
                 u.instance = None;
@@ -411,7 +443,15 @@ pub const SCENARIOS: &[(&str, &str)] = &[
     ),
     ("two-isp", "two units in ISP mode"),
     ("mini", "an MCU-Link mini in ISP mode"),
+    (
+        "isp-mini",
+        "one unit in ISP mode and an MCU-Link mini in ISP mode",
+    ),
     ("busy", "ours, held open by another program"),
+    (
+        "arrivals",
+        "an empty bench where five units are plugged in over ten seconds, for a batch",
+    ),
 ];
 
 impl SimBus {
@@ -451,6 +491,9 @@ impl SimBus {
             busy: false,
             mini: false,
             stale_replies: Vec::new(),
+            plugged: true,
+            fail_writes: false,
+            host_status: 0,
         });
         world.units[index].mode = mode;
         if world.units[index].mode != Mode::Silent {
@@ -506,6 +549,52 @@ impl SimBus {
         self.world().units[unit].busy = busy;
     }
 
+    /// A unit running `firmware` that is plugged in `after` from now, on a port of its own.
+    pub fn plug_in_later(&self, after: Duration, firmware: SimFirmware) -> usize {
+        let unit = self.add_running(firmware);
+        self.unplug(unit);
+        self.plug_back_later(after, unit);
+        unit
+    }
+
+    /// A unit with its ISP jumper fitted and erased flash, plugged in `after` from now.
+    pub fn plug_in_bootloader_later(&self, after: Duration) -> usize {
+        let unit = self.add_bootloader(true);
+        self.unplug(unit);
+        self.plug_back_later(after, unit);
+        unit
+    }
+
+    /// Takes a unit out of its port now.
+    pub fn unplug(&self, unit: usize) {
+        let mut world = self.world();
+        world.apply(unit, Event::Unplug);
+    }
+
+    pub fn unplug_later(&self, after: Duration, unit: usize) {
+        self.world().schedule(after, unit, Event::Unplug);
+    }
+
+    /// Puts an unplugged unit back in its port `after` from now. It boots what its flash holds.
+    pub fn plug_back_later(&self, after: Duration, unit: usize) {
+        self.world().schedule(after, unit, Event::PlugIn);
+    }
+
+    pub fn set_fail_writes(&self, unit: usize, fail: bool) {
+        self.world().units[unit].fail_writes = fail;
+    }
+
+    #[must_use]
+    pub fn host_status_count(&self, unit: usize) -> u32 {
+        self.world().units[unit].host_status
+    }
+
+    /// The most bootloaders that were ever on the bus at once.
+    #[must_use]
+    pub fn max_bootloaders(&self) -> usize {
+        self.world().max_bootloaders
+    }
+
     pub fn set_jumper(&self, unit: usize, jumper: bool) {
         self.world().units[unit].jumper = jumper;
     }
@@ -557,9 +646,26 @@ impl SimBus {
             "mini" => {
                 bus.add_mini_bootloader();
             }
+            "isp-mini" => {
+                bus.add_bootloader(false);
+                bus.add_mini_bootloader();
+            }
             "busy" => {
                 let unit = bus.add_ours("14d05d4");
                 bus.set_busy(unit, true);
+            }
+            "arrivals" => {
+                let stock = |v: &str| SimFirmware::Stock {
+                    version: StockVersion::parse(v).expect("a version like 3.172"),
+                };
+                let ours = |build: &str| SimFirmware::Ours {
+                    build: build.to_owned(),
+                };
+                bus.plug_in_later(Duration::from_secs(1), stock("3.172"));
+                bus.plug_in_later(Duration::from_secs(1), stock("3.172"));
+                bus.plug_in_later(Duration::from_secs(3), ours("v0.3.0"));
+                bus.plug_in_later(Duration::from_secs(5), stock("3.108"));
+                bus.plug_in_later(Duration::from_secs(8), ours("14d05d4"));
             }
             _ => return None,
         }

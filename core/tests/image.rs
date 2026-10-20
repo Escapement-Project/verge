@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use updater_core::image::{Format, Image};
+use verge_core::image::{Format, Image};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -29,7 +29,7 @@ fn elf_reads_as_objcopy_writes_it() {
 /// What `objcopy` makes of a file, read back as an S-record.
 fn objcopy_srec(input: &Path, input_format: Option<&str>) -> Image {
     let out = std::env::temp_dir().join(format!(
-        "updater-objcopy-{}-{}.s19",
+        "verge-objcopy-{}-{}.s19",
         std::process::id(),
         input.file_name().unwrap().to_string_lossy()
     ));
@@ -51,9 +51,9 @@ fn objcopy_srec(input: &Path, input_format: Option<&str>) -> Image {
 
 /// Our real image, from the main checkout's last build.
 #[test]
-#[ignore = "needs a firmware build at $UPDATER_FIRMWARE_ELF and arm-none-eabi-objcopy"]
+#[ignore = "needs a firmware build at $VERGE_FIRMWARE_ELF and arm-none-eabi-objcopy"]
 fn our_firmware_elf_reads_as_objcopy_writes_it() {
-    let path = PathBuf::from(std::env::var("UPDATER_FIRMWARE_ELF").expect("UPDATER_FIRMWARE_ELF"));
+    let path = PathBuf::from(std::env::var("VERGE_FIRMWARE_ELF").expect("VERGE_FIRMWARE_ELF"));
     let elf = Image::from_path(&path).unwrap();
     let srec = objcopy_srec(&path, None);
     assert_eq!(elf.chunks, srec.chunks);
@@ -66,9 +66,9 @@ fn our_firmware_elf_reads_as_objcopy_writes_it() {
 
 /// NXP's image from the local LinkServer install, never copied into this repository.
 #[test]
-#[ignore = "needs LinkServer's MCU-LINK_CMSIS-DAP_V*.s19 at $UPDATER_STOCK_S19"]
+#[ignore = "needs LinkServer's MCU-LINK_CMSIS-DAP_V*.s19 at $VERGE_STOCK_S19"]
 fn stock_srecord_reads_as_objcopy_reads_it() {
-    let path = PathBuf::from(std::env::var("UPDATER_STOCK_S19").expect("UPDATER_STOCK_S19"));
+    let path = PathBuf::from(std::env::var("VERGE_STOCK_S19").expect("VERGE_STOCK_S19"));
     let ours = Image::from_path(&path).unwrap();
     let theirs = objcopy_srec(&path, Some("srec"));
     assert_eq!(ours.chunks, theirs.chunks);

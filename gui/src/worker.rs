@@ -3,11 +3,15 @@
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread::JoinHandle;
 
-use updater_core::progress::{Cancel, Progress, Step};
-use updater_core::release::{GitHub, Http, Release};
-use updater_core::source::{self, LoadError, Source};
-use updater_core::update::{self, Outcome, Timing, UpdateError};
-use updater_core::{Bus, Unit, detect};
+use std::io::Write as _;
+use std::path::PathBuf;
+
+use verge_core::batch::{Armed, Batch, Entry, Filter, Observer, Record, Status, Tally};
+use verge_core::progress::{Cancel, Progress, Step};
+use verge_core::release::{GitHub, Http, Release};
+use verge_core::source::{self, LoadError, Source};
+use verge_core::update::{self, Outcome, Timing, UpdateError};
+use verge_core::{Bus, Unit, detect};
 
 pub enum Request {
     Detect,
@@ -18,6 +22,24 @@ pub enum Request {
         force: bool,
         cancel: Cancel,
     },
+    /// Arms a batch and runs it until `stop`. `cancel` stops the unit under way.
+    Batch {
+        source: Source,
+        filter: Filter,
+        limit: Option<usize>,
+        record: PathBuf,
+        stop: Cancel,
+        cancel: Cancel,
+    },
+}
+
+/// Where a batch stands, after each look at the bus.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BatchState {
+    pub tally: Tally,
+    /// Waiting units by port, with their serials, first in line first.
+    pub waiting: Vec<(String, Option<String>)>,
+    pub paused: Option<String>,
 }
 
 /// Why a job failed, and what to do about it.
@@ -39,6 +61,11 @@ pub enum Event {
     Advance(u64),
     Note(String),
     Finished(Result<Outcome, JobError>),
+    BatchArmed { name: String, filter: String },
+    BatchStarting(String),
+    BatchRecord(Box<Record>),
+    BatchState(BatchState),
+    BatchEnded(Result<Tally, String>),
 }
 
 /// What the window talks to: a worker thread, or in tests a hand-driven stand-in.
@@ -141,6 +168,121 @@ fn install<B: Bus, H: Http>(
     .map_err(|error| update_error(&error))
 }
 
+/// A batch's events, and its record file.
+struct BatchForward<'a, 'b> {
+    forward: &'a mut Forward<'b>,
+    record: std::io::BufWriter<std::fs::File>,
+}
+
+impl Progress for BatchForward<'_, '_> {
+    fn plan(&mut self, steps: &[Step]) {
+        self.forward.plan(steps);
+    }
+    fn start(&mut self, step: Step, total: u64) {
+        self.forward.start(step, total);
+    }
+    fn advance(&mut self, done: u64) {
+        self.forward.advance(done);
+    }
+    fn note(&mut self, text: &str) {
+        self.forward.note(text);
+    }
+}
+
+impl Observer for BatchForward<'_, '_> {
+    fn starting(&mut self, entry: &Entry) {
+        tracing::info!("{}: updating", entry.port);
+        self.forward.send(Event::BatchStarting(entry.port.clone()));
+    }
+
+    fn record(&mut self, record: &Record) {
+        let written = serde_json::to_writer(&mut self.record, record)
+            .map_err(std::io::Error::from)
+            .and_then(|()| writeln!(self.record))
+            .and_then(|()| self.record.flush());
+        if let Err(error) = written {
+            tracing::error!("the record file: {error}");
+        }
+        tracing::info!("{}: {}", record.port, record.result);
+        self.forward
+            .send(Event::BatchRecord(Box::new(record.clone())));
+    }
+
+    fn paused(&mut self, reason: Option<&str>) {
+        match reason {
+            Some(reason) => tracing::warn!("paused. {reason}"),
+            None => tracing::info!("resumed"),
+        }
+    }
+}
+
+fn state<B: Bus>(batch: &Batch<'_, B>) -> BatchState {
+    BatchState {
+        tally: batch.tally(),
+        waiting: batch
+            .entries()
+            .iter()
+            .filter(|e| e.status == Status::Waiting)
+            .map(|e| (e.port.clone(), e.serial_before.clone()))
+            .collect(),
+        paused: batch.paused().map(str::to_owned),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the request's fields, passed through"
+)]
+fn run_batch<B: Bus, H: Http>(
+    bus: &B,
+    github: &GitHub<H>,
+    forward: &mut Forward<'_>,
+    source: &Source,
+    filter: Filter,
+    limit: Option<usize>,
+    record: &std::path::Path,
+    stop: &Cancel,
+    cancel: &Cancel,
+) -> Result<Tally, String> {
+    let loaded = source::load(source, github, None, true, forward).map_err(|e| e.to_string())?;
+    let file = std::fs::File::create(record)
+        .map_err(|e| format!("creating the record file {}: {e}", record.display()))?;
+    forward.send(Event::BatchArmed {
+        name: loaded.name.clone(),
+        filter: filter.describe(),
+    });
+    tracing::info!("armed: {}, for {}", loaded.name, filter.describe());
+    let armed = Armed {
+        image: loaded.image,
+        name: loaded.name,
+        version: loaded.version,
+    };
+    let mut batch = Batch::arm(
+        bus,
+        armed,
+        filter,
+        Timing::default(),
+        stop.clone(),
+        cancel.clone(),
+        limit,
+    );
+    let mut observer = BatchForward {
+        forward,
+        record: std::io::BufWriter::new(file),
+    };
+    let mut shown = None;
+    while !batch.finished() {
+        batch.step(&mut observer).map_err(|e| e.to_string())?;
+        let now = state(&batch);
+        if shown.as_ref() != Some(&now) {
+            observer.forward.send(Event::BatchState(now.clone()));
+            shown = Some(now);
+        }
+    }
+    batch.close();
+    Ok(batch.tally())
+}
+
 fn serve<B: Bus, H: Http>(
     bus: &B,
     github: &GitHub<H>,
@@ -172,6 +314,30 @@ fn serve<B: Bus, H: Http>(
                     Err(error) => tracing::error!("{}", error.message),
                 }
                 forward.send(Event::Finished(result));
+            }
+            Request::Batch {
+                source,
+                filter,
+                limit,
+                record,
+                stop,
+                cancel,
+            } => {
+                let result = run_batch(
+                    bus,
+                    github,
+                    &mut forward,
+                    &source,
+                    filter,
+                    limit,
+                    &record,
+                    &stop,
+                    &cancel,
+                );
+                if let Err(error) = &result {
+                    tracing::error!("the batch stopped: {error}");
+                }
+                forward.send(Event::BatchEnded(result));
             }
         }
     }
@@ -265,6 +431,10 @@ impl Backend for Manual {
             Request::Install { source, cancel, .. } => {
                 self.last_cancel = Some(cancel);
                 format!("install {source:?}")
+            }
+            Request::Batch { source, stop, .. } => {
+                self.last_cancel = Some(stop);
+                format!("batch {source:?}")
             }
         });
     }

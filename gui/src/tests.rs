@@ -11,12 +11,12 @@ use std::time::Duration;
 use egui::{Role, ViewportCommand, ViewportEvent, ViewportId, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
-use updater_core::Unit;
-use updater_core::release::{GitHub, Repo};
-use updater_core::sim::http::SimHttp;
-use updater_core::sim::{SimBus, SimFirmware, firmware_srecord};
-use updater_core::update::Outcome;
-use updater_core::version::StockVersion;
+use verge_core::Unit;
+use verge_core::release::{GitHub, Repo};
+use verge_core::sim::http::SimHttp;
+use verge_core::sim::{SimBus, SimFirmware, firmware_srecord};
+use verge_core::update::Outcome;
+use verge_core::version::StockVersion;
 
 use crate::app::{Config, UpdaterApp};
 use crate::log::Log;
@@ -24,13 +24,18 @@ use crate::style::{self, color};
 use crate::worker::{Event, Manual, Shared, Worker};
 
 fn repo() -> Repo {
-    "someone/mculink-cjtag-fw".parse().unwrap()
+    "someone/mculink-verge".parse().unwrap()
 }
 
 fn sim_app(bus: SimBus, stock_dirs: Vec<PathBuf>) -> UpdaterApp {
     let http = SimHttp::new(repo());
     http.publish_ours("v0.3.0");
-    let worker = Worker::spawn(bus, GitHub::new(http, repo(), None), || {});
+    let key = http.public_key();
+    let worker = Worker::spawn(
+        bus,
+        GitHub::new(http, repo(), None).with_key(Some(key)),
+        || {},
+    );
     UpdaterApp::new(
         Box::new(worker),
         Log::default(),
@@ -38,6 +43,7 @@ fn sim_app(bus: SimBus, stock_dirs: Vec<PathBuf>) -> UpdaterApp {
             repo: repo(),
             simulated: Some("test".into()),
             stock_dirs,
+            record_dir: std::env::temp_dir(),
         },
     )
 }
@@ -73,6 +79,9 @@ fn until_contains(h: &mut Harness<'_, UpdaterApp>, label: &str) {
 }
 
 fn press(h: &mut Harness<'_, UpdaterApp>, label: &str) {
+    // Scrolling animates; a press and release that land on a moving widget are no click.
+    h.get_by_label(label).scroll_to_me();
+    h.run_steps(20);
     h.get_by_label(label).click();
     h.step();
     h.step();
@@ -124,6 +133,32 @@ fn the_updated_unit_stays_selected_when_it_returns() {
 }
 
 #[test]
+fn confirming_a_unit_already_in_isp_mode_says_it_may_not_be_an_mculink() {
+    let mut h = harness(sim_app(SimBus::scenario("isp").unwrap(), vec![]));
+    until(&mut h, "INSTALL V0.3.0");
+    press(&mut h, "INSTALL V0.3.0");
+    h.get_by_label_contains(
+        "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode. Flash release v0.3.0",
+    );
+    // A jumper-free update restarts a unit it knows, so its confirmation does not say so.
+    let mut h = harness(sim_app(SimBus::scenario("ours").unwrap(), vec![]));
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "UPDATE TO V0.3.0");
+    h.get_by_label_contains("Flash release v0.3.0 onto CJ3E7A91C2");
+    assert!(
+        h.query_by_label_contains("cannot tell an MCU-Link")
+            .is_none()
+    );
+}
+
+#[test]
+fn a_mini_in_isp_mode_leaves_the_other_bootloader_nothing_to_press() {
+    let mut h = harness(sim_app(SimBus::scenario("isp-mini").unwrap(), vec![]));
+    until(&mut h, "CANNOT UPDATE");
+    h.get_by_label_contains("unplug the mini first");
+}
+
+#[test]
 fn two_units_in_isp_mode_leave_nothing_to_press() {
     let mut h = harness(sim_app(SimBus::scenario("two-isp").unwrap(), vec![]));
     until(&mut h, "CANNOT UPDATE");
@@ -144,7 +179,7 @@ fn old_stock_is_sent_to_the_jumper() {
 
 #[test]
 fn going_back_to_stock_uses_the_install_on_disk() {
-    let dir = std::env::temp_dir().join(format!("updater-gui-stock-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("verge-gui-stock-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let version = StockVersion::parse("3.172").unwrap();
     std::fs::write(
@@ -181,7 +216,7 @@ fn a_unit_on_the_release_needs_install_anyway() {
 /// A window whose backend the test drives by hand, showing the one unit of `scenario`.
 fn manual_app(scenario: &str, release: bool) -> (UpdaterApp, Shared) {
     let bus = SimBus::scenario(scenario).unwrap();
-    let units: Vec<Unit> = updater_core::detect(&bus).unwrap();
+    let units: Vec<Unit> = verge_core::detect(&bus).unwrap();
     let backend: Shared = Arc::new(Mutex::new(Manual::default()));
     {
         let mut manual = backend.lock().unwrap();
@@ -202,6 +237,7 @@ fn manual_app(scenario: &str, release: bool) -> (UpdaterApp, Shared) {
             repo: repo(),
             simulated: None,
             stock_dirs: vec![],
+            record_dir: std::env::temp_dir(),
         },
     );
     (app, backend)
@@ -321,11 +357,11 @@ fn ink_reads_on_every_fill() {
 
 /// Renders the window's states to PNG for a person to look at. Needs a GPU adapter.
 ///
-/// `UPDATER_GUI_SHOTS=<dir> cargo test -p updater-gui pictures -- --ignored`
+/// `VERGE_GUI_SHOTS=<dir> cargo test -p verge-gui pictures -- --ignored`
 #[test]
-#[ignore = "renders with wgpu into $UPDATER_GUI_SHOTS"]
+#[ignore = "renders with wgpu into $VERGE_GUI_SHOTS"]
 fn pictures() {
-    let dir = PathBuf::from(std::env::var("UPDATER_GUI_SHOTS").expect("UPDATER_GUI_SHOTS"));
+    let dir = PathBuf::from(std::env::var("VERGE_GUI_SHOTS").expect("VERGE_GUI_SHOTS"));
     std::fs::create_dir_all(&dir).unwrap();
     let shoot = |h: &mut Harness<'_, UpdaterApp>, name: &str| {
         h.step();
@@ -358,7 +394,7 @@ fn pictures() {
     press(&mut h, "CONFIRM");
     {
         let mut manual = backend.lock().unwrap();
-        use updater_core::progress::Step;
+        use verge_core::progress::Step;
         manual.queued.push_back(Event::Start {
             step: Step::Download,
             total: 7000,
@@ -374,7 +410,7 @@ fn pictures() {
             Step::WaitForFirmware,
         ]));
         manual.queued.push_back(Event::Loaded(
-            "release v0.3.0 (mculink-cjtag-fw-v0.3.0.s19)".into(),
+            "release v0.3.0 (mculink-verge-v0.3.0.s19)".into(),
         ));
         for step in [
             Step::EnterBootloader,
@@ -420,6 +456,86 @@ fn pictures() {
         })));
     shoot(&mut h, "07-failed");
 
+    // The batch view: set up, running, and done.
+    let (app, backend) = manual_app("ours", true);
+    let mut h = rendered(app);
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "BATCH");
+    shoot(&mut h, "12-batch-setup");
+    press(&mut h, "ARM BATCH");
+    shoot(&mut h, "13-batch-confirm");
+    press(&mut h, "CONFIRM");
+    {
+        use verge_core::batch::{Record, Tally};
+        use verge_core::progress::Step;
+        let mut manual = backend.lock().unwrap();
+        manual.queued.push_back(Event::BatchArmed {
+            name: "release v0.3.0 (mculink-verge-v0.3.0.s19)".into(),
+            filter: "every full MCU-Link running stock or ours older than the image, attached from now on".into(),
+        });
+        let record = |port: &str,
+                      serial: &str,
+                      before: &str,
+                      after: Option<&str>,
+                      result: &'static str,
+                      reason: Option<&str>| {
+            Event::BatchRecord(Box::new(Record {
+                time: "2026-10-20T14:26:08Z".into(),
+                port: port.into(),
+                serial_before: Some(serial.into()),
+                firmware_before: before.into(),
+                serial_after: after.map(|_| "CJ3E7A91C2".to_owned()),
+                firmware_after: after.map(str::to_owned),
+                result,
+                reason: reason.map(str::to_owned),
+                seconds: after.map(|_| 4.7),
+            }))
+        };
+        manual.queued.push_back(record(
+            "1-1",
+            "QK7RM2VTX8D41",
+            "stock V3.172",
+            Some("ours, build v0.3.0"),
+            "updated",
+            None,
+        ));
+        manual.queued.push_back(record(
+            "1-3",
+            "CJ3E7AC4F5",
+            "ours, build v0.3.0",
+            None,
+            "current",
+            None,
+        ));
+        manual.queued.push_back(record("1-4", "QK7RM2VTX8D45", "stock V3.108", None, "skipped", Some("needs the ISP jumper. Stock V3.108 has no jumper-free update. NXP added it in V3.122.")));
+        manual.queued.push_back(Event::BatchStarting("1-2".into()));
+        manual.queued.push_back(Event::Start {
+            step: Step::Write,
+            total: 235_520,
+        });
+        manual.queued.push_back(Event::Advance(131_072));
+        manual
+            .queued
+            .push_back(Event::BatchState(crate::worker::BatchState {
+                tally: Tally {
+                    updated: 1,
+                    current: 1,
+                    skipped: 1,
+                    failed: 0,
+                    waiting: 1,
+                },
+                waiting: vec![("1-5".into(), Some("CJ3E7AE717".into()))],
+                paused: None,
+            }));
+    }
+    shoot(&mut h, "14-batch-running");
+    backend.lock().unwrap().queued.push_back(Event::BatchState(crate::worker::BatchState {
+        tally: verge_core::batch::Tally { updated: 1, current: 1, skipped: 1, failed: 1, waiting: 1 },
+        waiting: vec![("1-5".into(), Some("CJ3E7AE717".into()))],
+        paused: Some("The unit at 1-2 failed and is in ISP mode, maybe with a partial image. The batch waits until it is unplugged; `verge flash` flashes it again.".into()),
+    }));
+    shoot(&mut h, "15-batch-paused");
+
     for (scenario, name) in [
         ("stock-old", "08-old-stock-jumper"),
         ("two-isp", "09-two-in-isp"),
@@ -433,4 +549,169 @@ fn pictures() {
         }
         shoot(&mut h, name);
     }
+}
+
+/// A directory of its own for a test's batch record.
+fn record_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("verge-gui-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn a_batch_updates_units_as_they_arrive_and_records_each() {
+    let dir = record_dir("batch");
+    let http = SimHttp::new(repo());
+    http.publish_ours("v0.3.0");
+    let key = http.public_key();
+    let worker = Worker::spawn(
+        SimBus::scenario("arrivals").unwrap(),
+        GitHub::new(http, repo(), None).with_key(Some(key)),
+        || {},
+    );
+    let app = UpdaterApp::new(
+        Box::new(worker),
+        Log::default(),
+        Config {
+            repo: repo(),
+            simulated: Some("arrivals".into()),
+            stock_dirs: vec![],
+            record_dir: dir.clone(),
+        },
+    );
+    let mut h = harness(app);
+    until(&mut h, "BATCH");
+    press(&mut h, "BATCH");
+    until(&mut h, "ARM BATCH");
+    press(&mut h, "ARM BATCH");
+    h.get_by_label_contains(
+        "Flash release v0.3.0 onto every full MCU-Link running stock or ours older than the image, attached from now on?",
+    );
+    assert!(
+        h.query_by_label_contains("cannot tell an MCU-Link")
+            .is_none()
+    );
+    press(&mut h, "CONFIRM");
+    assert!(h.state().busy());
+    until(&mut h, "3 updated");
+    until(&mut h, "1 current");
+    until(&mut h, "1 skipped");
+    h.get_by_label("0 failed");
+    press(&mut h, "STOP");
+    until(&mut h, "ENDED");
+    assert!(!h.state().busy());
+
+    let records: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(records.len(), 1);
+    let results: Vec<String> = records[0]
+        .lines()
+        .map(|line| {
+            let json: serde_json::Value = serde_json::from_str(line).unwrap();
+            format!(
+                "{} {}",
+                json["port"].as_str().unwrap(),
+                json["result"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(
+        results,
+        [
+            "1-1 updated",
+            "1-3 current",
+            "1-4 skipped",
+            "1-2 updated",
+            "1-5 updated"
+        ]
+    );
+}
+
+#[test]
+fn closing_during_a_batch_stops_it_taking_units_and_waits_for_it() {
+    let (app, backend) = manual_app("ours", true);
+    let mut h = harness(app);
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "BATCH");
+    press(&mut h, "ARM BATCH");
+    press(&mut h, "CONFIRM");
+    assert!(
+        backend
+            .lock()
+            .unwrap()
+            .sent
+            .last()
+            .unwrap()
+            .starts_with("batch Release")
+    );
+    let stop = backend.lock().unwrap().last_cancel.clone().unwrap();
+    request_close(&mut h);
+    assert!(root_commands(&h).contains(&ViewportCommand::CancelClose));
+    assert!(stop.is_cancelled(), "the batch was not told to stop");
+    h.step();
+    h.get_by_label_contains("The window closes when the batch's unit under way finishes.");
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::BatchEnded(Ok(Default::default())));
+    h.step();
+    assert!(root_commands(&h).contains(&ViewportCommand::Close));
+}
+
+#[test]
+fn a_paused_batch_says_why() {
+    let (app, backend) = manual_app("ours", true);
+    let mut h = harness(app);
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "BATCH");
+    press(&mut h, "ARM BATCH");
+    press(&mut h, "CONFIRM");
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::BatchState(crate::worker::BatchState {
+            paused: Some(
+                "An MCU-Link mini is in ISP mode at 1-2. The batch waits until it is unplugged."
+                    .into(),
+            ),
+            ..Default::default()
+        }));
+    until(&mut h, "PAUSED");
+    h.get_by_label_contains("An MCU-Link mini is in ISP mode at 1-2.");
+}
+
+#[test]
+fn a_batch_that_takes_units_in_isp_mode_says_it_may_not_be_flashing_an_mculink() {
+    let (app, _backend) = manual_app("ours", true);
+    let mut h = harness(app);
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "BATCH");
+    press(
+        &mut h,
+        "Units that arrive in ISP mode, as after fitting the jumper",
+    );
+    press(&mut h, "ARM BATCH");
+    h.get_by_label_contains(
+        "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode. Flash release v0.3.0 onto every full MCU-Link running stock or ours older than the image or in ISP mode",
+    );
+}
+
+#[test]
+fn a_batch_needs_something_to_take() {
+    let (app, _backend) = manual_app("ours", true);
+    let mut h = harness(app);
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "BATCH");
+    h.get_by_label("Stock").click();
+    h.step();
+    h.get_by_label("Ours").click();
+    h.step();
+    h.step();
+    h.get_by_label("CANNOT ARM");
+    h.get_by_label_contains("Tick at least one kind of unit");
 }

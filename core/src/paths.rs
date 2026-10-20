@@ -55,6 +55,11 @@ impl fmt::Display for Path {
     }
 }
 
+/// Said before flashing a unit that was in ISP mode already. A jumper-free update flashes the
+/// bootloader that appears on the port of the unit it restarted, so it needs no such warning.
+pub const ISP_IDENTITY_WARNING: &str =
+    "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode.";
+
 /// The paths open to one unit, best first, and what the user should know about the rest.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Offer {
@@ -77,13 +82,17 @@ impl Offer {
 #[must_use]
 pub fn offer(unit: &Unit, all: &[Unit]) -> Offer {
     let in_isp = all.iter().filter(|other| other.is_bootloader()).count();
+    let minis = all
+        .iter()
+        .filter(|other| other.state == State::MiniBootloader)
+        .count();
     let mut offer = Offer::default();
     let jumper_free = |offer: &mut Offer, path: Path| {
-        if in_isp == 0 {
+        if in_isp + minis == 0 {
             offer.paths.push(path);
         } else {
             offer.notes.push(
-                "Another unit is in ISP mode, so the jumper-free path waits until it is flashed or unplugged: every bootloader looks the same to the tool."
+                "Another unit is in ISP mode, so the jumper-free path waits until it is flashed or unplugged: the tool flashes only while one bootloader, and no other, is attached."
                     .into(),
             );
         }
@@ -122,6 +131,13 @@ pub fn offer(unit: &Unit, all: &[Unit]) -> Offer {
             offer.notes.push(format!(
                 "{in_isp} units are in ISP mode and every LPC55S69 bootloader looks the same. Unplug all but one."
             ));
+            return offer;
+        }
+        State::Bootloader if minis > 0 => {
+            offer.notes.push(
+                "An MCU-Link mini is in ISP mode too. The tool flashes only while one bootloader, and no other, is attached: unplug the mini first."
+                    .into(),
+            );
             return offer;
         }
         State::Bootloader => {
@@ -219,12 +235,23 @@ mod tests {
     }
 
     #[test]
-    fn a_mini_elsewhere_does_not() {
-        let probe = ours();
-        let all = [probe.clone(), unit(State::MiniBootloader)];
-        assert_eq!(
-            offer(&probe, &all).paths,
-            [Path::OursJumperFree, Path::Jumper]
+    fn a_mini_elsewhere_holds_back_jumper_free_entry_too() {
+        for probe in [ours(), stock(172)] {
+            let all = [probe.clone(), unit(State::MiniBootloader)];
+            assert_eq!(offer(&probe, &all).paths, [Path::Jumper]);
+        }
+    }
+
+    #[test]
+    fn a_bootloader_beside_a_mini_gets_nothing() {
+        let isp = unit(State::Bootloader);
+        let all = [isp.clone(), unit(State::MiniBootloader)];
+        let offer = offer(&isp, &all);
+        assert!(offer.paths.is_empty());
+        assert!(
+            offer.notes[0].contains("unplug the mini first"),
+            "{:?}",
+            offer.notes
         );
     }
 }

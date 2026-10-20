@@ -7,10 +7,10 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn tool(scenario: &str) -> Command {
-    let mut command = Command::cargo_bin("verge-update").unwrap();
+    let mut command = Command::cargo_bin("verge").unwrap();
     command
         .args(["--simulate", scenario, "--simulate-pace", "0"])
-        .env_remove("VERGE_UPDATE_REPO")
+        .env_remove("VERGE_REPO")
         .env_remove("GITHUB_TOKEN")
         .env_remove("RUST_LOG");
     command
@@ -104,7 +104,7 @@ fn an_image_that_never_comes_back_says_what_to_do() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("did not come back"))
-        .stderr(predicate::str::contains("verge-update list"));
+        .stderr(predicate::str::contains("verge list"));
 }
 
 #[test]
@@ -114,6 +114,9 @@ fn release_compares_each_unit() {
         .assert()
         .success()
         .stdout(predicate::str::starts_with("v0.3.0"))
+        .stdout(predicate::str::contains(
+            "checked against mculink-verge-v0.3.0.s19.minisig and mculink-verge-v0.3.0.s19.sha256",
+        ))
         .stdout(predicate::str::contains(
             "runs 14d05d4, which carries no version",
         ))
@@ -133,6 +136,20 @@ fn a_missing_release_tag_is_named() {
         ));
 }
 
+/// The directory is optional. Whether this machine has LinkServer decides which of the two
+/// answers comes back, and both mean the flag parsed.
+#[test]
+fn stock_takes_no_directory() {
+    tool("ours")
+        .args(["update", "--stock"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("Pass --yes")
+                .or(predicate::str::contains("no MCU-LINK_CMSIS-DAP_V*.s19")),
+        );
+}
+
 #[test]
 fn a_missing_stock_image_says_where_it_looked() {
     tool("ours")
@@ -146,7 +163,7 @@ fn a_missing_stock_image_says_where_it_looked() {
 
 #[test]
 fn inspect_reads_an_elf_without_usb() {
-    Command::cargo_bin("verge-update")
+    Command::cargo_bin("verge")
         .unwrap()
         .arg("inspect")
         .arg(fixture("layout.elf"))
@@ -169,11 +186,113 @@ fn an_unknown_scenario_lists_the_known_ones() {
 
 #[test]
 fn help_has_examples() {
-    Command::cargo_bin("verge-update")
+    Command::cargo_bin("verge")
         .unwrap()
         .arg("--help")
         .assert()
         .success()
         .stdout(predicate::str::contains("Examples:"))
         .stdout(predicate::str::contains("--simulate").not());
+}
+
+#[test]
+fn flashing_a_unit_already_in_isp_mode_says_it_may_not_be_an_mculink() {
+    for command in ["flash", "update"] {
+        tool("isp")
+            .arg(command)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode.",
+            ));
+    }
+}
+
+/// The warning is for a unit that was in ISP mode already; a jumper-free update knows its unit.
+#[test]
+fn a_jumper_free_update_does_not_carry_the_isp_warning() {
+    tool("ours")
+        .arg("update")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Pass --yes"))
+        .stderr(predicate::str::contains("cannot tell an MCU-Link").not());
+}
+
+#[test]
+fn a_mini_in_isp_mode_refuses_the_flash_of_the_other_bootloader() {
+    tool("isp-mini")
+        .args(["flash", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unplug the mini first"));
+}
+
+fn temp_record(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("verge-cli-{}-{name}.jsonl", std::process::id()))
+}
+
+#[test]
+fn a_batch_updates_each_unit_as_it_arrives_and_records_it() {
+    let record = temp_record("batch");
+    tool("arrivals")
+        .args(["batch", "--yes", "--count", "3", "--record"])
+        .arg(&record)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Batch done: 3 updated, 1 current, 1 skipped, 0 failed, 0 waiting.",
+        ))
+        .stdout(predicate::str::contains("1-3      CJ"))
+        .stdout(predicate::str::contains("1-3      blinking"))
+        .stdout(predicate::str::contains("SKIPPED: needs the ISP jumper"));
+    let text = std::fs::read_to_string(&record).unwrap();
+    std::fs::remove_file(&record).unwrap();
+    let results: Vec<String> = text
+        .lines()
+        .map(|line| {
+            let json: serde_json::Value = serde_json::from_str(line).unwrap();
+            format!(
+                "{} {}",
+                json["port"].as_str().unwrap(),
+                json["result"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(
+        results,
+        [
+            "1-1 updated",
+            "1-3 current",
+            "1-4 skipped",
+            "1-2 updated",
+            "1-5 updated"
+        ]
+    );
+}
+
+#[test]
+fn a_batch_asks_once_and_says_what_it_takes() {
+    tool("arrivals")
+        .args(["batch", "--stock-below", "V3.200", "--take", "isp"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "every full MCU-Link running stock below V3.200 or in ISP mode, attached from now on?",
+        ))
+        .stderr(predicate::str::contains(
+            "cannot tell an MCU-Link from any other",
+        ))
+        .stderr(predicate::str::contains("Pass --yes"));
+}
+
+#[test]
+fn ours_any_takes_ours_as_stock_below_takes_stock() {
+    tool("arrivals")
+        .args(["batch", "--take", "isp", "--ours-any"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "every full MCU-Link running ours or in ISP mode, attached from now on?",
+        ));
 }

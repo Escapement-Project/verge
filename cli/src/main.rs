@@ -11,27 +11,33 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::filter::{EnvFilter, filter_fn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use updater_core::detect::{Guess, State};
-use updater_core::image::{Image, PAGE};
-use updater_core::release::{DEFAULT_REPO, GitHub, Http, Repo, Ureq};
-use updater_core::sim::http::SimHttp;
-use updater_core::sim::{SCENARIOS, SimBus};
-use updater_core::source::{self, LoadError};
-use updater_core::update::{self, Outcome, Timing, UpdateError};
-use updater_core::usb::UsbBus;
-use updater_core::version::Relation;
-use updater_core::{Bus, Cancel, Firmware, Path, Unit, detect, offer};
+use verge_core::batch::{
+    Armed, Batch, Board, Entry, Filter, Observer, OursFilter, Record, StockFilter,
+};
+use verge_core::detect::{Guess, State};
+use verge_core::image::{Image, PAGE};
+use verge_core::paths::ISP_IDENTITY_WARNING;
+use verge_core::progress::{Progress, Step};
+use verge_core::release::{DEFAULT_REPO, GitHub, Http, Repo, Ureq};
+use verge_core::sim::http::SimHttp;
+use verge_core::sim::{SCENARIOS, SimBus};
+use verge_core::source::{self, LoadError};
+use verge_core::update::{self, Outcome, Timing, UpdateError};
+use verge_core::usb::UsbBus;
+use verge_core::version::Relation;
+use verge_core::version::StockVersion;
+use verge_core::{Bus, Cancel, Firmware, Path, Unit, detect, offer};
 
 use crate::progress::Bars;
 
 const EXAMPLES: &str = "\
 Examples:
-  verge-update                     what is attached, and how each unit can be updated
-  verge-update update              install the latest release of ours on the only unit
-  verge-update update --serial CJ3E7A91C2 --release v0.3.0
-  verge-update update --stock      put NXP's firmware back, from your LinkServer install
-  verge-update flash --file build/mculink_cjtag.elf
-                                   flash a unit you put into ISP mode with the jumper";
+  verge                    what is attached, and how each unit can be updated
+  verge update             install the latest release of ours on the only unit
+  verge update --serial CJ3E7A91C2 --release v0.3.0
+  verge update --stock     put NXP's firmware back, from your LinkServer install
+  verge flash --file build/mculink_cjtag.elf
+                           flash a unit you put into ISP mode with the jumper";
 
 /// Update the firmware on an MCU-Link: NXP's stock firmware, or this repository's.
 ///
@@ -39,7 +45,7 @@ Examples:
 /// it. A unit running ours, or stock V3.122 or later, restarts into its bootloader when asked,
 /// so it needs no jumper. Anything else needs the ISP jumper, fitted before it is plugged in.
 #[derive(Parser)]
-#[command(name = "verge-update", version, after_help = EXAMPLES)]
+#[command(name = "verge", version, after_help = EXAMPLES)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -53,7 +59,7 @@ struct Cli {
         long,
         global = true,
         value_name = "OWNER/NAME",
-        env = "VERGE_UPDATE_REPO",
+        env = "VERGE_REPO",
         hide_env_values = true,
         default_value = DEFAULT_REPO
     )]
@@ -86,6 +92,13 @@ enum Command {
     /// With the jumper still fitted, the unit comes back in ISP mode. Then unplug it, take the
     /// jumper off, and plug it back in.
     Flash(FlashArgs),
+    /// Update every unit of a chosen kind as it is plugged in, one at a time, until stopped.
+    ///
+    /// Choose the image and the units it takes once, answer one question, then plug units in one
+    /// after another or several on a hub. Each finished unit blinks so you can tell which to
+    /// unplug. Ctrl-C stops taking new units; the one under way finishes. Every unit gets a line
+    /// in the record file.
+    Batch(BatchArgs),
     /// Restart a unit into its ROM bootloader without the jumper, and leave it there.
     Bootloader {
         /// The unit to restart, when more than one is attached.
@@ -115,8 +128,8 @@ struct Source {
     file: Option<PathBuf>,
     /// NXP's stock image from your own LinkServer install: the newest found, or the newest in
     /// DIR. The tool never downloads it.
-    #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = "")]
-    stock: Option<PathBuf>,
+    #[arg(long, value_name = "DIR", num_args = 0..=1)]
+    stock: Option<Option<PathBuf>>,
 }
 
 #[derive(Args)]
@@ -134,6 +147,59 @@ struct UpdateArgs {
     force: bool,
 }
 
+/// Kinds of unit a batch takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum Take {
+    /// Units running NXP's stock firmware.
+    Stock,
+    /// Units running ours.
+    Ours,
+    /// Units that arrive in ISP mode, as after fitting the jumper.
+    Isp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum BoardArg {
+    /// The full MCU-Link.
+    McuLink,
+}
+
+#[derive(Args)]
+struct BatchArgs {
+    #[command(flatten)]
+    source: Source,
+    /// Which units to take.
+    #[arg(long, value_enum, num_args = 1.., default_values_t = [Take::Stock, Take::Ours])]
+    take: Vec<Take>,
+    /// Take only stock older than this version, such as 3.172. Implies --take stock.
+    #[arg(long, value_name = "VERSION", value_parser = parse_stock_version)]
+    stock_below: Option<StockVersion>,
+    /// Take ours of any build. Without it, only builds older than the image, or carrying no
+    /// version, are taken. Implies --take ours.
+    #[arg(long)]
+    ours_any: bool,
+    /// Take units attached already, not only those plugged in from now on.
+    #[arg(long)]
+    include_attached: bool,
+    /// The board to take.
+    #[arg(long, value_enum, default_value_t = BoardArg::McuLink)]
+    board: BoardArg,
+    /// Stop once this many units are updated.
+    #[arg(long, value_name = "N")]
+    count: Option<usize>,
+    /// The record file: one JSON line per unit. Defaults to verge-batch-<time>.jsonl here.
+    #[arg(long, value_name = "FILE")]
+    record: Option<PathBuf>,
+    /// Arm without asking first.
+    #[arg(short, long)]
+    yes: bool,
+}
+
+fn parse_stock_version(text: &str) -> std::result::Result<StockVersion, String> {
+    let text = text.strip_prefix(['V', 'v']).unwrap_or(text);
+    StockVersion::parse(text).ok_or_else(|| format!("expected a version like 3.172, got {text:?}"))
+}
+
 #[derive(Args)]
 struct FlashArgs {
     #[command(flatten)]
@@ -145,7 +211,7 @@ struct FlashArgs {
 
 fn init_tracing(verbose: u8) {
     let default = match verbose {
-        0 => "warn,updater_core=info",
+        0 => "warn,verge_core=info",
         1 => "info",
         _ => "debug",
     };
@@ -171,14 +237,22 @@ fn main() -> ExitCode {
     init_tracing(cli.verbose);
 
     let cancel = Cancel::new();
+    let stop = Cancel::new();
+    let batch = matches!(cli.command, Some(Command::Batch(_)));
     let handler = {
-        let cancel = cancel.clone();
+        let (cancel, stop) = (cancel.clone(), stop.clone());
         ctrlc::set_handler(move || {
-            if cancel.is_cancelled() {
+            if batch && !stop.is_cancelled() {
+                stop.cancel();
+                tracing::warn!(
+                    "taking no new units; the one under way finishes. Ctrl-C again stops it at the next safe point"
+                );
+            } else if !cancel.is_cancelled() {
+                cancel.cancel();
+                tracing::warn!("stopping at the next safe point; press Ctrl-C again to quit now");
+            } else {
                 std::process::exit(130);
             }
-            cancel.cancel();
-            tracing::warn!("stopping at the next safe point; press Ctrl-C again to quit now");
         })
     };
     if let Err(error) = handler {
@@ -190,7 +264,9 @@ fn main() -> ExitCode {
             Some(bus) => {
                 let http = SimHttp::new(cli.repo.clone());
                 http.publish_ours("v0.3.0");
-                run(&cli, &bus.paced(cli.simulate_pace), http, &cancel)
+                let key = http.public_key();
+                let github = GitHub::new(http, cli.repo.clone(), None).with_key(Some(key));
+                run(&cli, &bus.paced(cli.simulate_pace), &github, &cancel, &stop)
             }
             None => Err(anyhow::anyhow!(
                 "no simulated bench called {name:?}; there are {}",
@@ -201,7 +277,10 @@ fn main() -> ExitCode {
                     .join(", ")
             )),
         },
-        None => run(&cli, &UsbBus::default(), Ureq::default(), &cancel),
+        None => {
+            let github = GitHub::new(Ureq::default(), cli.repo.clone(), cli.github_token.clone());
+            run(&cli, &UsbBus::default(), &github, &cancel, &stop)
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -216,14 +295,20 @@ fn main() -> ExitCode {
     }
 }
 
-fn run<B: Bus, H: Http>(cli: &Cli, bus: &B, http: H, cancel: &Cancel) -> Result<()> {
-    let github = GitHub::new(http, cli.repo.clone(), cli.github_token.clone());
+fn run<B: Bus, H: Http>(
+    cli: &Cli,
+    bus: &B,
+    github: &GitHub<H>,
+    cancel: &Cancel,
+    stop: &Cancel,
+) -> Result<()> {
     match &cli.command {
+        Some(Command::Batch(args)) => batch(bus, github, args, cancel, stop),
         None | Some(Command::List) => list(bus, cli.verbose > 0),
-        Some(Command::Update(args)) => update_unit(bus, &github, args, cancel),
-        Some(Command::Flash(args)) => flash(bus, &github, args, cancel),
+        Some(Command::Update(args)) => update_unit(bus, github, args, cancel),
+        Some(Command::Flash(args)) => flash(bus, github, args, cancel),
         Some(Command::Bootloader { serial }) => bootloader(bus, serial.as_deref(), cancel),
-        Some(Command::Release { tag }) => release(bus, &github, tag.as_deref()),
+        Some(Command::Release { tag }) => release(bus, github, tag.as_deref()),
         Some(Command::Inspect { file }) => inspect(file),
     }
 }
@@ -285,8 +370,7 @@ impl Source {
     fn to_core(&self) -> source::Source {
         match (&self.file, &self.stock, &self.release) {
             (Some(file), _, _) => source::Source::File(file.clone()),
-            (None, Some(dir), _) if dir.as_os_str().is_empty() => source::Source::Stock(None),
-            (None, Some(dir), _) => source::Source::Stock(Some(dir.clone())),
+            (None, Some(dir), _) => source::Source::Stock(dir.clone()),
             (None, None, tag) => source::Source::Release(tag.clone()),
         }
     }
@@ -376,14 +460,21 @@ fn update_unit<B: Bus, H: Http>(
     };
     if path == Path::Jumper {
         bail!(
-            "this unit has no jumper-free update. {} To use the jumper: unplug the unit, fit the ISP jumper, plug it back in, and run `verge-update flash`",
+            "this unit has no jumper-free update. {} To use the jumper: unplug the unit, fit the ISP jumper, plug it back in, and run `verge flash`",
             offer.notes.join(" ")
         );
     }
     let (image, name) = load(&args.source, github, Some(unit), args.force)?;
     log_image(&image);
     let target = unit.serial().unwrap_or("the unit in ISP mode");
-    confirm(&format!("Flash {name} onto {target}, {path}?"), args.yes)?;
+    let mut question = format!("Flash {name} onto {target}, {path}?");
+    if path == Path::FlashNow {
+        question = format!("{ISP_IDENTITY_WARNING} {question}");
+        if args.yes {
+            tracing::warn!("{ISP_IDENTITY_WARNING} Flashing it, as --yes says.");
+        }
+    }
+    confirm(&question, args.yes)?;
     let mut bars = Bars::default();
     let outcome = update::install(bus, unit, &image, &Timing::default(), &mut bars, cancel);
     drop(bars);
@@ -401,14 +492,192 @@ fn flash<B: Bus, H: Http>(
     let (image, name) = load(&args.source, github, None, true)?;
     log_image(&image);
     let location = rom.location.as_deref().unwrap_or("?");
+    if args.yes {
+        tracing::warn!("{ISP_IDENTITY_WARNING} Flashing it, as --yes says.");
+    }
     confirm(
-        &format!("Flash {name} onto the unit in ISP mode at {location}?"),
+        &format!("{ISP_IDENTITY_WARNING} Flash {name} onto the unit in ISP mode at {location}?"),
         args.yes,
     )?;
     let mut bars = Bars::default();
     let outcome = update::flash_now(bus, &image, &Timing::default(), &mut bars, cancel);
     drop(bars);
     report(&outcome.map_err(explain)?);
+    Ok(())
+}
+
+/// A batch's output: bars for the unit under way, a line and a record line for each unit.
+struct BatchOutput {
+    bars: Bars,
+    record: std::io::BufWriter<std::fs::File>,
+}
+
+impl Progress for BatchOutput {
+    fn plan(&mut self, steps: &[Step]) {
+        self.bars.plan(steps);
+    }
+    fn start(&mut self, step: Step, total: u64) {
+        self.bars.start(step, total);
+    }
+    fn advance(&mut self, done: u64) {
+        self.bars.advance(done);
+    }
+    fn note(&mut self, text: &str) {
+        self.bars.note(text);
+    }
+}
+
+impl Observer for BatchOutput {
+    fn starting(&mut self, entry: &Entry) {
+        tracing::info!(
+            "{}: updating {}",
+            entry.port,
+            entry.serial_before.as_deref().unwrap_or("the unit")
+        );
+    }
+
+    fn record(&mut self, record: &Record) {
+        self.bars.clear();
+        use std::io::Write as _;
+        let written = serde_json::to_writer(&mut self.record, record)
+            .map_err(std::io::Error::from)
+            .and_then(|()| writeln!(self.record))
+            .and_then(|()| self.record.flush());
+        if let Err(error) = written {
+            tracing::error!("the record file: {error}");
+        }
+        let serial = match (&record.serial_before, &record.serial_after) {
+            (Some(before), Some(after)) if before != after => format!("{before} -> {after}"),
+            (Some(before), _) => before.clone(),
+            (None, Some(after)) => after.clone(),
+            (None, None) => "-".to_owned(),
+        };
+        let firmware = match &record.firmware_after {
+            Some(after) => format!("{} -> {after}", record.firmware_before),
+            None => record.firmware_before.clone(),
+        };
+        let reason = record
+            .reason
+            .as_deref()
+            .map(|r| format!(": {r}"))
+            .unwrap_or_default();
+        let seconds = record
+            .seconds
+            .map(|s| format!(" in {s:.1} s"))
+            .unwrap_or_default();
+        indicatif_println!(
+            "{:<8} {serial}  {firmware}  {}{seconds}{reason}",
+            record.port,
+            record.result.to_uppercase()
+        );
+        // The units Batch::blink lights.
+        if matches!(record.result, "updated" | "current") {
+            indicatif_println!("{:<8} blinking: unplug it when you like", record.port);
+        }
+    }
+
+    fn paused(&mut self, reason: Option<&str>) {
+        match reason {
+            Some(reason) => tracing::warn!("paused. {reason}"),
+            None => tracing::info!("resumed"),
+        }
+    }
+}
+
+fn batch<B: Bus, H: Http>(
+    bus: &B,
+    github: &GitHub<H>,
+    args: &BatchArgs,
+    cancel: &Cancel,
+    stop: &Cancel,
+) -> Result<()> {
+    let stock = if let Some(limit) = args.stock_below {
+        StockFilter::Below(limit)
+    } else if args.take.contains(&Take::Stock) {
+        StockFilter::Any
+    } else {
+        StockFilter::None
+    };
+    let ours = if args.ours_any {
+        OursFilter::Any
+    } else if args.take.contains(&Take::Ours) {
+        OursFilter::Older
+    } else {
+        OursFilter::None
+    };
+    let filter = Filter {
+        board: match args.board {
+            BoardArg::McuLink => Board::McuLink,
+        },
+        stock,
+        ours,
+        bootloaders: args.take.contains(&Take::Isp),
+        attached: args.include_attached,
+    };
+    let (image, name, version) = match source::load(
+        &args.source.to_core(),
+        github,
+        None,
+        true,
+        &mut Bars::default(),
+    ) {
+        Ok(loaded) => (loaded.image, loaded.name, loaded.version),
+        Err(LoadError::Release(error)) => {
+            return Err(anyhow::Error::new(error))
+                .with_context(|| format!("looking up releases of ours in {}", github.repo()));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    log_image(&image);
+    let path = args.record.clone().unwrap_or_else(|| {
+        let stamp = humantime::format_rfc3339_seconds(std::time::SystemTime::now())
+            .to_string()
+            .replace(':', "");
+        PathBuf::from(format!("verge-batch-{stamp}.jsonl"))
+    });
+    let mut question = format!(
+        "Flash {name} onto {}? Each goes through its bootloader on its own, without being asked again.",
+        filter.describe()
+    );
+    if filter.bootloaders {
+        question = format!("{ISP_IDENTITY_WARNING} {question}");
+    }
+    confirm(&question, args.yes)?;
+    let file = std::fs::File::create(&path)
+        .with_context(|| format!("creating the record file {}", path.display()))?;
+    let mut output = BatchOutput {
+        bars: Bars::default(),
+        record: std::io::BufWriter::new(file),
+    };
+    indicatif_println!(
+        "Armed: {name}, for {}. Recording to {}. Plug units in; Ctrl-C stops taking new ones.",
+        filter.describe(),
+        path.display()
+    );
+    let armed = Armed {
+        image,
+        name,
+        version,
+    };
+    let mut batch = Batch::arm(
+        bus,
+        armed,
+        filter,
+        Timing::default(),
+        stop.clone(),
+        cancel.clone(),
+        args.count,
+    );
+    batch.run_to_end(&mut output)?;
+    let tally = batch.tally();
+    indicatif_println!("Batch done: {tally}.");
+    if tally.failed > 0 {
+        bail!(
+            "{} units failed; the record file {} says why",
+            tally.failed,
+            path.display()
+        );
+    }
     Ok(())
 }
 
@@ -420,7 +689,7 @@ fn bootloader<B: Bus>(bus: &B, serial: Option<&str>, cancel: &Cancel) -> Result<
         .map_err(explain)?;
     drop(bars);
     indicatif_println!(
-        "The unit is in ISP mode at {}. Flash it with `verge-update flash`.",
+        "The unit is in ISP mode at {}. Flash it with `verge flash`.",
         rom.location.as_deref().unwrap_or("?")
     );
     Ok(())
@@ -439,9 +708,10 @@ fn release<B: Bus, H: Http>(bus: &B, github: &GitHub<H>, tag: Option<&str>) -> R
     );
     indicatif_println!("  {}", release.page);
     indicatif_println!(
-        "  {}, {} bytes, checked against {}",
+        "  {}, {} bytes, checked against {} and {}",
         release.image.name,
         release.image.size,
+        release.signature.name,
         release.checksum.name
     );
     for unit in detect(bus).context("looking for MCU-Links")? {
@@ -504,9 +774,9 @@ fn inspect(file: &FsPath) -> Result<()> {
 fn explain(error: UpdateError) -> anyhow::Error {
     let next = match &error {
         UpdateError::Isp(_) | UpdateError::Cancelled | UpdateError::RomSilent { .. } => Some(
-            "The unit may be in ISP mode with a partial image. `verge-update flash` flashes it again.",
+            "The unit may be in ISP mode with a partial image. `verge flash` flashes it again.",
         ),
-        UpdateError::NoReturn(_) => Some("`verge-update list` shows what is attached now."),
+        UpdateError::NoReturn(_) => Some("`verge list` shows what is attached now."),
         _ => None,
     };
     match next {

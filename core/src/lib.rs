@@ -4,6 +4,7 @@
 //! Everything that touches USB goes through [`bus::Bus`]: [`usb::UsbBus`] is the real one and
 //! [`sim::SimBus`] a simulated bench, which the tests and `--simulate` use.
 
+pub mod batch;
 pub mod bus;
 pub mod dap;
 pub mod detect;

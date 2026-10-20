@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn newest_first() {
-        let dir = std::env::temp_dir().join(format!("updater-stock-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("verge-stock-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         for name in [
             "MCU-LINK_CMSIS-DAP_V3_99.s19",

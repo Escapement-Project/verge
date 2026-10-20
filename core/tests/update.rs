@@ -6,11 +6,11 @@
 
 use std::time::Duration;
 
-use updater_core::image::{Image, PAGE};
-use updater_core::progress::{Cancel, Progress, Step};
-use updater_core::sim::{Mode, SimBus, SimFirmware, firmware_image};
-use updater_core::update::{self, Outcome, Timing, UpdateError};
-use updater_core::{Firmware, State, Unit, detect};
+use verge_core::image::{Image, PAGE};
+use verge_core::progress::{Cancel, Progress, Step};
+use verge_core::sim::{Mode, SimBus, SimFirmware, firmware_image};
+use verge_core::update::{self, Outcome, Timing, UpdateError};
+use verge_core::{Firmware, State, Unit, detect};
 
 #[derive(Default)]
 struct Steps {
@@ -57,12 +57,12 @@ fn stock(version: &str) -> SimFirmware {
 }
 
 trait ParseStock {
-    fn parse_stock(&self) -> updater_core::version::StockVersion;
+    fn parse_stock(&self) -> verge_core::version::StockVersion;
 }
 
 impl ParseStock for str {
-    fn parse_stock(&self) -> updater_core::version::StockVersion {
-        updater_core::version::StockVersion::parse(self).unwrap()
+    fn parse_stock(&self) -> verge_core::version::StockVersion {
+        verge_core::version::StockVersion::parse(self).unwrap()
     }
 }
 
@@ -325,7 +325,7 @@ fn back_to_stock_without_the_jumper() {
 #[test]
 fn an_erased_page_read_drops_the_bootloader() {
     use mboot::McuBoot;
-    use updater_core::Bus;
+    use verge_core::Bus;
     let bus = SimBus::scenario("isp").unwrap();
     let rom = bus.devices().unwrap().remove(0);
     let mut boot = McuBoot::new(bus.open_isp(&rom).unwrap());
@@ -372,7 +372,7 @@ fn a_cancelled_write_leaves_a_unit_the_next_flash_recovers() {
     assert!(
         matches!(
             result,
-            Err(UpdateError::Isp(updater_core::isp::IspError::Cancelled))
+            Err(UpdateError::Isp(verge_core::isp::IspError::Cancelled))
         ),
         "{result:?}"
     );
@@ -419,4 +419,46 @@ fn progress_counts_every_byte_of_every_page() {
             steps.started
         );
     }
+}
+
+/// With a mini in ISP mode, nothing is flashed, whichever unit is asked for.
+#[test]
+fn a_mini_in_isp_mode_refuses_the_flash_of_the_other_bootloader() {
+    let bus = SimBus::scenario("isp-mini").unwrap();
+    let image = firmware_image(&ours("v0.3.0"));
+    let result = update::flash_now(
+        &bus,
+        &image,
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    );
+    let Err(UpdateError::Refused(reason)) = result else {
+        panic!("{result:?}");
+    };
+    assert!(reason.contains("unplug the mini first"), "{reason}");
+    assert!(!bus.log().iter().any(|l| l.contains("ROM command")));
+}
+
+#[test]
+fn a_mini_in_isp_mode_holds_back_a_jumper_free_update() {
+    let bus = SimBus::default();
+    bus.add_ours("14d05d4");
+    bus.add_mini_bootloader();
+    let unit = the_unit(&bus, "CJ3E7A91C2");
+    let image = firmware_image(&ours("v0.3.0"));
+    let result = update::update(
+        &bus,
+        &unit,
+        &image,
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    );
+    assert!(matches!(result, Err(UpdateError::Refused(_))), "{result:?}");
+    assert!(
+        !bus.log()
+            .iter()
+            .any(|l| l.contains("control") || l.contains("ROM command"))
+    );
 }

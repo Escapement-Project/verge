@@ -100,6 +100,10 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
             _ => vec![dap::ID_DAP_INVALID],
         },
         [dap::DAP_DISCONNECT] => vec![dap::DAP_DISCONNECT, dap::DAP_OK],
+        [dap::DAP_HOST_STATUS, 0 | 1, 0 | 1] => {
+            world.units[unit].host_status += 1;
+            vec![dap::DAP_HOST_STATUS, dap::DAP_OK]
+        }
         _ => vec![dap::ID_DAP_INVALID],
     }
 }

@@ -5,7 +5,7 @@ use indicatif::ProgressStyle;
 use tracing::span::EnteredSpan;
 use tracing::{Span, info_span};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
-use updater_core::progress::{Progress, Step, Unit};
+use verge_core::progress::{Progress, Step, Unit};
 
 #[derive(Default)]
 pub struct Bars {
@@ -29,10 +29,17 @@ impl Bars {
     }
 }
 
-impl Drop for Bars {
-    fn drop(&mut self) {
+impl Bars {
+    /// Removes the bars, as when one unit of a batch is done.
+    pub fn clear(&mut self) {
         self.current.take();
         self.overall.take();
+    }
+}
+
+impl Drop for Bars {
+    fn drop(&mut self) {
+        self.clear();
     }
 }
 

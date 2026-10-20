@@ -2,10 +2,10 @@
 //! identities.
 
 use serde_json::Value;
-use updater_core::detect::{Guess, State};
-use updater_core::sim::{SimBus, SimFirmware};
-use updater_core::version::StockVersion;
-use updater_core::{Firmware, Path, detect, offer};
+use verge_core::detect::{Guess, State};
+use verge_core::sim::{SimBus, SimFirmware};
+use verge_core::version::StockVersion;
+use verge_core::{Firmware, Path, detect, offer};
 
 /// The recorded `DAP_Info` block for `label`, read here rather than through the simulator.
 fn recorded(label: &str) -> Value {
@@ -162,6 +162,7 @@ fn every_scenario_offers_what_its_state_allows() {
         ("isp-jumper", &[&[Path::FlashNow]]),
         ("two-isp", &[&[], &[]]),
         ("mini", &[&[]]),
+        ("isp-mini", &[&[], &[]]),
     ];
     for (name, expected) in cases {
         let bus = SimBus::scenario(name).unwrap();

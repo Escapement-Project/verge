@@ -32,6 +32,7 @@ const RESET: u8 = 0x0B;
 const SUCCESS: u32 = 0;
 const FLASH_ALIGNMENT_ERROR: u32 = 101;
 const FLASH_ADDRESS_ERROR: u32 = 102;
+const FLASH_COMMAND_FAILURE: u32 = 105;
 const FLASH_ECC_ERROR: u32 = 116;
 const UNKNOWN_COMMAND: u32 = 10000;
 const MEMORY_RANGE_INVALID: u32 = 10200;
@@ -165,7 +166,9 @@ impl SimRom {
             WRITE_MEMORY => {
                 let (start, len) = (param(0), param(1) as usize);
                 let end = u64::from(start) + len.div_ceil(PAGE as usize) as u64 * u64::from(PAGE);
-                let status = if start % PAGE != 0 {
+                let status = if world.units[self.unit].fail_writes {
+                    FLASH_COMMAND_FAILURE
+                } else if start % PAGE != 0 {
                     FLASH_ALIGNMENT_ERROR
                 } else if end > u64::from(APP_FLASH_END) {
                     MEMORY_RANGE_INVALID
