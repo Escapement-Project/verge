@@ -326,6 +326,11 @@ fn run_batch<B: Bus, H: Http + Clone + Send + 'static>(
         tracing::info!("stopped before the batch was armed");
         return Ok(Tally::default());
     };
+    // The default record directory, the user's data directory, need not exist yet.
+    if let Some(dir) = record.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("making the record file's directory {}: {e}", dir.display()))?;
+    }
     let file = open_record(record)
         .map_err(|e| format!("opening the record file {}: {e}", record.display()))?;
     forward.send(Event::BatchArmed {

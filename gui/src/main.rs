@@ -93,6 +93,20 @@ fn simulated_worker(bus: Simulated, _: Repo, _: impl Fn() + Send + 'static) -> W
     match bus {}
 }
 
+/// Where a batch's record file goes unless the user names another: the user's data directory,
+/// `~/.local/share/verge` on Linux. The current directory where the system names none.
+fn record_dir() -> std::path::PathBuf {
+    match dirs::data_dir() {
+        Some(data) => data.join("verge"),
+        None => {
+            tracing::warn!(
+                "the system names no data directory, so batch records go in the current one"
+            );
+            std::env::current_dir().unwrap_or_default()
+        }
+    }
+}
+
 fn main() -> eframe::Result {
     let args = Args::parse();
     let log = log::Log::default();
@@ -111,7 +125,7 @@ fn main() -> eframe::Result {
         repo: args.repo.clone(),
         simulated: simulated.as_ref().map(|(name, _)| name.clone()),
         stock_dirs: verge_core::stock::search_dirs(),
-        record_dir: std::env::current_dir().unwrap_or_default(),
+        record_dir: record_dir(),
     };
 
     let options = eframe::NativeOptions {

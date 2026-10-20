@@ -924,3 +924,63 @@ fn cancel_ends_an_update_still_loading_its_image() {
     h.get_by_label_contains("cancelled before anything was flashed");
     assert!(!h.state().busy());
 }
+/// Batch records go in the user's data directory: `$XDG_DATA_HOME/verge`, else
+/// `~/.local/share/verge`, on Linux. Not the directory the window was started from.
+#[cfg(target_os = "linux")]
+#[test]
+fn batch_records_go_in_the_users_data_directory() {
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").expect("HOME is set")).join(".local/share")
+        });
+    assert_eq!(crate::record_dir(), data.join("verge"));
+    assert_ne!(crate::record_dir(), std::env::current_dir().unwrap());
+}
+
+/// The data directory need not exist yet, so a batch makes its record file's directory.
+#[test]
+fn a_batch_makes_its_record_files_directory() {
+    use crate::worker::{Backend, Request};
+    use verge_core::batch::{Board, Filter, OursFilter, StockFilter};
+    let dir = record_dir("made");
+    let record = dir.join("not/there/yet/record.jsonl");
+    let http = SimHttp::new(repo());
+    http.publish_ours("v0.3.0");
+    let key = http.public_key();
+    let mut worker = Worker::spawn(
+        SimBus::scenario("arrivals").unwrap(),
+        GitHub::new(http, repo(), None).with_key(Some(key)),
+        || {},
+    );
+    worker.send(Request::Batch {
+        source: verge_core::Source::Release(None),
+        filter: Filter {
+            board: Board::McuLink,
+            stock: StockFilter::Any,
+            ours: OursFilter::Older,
+            bootloaders: false,
+            attached: false,
+        },
+        limit: Some(1),
+        record: record.clone(),
+        stop: verge_core::Cancel::new(),
+        cancel: verge_core::Cancel::new(),
+    });
+    let mut ended = None;
+    for _ in 0..2000 {
+        match worker.try_recv() {
+            Some(Event::BatchEnded(result)) => {
+                ended = Some(result);
+                break;
+            }
+            Some(_) => {}
+            None => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    let written = std::fs::read_to_string(&record);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(matches!(ended, Some(Ok(_))), "{ended:?}");
+    assert_eq!(written.unwrap().lines().count(), 2);
+}
