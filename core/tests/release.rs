@@ -151,6 +151,34 @@ wLMDjy9FLAuxZ3q4NlEvkgtyhrr0gtTu6KC4KBJdITbbOeAi1zBIYo0v4iTgt8jJpIidRJnp94ABQkJA
     ));
 }
 
+/// A legacy signature, of the image itself rather than its hash, from minisign-verify 0.3.0's
+/// own test (`src/lib.rs`, lines 419 to 441), where it verifies with legacy signatures allowed.
+/// verge allows only pre-hashed ones, so it is refused before its trusted comment is read.
+#[test]
+fn a_legacy_signature_is_refused() {
+    let key = minisign_verify::PublicKey::from_base64(
+        "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3",
+    )
+    .unwrap();
+    let signature = "untrusted comment: signature from minisign secret key
+RWQf6LRCGA9i59SLOFxz6NxvASXDJeRtuZykwQepbDEGt87ig1BNpWaVWuNrm73YiIiJbq71Wi+dP9eKL8OC351vwIasSSbXxwA=
+trusted comment: timestamp:1555779966\tfile:test
+QtKMXWyYcwdpZAlPF7tE2ENJkRd1ujvKjlj1m9RtHTBnZPa5WKU5uWRs5GoP5M/VqE81QFuMKI5k/SfNQUaOAA==
+";
+    let result = verify_signature(
+        &key,
+        "test.minisig",
+        signature.as_bytes(),
+        "test",
+        "v1.0.0",
+        b"test",
+    );
+    let Err(ReleaseError::BadSignature { reason, .. }) = &result else {
+        panic!("{result:?}");
+    };
+    assert!(reason.contains("legacy signature"), "{reason}");
+}
+
 fn github(http: &SimHttp) -> GitHub<SimHttp> {
     GitHub::new(http.clone(), repo(), None).with_key(Some(http.public_key()))
 }

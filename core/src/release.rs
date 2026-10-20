@@ -6,7 +6,8 @@
 //! - exactly one asset whose name ends in `.s19`: the image, as `objcopy -O srec` writes it;
 //! - an asset named the same with `.minisig` appended: a minisign signature of the image, made
 //!   with the key whose public half is [`RELEASE_KEY`], whose trusted comment names the image as
-//!   `file:<name>` and the release as `tag:<tag>`;
+//!   `file:<name>` and the release as `tag:<tag>`. It has to be pre-hashed, as minisign signs by
+//!   default; a legacy signature is refused;
 //! - an asset named the same with `.sha256` appended, holding the image's SHA-256 in hex, as
 //!   `sha256sum` writes it (`<hex>  <name>`). A file name after the hash, if present, must be the
 //!   image's.
@@ -528,12 +529,15 @@ pub fn verify_signature(
     let text = std::str::from_utf8(signature).map_err(|_| bad_file("it is not text".into()))?;
     let decoded =
         minisign_verify::Signature::decode(text).map_err(|error| bad_file(error.to_string()))?;
-    key.verify(image, &decoded, true)
+    key.verify(image, &decoded, false)
         .map_err(|error| ReleaseError::BadSignature {
             name: name.to_owned(),
             reason: match error {
                 minisign_verify::Error::UnexpectedKeyId => {
                     "it was made with a key other than the one built into verge".to_owned()
+                }
+                minisign_verify::Error::UnexpectedAlgorithm => {
+                    "it is a legacy signature, of the image itself rather than its hash, and verge takes only the pre-hashed signatures minisign makes by default".to_owned()
                 }
                 minisign_verify::Error::InvalidSignature => {
                     "the image or its trusted comment was changed after it was signed".to_owned()
