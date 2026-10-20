@@ -212,7 +212,8 @@ struct FlashArgs {
 fn init_tracing(verbose: u8) {
     let default = match verbose {
         0 => "warn,verge_core=info",
-        1 => "info",
+        // The bootloader and USB crates log every packet at info, so they wait for -vv.
+        1 => "warn,verge_core=debug,verge=debug",
         _ => "debug",
     };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
