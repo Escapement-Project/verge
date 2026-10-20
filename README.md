@@ -416,5 +416,4 @@ cargo check --workspace --all-targets --all-features --target x86_64-pc-windows-
   running it.
 - Stock V2.x, which speaks HID only. Its USB product string has not been recorded from a real
   unit. The simulator's is a guess, and so is the version the tool reads from it.
-- No image of ours declares its boards yet; the firmware adds the declaration in its next round.
-  Until then every image of ours goes on the full MCU-Link only.
+- Images of ours declare the full MCU-Link only so far, so the tool puts ours on no other board.
