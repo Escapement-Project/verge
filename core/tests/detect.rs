@@ -215,7 +215,7 @@ fn stocks_product_string_names_the_board() {
         ),
         // Not the Readme's form, so nothing is known.
         ("MCU-LINK CMSIS-DAP V2.245", Hardware::Unknown),
-        ("MCU-Link Verge CMSIS-DAP", Hardware::Unknown),
+        ("Verge CMSIS-DAP", Hardware::Unknown),
     ] {
         assert_eq!(Hardware::from_stock_product(product), board, "{product}");
     }

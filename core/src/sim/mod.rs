@@ -520,7 +520,7 @@ fn stock_product(board: Option<u8>, version: StockVersion, swd_jumper: bool) -> 
 /// Ours' product string, which names the Pro (`DAP_ProductName` in the firmware).
 fn ours_product(recorded: &str, board: Option<u8>) -> String {
     if board == Some(Ours::BOARD_MCU_LINK_PRO) {
-        "MCU-Link Pro Verge CMSIS-DAP".to_owned()
+        "Verge Pro CMSIS-DAP".to_owned()
     } else {
         recorded.to_owned()
     }

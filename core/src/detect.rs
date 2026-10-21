@@ -133,7 +133,7 @@ impl Hardware {
     /// ours gives the full board's, so that string names no board.
     #[must_use]
     pub fn from_ours_product(product: &str) -> Hardware {
-        if product.starts_with("MCU-Link Pro Verge") {
+        if product.starts_with("Verge Pro ") {
             Hardware::Board(Board::McuLinkPro)
         } else {
             Hardware::Unknown
@@ -403,7 +403,7 @@ mod tests {
             (0x0002, false),
         ] {
             assert_eq!(
-                swd_jumper(&device("MCU-Link Verge CMSIS-DAP", bcd)),
+                swd_jumper(&device("Verge CMSIS-DAP", bcd)),
                 fitted.then_some(Jumpered::Ours),
                 "0x{bcd:04x}"
             );
@@ -413,11 +413,11 @@ mod tests {
     #[test]
     fn ours_names_only_the_pro_in_its_product_string() {
         assert_eq!(
-            Hardware::from_ours_product("MCU-Link Verge CMSIS-DAP"),
+            Hardware::from_ours_product("Verge CMSIS-DAP"),
             Hardware::Unknown
         );
         assert_eq!(
-            Hardware::from_ours_product("MCU-Link Pro Verge CMSIS-DAP"),
+            Hardware::from_ours_product("Verge Pro CMSIS-DAP"),
             Hardware::Board(Board::McuLinkPro)
         );
         assert_eq!(

@@ -219,7 +219,7 @@ mod tests {
             })
         );
         assert_eq!(
-            StockVersion::from_product_string("MCU-Link Verge CMSIS-DAP"),
+            StockVersion::from_product_string("Verge CMSIS-DAP"),
             None
         );
     }
