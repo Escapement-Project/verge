@@ -43,6 +43,26 @@ library checks the board again before it asks a unit for its bootloader.
 A running unit whose firmware does not say which board it is can still be updated, after a
 question that says so. `--yes` does not answer that question: run `update` at a terminal.
 
+## The SWD jumper
+
+The SWD jumper hands the target's debug lines to another debugger. Stock and ours both drop
+their CMSIS-DAP interface while it is fitted, and that interface is how the tool asks a unit what
+it runs. So the tool reads such a unit from what USB shows without opening it: whose firmware it
+is, that the jumper is fitted, and the board where that says it. It cannot tell which build of
+ours the unit runs.
+
+Stock names its board in its product string as always. Ours names only the Pro there, because an
+on-board MCU-Link running ours gives the same string as the full MCU-Link. So a full MCU-Link
+running ours, with its SWD jumper fitted, is a unit whose board the tool does not know, and
+`update` asks before it puts ours on it.
+
+A unit running ours still updates without the ISP jumper. The tool sends the restart request to
+the USB device itself rather than to an interface. Windows sends such a request only through an
+interface the tool has claimed, so there you take the SWD jumper off first. Stock's update request
+needs the CMSIS-DAP interface. So a unit on stock V3.122 or later needs its SWD jumper off to
+update without the ISP jumper, and older stock needs the ISP jumper either way. A batch skips a
+unit with its SWD jumper fitted.
+
 ## Building
 
 From the repository's root:
@@ -394,12 +414,15 @@ cargo run -p verge --features simulate -- --simulate arrivals batch --yes --coun
 ```
 
 The scenarios are `bench`, `ours`, `stock`, `stock-old`, `stock-hid`, `isp`, `isp-jumper`,
-`two-isp`, `mini`, `isp-mini`, `busy`, `arrivals`, `pro`, `pro-old`, `fails-writes` and
-`unnamed-board`. In `arrivals`, five units are plugged in over the first eight seconds. In `pro`,
-the one unit is an MCU-Link Pro; in `pro-old`, a Pro on stock V3.108, which needs the jumper. In
-`fails-writes`, the bootloader refuses every write. In `unnamed-board`, the unit's product string
-names no board. A simulated unit boots only the simulator's own images. A real image flashed
-there, such as stock from your LinkServer install, leaves the unit silent.
+`two-isp`, `mini`, `isp-mini`, `busy`, `arrivals`, `pro`, `pro-old`, `fails-writes`,
+`unnamed-board`, `swd-jumper`, `pro-swd-jumper` and `stock-swd-jumper`. In `arrivals`, five units
+are plugged in over the first eight seconds. In `pro`, the one unit is an MCU-Link Pro; in
+`pro-old`, a Pro on stock V3.108, which needs the jumper. In `fails-writes`, the bootloader refuses
+every write. In `unnamed-board`, the unit's product string names no board. In `swd-jumper` and
+`pro-swd-jumper`, a full MCU-Link and a Pro run ours with the SWD jumper fitted; in
+`stock-swd-jumper`, a full MCU-Link runs stock with it. A simulated unit boots only the
+simulator's own images. A real image flashed there, such as stock from your LinkServer install,
+leaves the unit silent.
 
 The window's tests drive it headless through `egui_kittest`, against the same bench. One more
 renders every state to PNG, which needs a GPU:
