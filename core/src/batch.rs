@@ -18,8 +18,8 @@ use serde::Serialize;
 use crate::board;
 pub use crate::board::Board;
 use crate::bus::{Bus, BusError, UsbDevice};
-use crate::dap;
-use crate::detect::{self, Firmware, Hardware, State, Unit};
+use crate::dap::{self, LinkError};
+use crate::detect::{self, Firmware, Hardware, Jumpered, State, Unit};
 use crate::ids::Role;
 use crate::image::{Image, ImageError};
 use crate::paths::{self, Path};
@@ -185,6 +185,20 @@ pub fn judge(unit: &Unit, filter: &Filter, version: &ImageVersion) -> Verdict {
         State::Unreadable { reason, .. } => {
             return Verdict::Skip(format!("the tool could not ask what it runs: {reason}"));
         }
+        State::SwdJumper {
+            firmware: Jumpered::Ours,
+        } => {
+            return Verdict::Skip(
+                "its SWD jumper is fitted, so the tool cannot ask which build it runs".into(),
+            );
+        }
+        State::SwdJumper {
+            firmware: Jumpered::Stock(_),
+        } => {
+            return Verdict::Skip(
+                "its SWD jumper is fitted, which takes away the interface stock's update request goes through".into(),
+            );
+        }
         State::Bootloader | State::Probe { .. } => {}
     }
     if !filter.board.takes(unit) {
@@ -201,7 +215,9 @@ pub fn judge(unit: &Unit, filter: &Filter, version: &ImageVersion) -> Verdict {
         State::Bootloader => {
             return Verdict::Skip("in ISP mode, which this batch does not take".into());
         }
-        State::MiniBootloader | State::Unreadable { .. } => unreachable!("judged above"),
+        State::MiniBootloader | State::Unreadable { .. } | State::SwdJumper { .. } => {
+            unreachable!("judged above")
+        }
         State::Probe {
             firmware: Firmware::Ours(ours),
             ..
@@ -516,6 +532,18 @@ impl<B: Bus> Bus for Watch<'_, B> {
 
     fn open_dap(&self, device: &UsbDevice) -> Result<B::Dap, BusError> {
         self.bus.open_dap(device)
+    }
+
+    fn device_control_out(
+        &self,
+        device: &UsbDevice,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+    ) -> Result<Result<(), LinkError>, BusError> {
+        self.bus
+            .device_control_out(device, request_type, request, value, index)
     }
 
     fn open_isp(&self, device: &UsbDevice) -> Result<B::Isp, BusError> {

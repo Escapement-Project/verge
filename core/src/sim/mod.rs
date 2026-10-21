@@ -26,6 +26,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::bus::{Bus, BusError, UsbDevice};
+use crate::dap::{self as cmsis_dap, LinkError, Ours};
 use crate::ids::{self, Role};
 use crate::image::{Image, PAGE};
 use crate::version::StockVersion;
@@ -182,6 +183,8 @@ pub struct SimUnit {
     pub board: Option<u8>,
     /// Stock's USB product string, where it is not the one for its board.
     pub stock_product: Option<String>,
+    /// The SWD jumper is fitted, so a running firmware offers no CMSIS-DAP interface.
+    pub swd_jumper: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -384,6 +387,43 @@ impl World {
         self.units[unit].instance.is_some() && self.units[unit].generation == generation
     }
 
+    /// A control request to the unit, as the firmware's `tud_vendor_control_xfer_cb` takes it:
+    /// ours restarts on the reboot request, and everything else stalls.
+    pub(crate) fn control_out(
+        &mut self,
+        unit: usize,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+    ) -> Result<(), LinkError> {
+        let location = self.units[unit].location.clone();
+        self.log.push(format!(
+            "{location}: control 0x{request_type:02x} 0x{request:02x} wValue {value} wIndex {index}"
+        ));
+        let ours = matches!(
+            self.units[unit].mode,
+            Mode::Firmware(SimFirmware::Ours { .. })
+        );
+        if !ours
+            || request_type != cmsis_dap::REBOOT_REQUEST_TYPE
+            || request != cmsis_dap::REBOOT_REQUEST
+            || index != 0
+            || value > 1
+        {
+            return Err(LinkError::Usb("the request stalled".into()));
+        }
+        // The firmware holds the disconnect for 20 ms before it resets (its src/reboot.c).
+        self.schedule(Duration::from_millis(20), unit, Event::Leave);
+        let after = Duration::from_millis(500);
+        if value == cmsis_dap::REBOOT_TO_BOOTLOADER {
+            self.schedule(after, unit, Event::Appear(Mode::Bootloader));
+        } else {
+            self.schedule(after, unit, Event::Boot);
+        }
+        Ok(())
+    }
+
     fn device(&self, unit: usize) -> Option<UsbDevice> {
         let u = &self.units[unit];
         let instance = u.instance.clone()?;
@@ -393,13 +433,14 @@ impl World {
             (Mode::Bootloader, true) => ids::id_for(Role::MiniBootloader),
             (Mode::Silent, _) => return None,
         };
+        let debug = !u.swd_jumper;
         let (serial, manufacturer, product, dap_v2, hid) = match &u.mode {
             Mode::Firmware(SimFirmware::Ours { .. }) => (
                 Some(u.ours_serial.clone()),
                 Some(self.ours.0.vendor.clone()),
-                Some(self.ours.0.product.clone()),
-                true,
-                true,
+                Some(ours_product(&self.ours.0.product, u.board)),
+                debug,
+                debug,
             ),
             Mode::Firmware(SimFirmware::Stock { version }) => (
                 Some(u.stock_serial.clone()),
@@ -407,10 +448,11 @@ impl World {
                 Some(
                     u.stock_product
                         .clone()
-                        .unwrap_or_else(|| stock_product(u.board, *version)),
+                        .unwrap_or_else(|| stock_product(u.board, *version, u.swd_jumper)),
                 ),
-                true,
-                true,
+                debug,
+                // The power HID stays on the Pro, and the plain board keeps only its VCOM.
+                debug || u.board == Some(Ours::BOARD_MCU_LINK_PRO),
             ),
             Mode::Firmware(SimFirmware::StockHid { version }) => (
                 Some(u.stock_serial.clone()),
@@ -435,6 +477,12 @@ impl World {
             serial,
             manufacturer,
             product,
+            bcd_device: match &u.mode {
+                Mode::Firmware(SimFirmware::Ours { .. }) => ours_bcd_device(u),
+                // The Pro's with no jumper (mculink-stock-notes); nothing reads stock's.
+                Mode::Firmware(_) => 0x0337,
+                Mode::Bootloader | Mode::Silent => 0x0100,
+            },
             dap_v2,
             hid,
         })
@@ -447,15 +495,38 @@ impl World {
     }
 }
 
-/// Stock's USB product string on `board`, in the form LinkServer's Readme gives. The Pro's and
-/// the on-board hardware revisions are made up.
-fn stock_product(board: Option<u8>, version: StockVersion) -> String {
-    let board = match board {
-        None | Some(crate::dap::Ours::BOARD_MCU_LINK) => "(r0FB)",
-        Some(crate::dap::Ours::BOARD_MCU_LINK_PRO) => "Pro (r1E2)",
-        Some(_) => "FRDM-MCXN947 (r0E7)",
+/// Stock's USB product string on `board`, in the form LinkServer's Readme gives. The straps are
+/// the plain board's and the Pro's as stock V3.172 reported them; the on-board one's are made up.
+/// The SWD jumper clears 0x080 of them.
+fn stock_product(board: Option<u8>, version: StockVersion, swd_jumper: bool) -> String {
+    let (name, straps) = match board {
+        None | Some(Ours::BOARD_MCU_LINK) => ("", 0x0FB),
+        Some(Ours::BOARD_MCU_LINK_PRO) => ("Pro ", 0x1CF),
+        Some(_) => ("FRDM-MCXN947 ", 0x0E7),
     };
-    format!("MCU-LINK {board} CMSIS-DAP V{version}")
+    let straps = if swd_jumper { straps & !0x080 } else { straps };
+    format!("MCU-LINK {name}(r{straps:03X}) CMSIS-DAP V{version}")
+}
+
+/// Ours' product string, which names the Pro (`DAP_ProductName` in the firmware).
+fn ours_product(recorded: &str, board: Option<u8>) -> String {
+    if board == Some(Ours::BOARD_MCU_LINK_PRO) {
+        "MCU-Link Pro Verge CMSIS-DAP".to_owned()
+    } else {
+        recorded.to_owned()
+    }
+}
+
+/// Ours' bcdDevice: 0x01 and the functions present, debug in bit 0, VCOM in bit 1 and the Pro's
+/// VCOM2 in bit 2 (the firmware's `src/usb_descriptors.c`).
+fn ours_bcd_device(u: &SimUnit) -> u16 {
+    let debug = if u.swd_jumper { 0 } else { 1 << 0 };
+    let vcom2 = if u.board == Some(Ours::BOARD_MCU_LINK_PRO) {
+        1 << 2
+    } else {
+        0
+    };
+    0x0100 | debug | 1 << 1 | vcom2
 }
 
 /// The firmware a unit's flash boots, if any: a vector table that points into programmed flash,
@@ -534,6 +605,18 @@ pub const SCENARIOS: &[(&str, &str)] = &[
         "unnamed-board",
         "one unit running stock V3.172 whose product string names no board",
     ),
+    (
+        "swd-jumper",
+        "one unit running ours with its SWD jumper fitted",
+    ),
+    (
+        "pro-swd-jumper",
+        "one MCU-Link Pro running ours with its SWD jumper fitted",
+    ),
+    (
+        "stock-swd-jumper",
+        "one unit running stock V3.172 with its SWD jumper fitted",
+    ),
 ];
 
 impl SimBus {
@@ -581,6 +664,7 @@ impl SimBus {
             leds_on: false,
             board: None,
             stock_product: None,
+            swd_jumper: false,
         });
         world.units[index].mode = mode;
         if world.units[index].mode != Mode::Silent {
@@ -703,6 +787,11 @@ impl SimBus {
         self.world().units[unit].stock_product = Some(product.to_owned());
     }
 
+    /// Fits or removes a unit's SWD jumper. Applies from its next enumeration.
+    pub fn set_swd_jumper(&self, unit: usize, fitted: bool) {
+        self.world().units[unit].swd_jumper = fitted;
+    }
+
     /// Makes every device report no port, as on a platform that does not say.
     pub fn set_locations(&self, on: bool) {
         self.world().locations = on;
@@ -814,6 +903,18 @@ impl SimBus {
                 let unit = bus.add_stock("3.172");
                 bus.set_stock_product(unit, "MCU-LINK CMSIS-DAP V3.172");
             }
+            "swd-jumper" | "pro-swd-jumper" | "stock-swd-jumper" => {
+                let unit = if name == "stock-swd-jumper" {
+                    bus.add_stock("3.172")
+                } else {
+                    bus.add_ours("14d05d4")
+                };
+                if name == "pro-swd-jumper" {
+                    bus.set_board(unit, Ours::BOARD_MCU_LINK_PRO);
+                }
+                bus.set_swd_jumper(unit, true);
+                bus.world().enumerate(unit);
+            }
             _ => return None,
         }
         Some(bus)
@@ -867,10 +968,12 @@ impl Bus for SimBus {
                 device: device.to_string(),
             });
         }
-        if !matches!(
-            u.mode,
-            Mode::Firmware(SimFirmware::Ours { .. } | SimFirmware::Stock { .. })
-        ) {
+        if u.swd_jumper
+            || !matches!(
+                u.mode,
+                Mode::Firmware(SimFirmware::Ours { .. } | SimFirmware::Stock { .. })
+            )
+        {
             return Err(BusError::Open {
                 device: device.to_string(),
                 reason: "it has no CMSIS-DAP v2 bulk interface".into(),
@@ -879,6 +982,22 @@ impl Bus for SimBus {
         let stale = std::mem::take(&mut world.units[unit].stale_replies);
         let generation = world.units[unit].generation;
         Ok(SimDap::new(self.world.clone(), unit, generation, stale))
+    }
+
+    fn device_control_out(
+        &self,
+        device: &UsbDevice,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+    ) -> Result<Result<(), LinkError>, BusError> {
+        let mut world = self.world();
+        world.settle();
+        let unit = world.unit_for(device).ok_or_else(|| BusError::Gone {
+            device: device.to_string(),
+        })?;
+        Ok(world.control_out(unit, request_type, request, value, index))
     }
 
     fn open_isp(&self, device: &UsbDevice) -> Result<SimRom, BusError> {

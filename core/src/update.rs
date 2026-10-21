@@ -231,7 +231,19 @@ fn enter<B: Bus>(
     };
 
     progress.start(Step::EnterBootloader, 0);
-    {
+    if let State::SwdJumper { .. } = unit.state {
+        if stop.is_cancelled() {
+            return Err(UpdateError::Stopped);
+        }
+        bus.device_control_out(
+            &unit.device,
+            dap::REBOOT_REQUEST_TYPE,
+            dap::REBOOT_REQUEST,
+            dap::REBOOT_TO_BOOTLOADER,
+            0,
+        )?
+        .map_err(UpdateError::OursEntry)?;
+    } else {
         let mut link = bus.open_dap(&unit.device)?;
         link.drain()
             .map_err(dap::DapError::from)

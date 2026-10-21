@@ -59,6 +59,7 @@ fn describe(info: &DeviceInfo) -> UsbDevice {
         serial: info.serial_number().map(str::to_owned),
         manufacturer: info.manufacturer_string().map(str::to_owned),
         product,
+        bcd_device: info.device_version(),
         dap_v2,
         hid: info
             .interfaces()
@@ -202,6 +203,26 @@ impl Bus for UsbBus {
         Err(open_error("it has no CMSIS-DAP v2 bulk interface".into()))
     }
 
+    fn device_control_out(
+        &self,
+        device: &UsbDevice,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+    ) -> Result<Result<(), LinkError>, BusError> {
+        let usb = self
+            .find(device)?
+            .open()
+            .wait()
+            .map_err(|error| BusError::Open {
+                device: device.to_string(),
+                reason: error.to_string(),
+            })?;
+        Ok(control_out(request_type, request, value, index)
+            .and_then(|control| to_device(&usb, control)))
+    }
+
     fn open_isp(&self, device: &UsbDevice) -> Result<HidRom, BusError> {
         let open_error = |reason: String| BusError::Open {
             device: device.to_string(),
@@ -262,6 +283,56 @@ impl NusbDap {
     }
 }
 
+/// A control request with no data stage, from its setup fields.
+fn control_out(
+    request_type: u8,
+    request: u8,
+    value: u16,
+    index: u16,
+) -> Result<ControlOut<'static>, LinkError> {
+    let control_type = match (request_type >> 5) & 0x3 {
+        0 => ControlType::Standard,
+        1 => ControlType::Class,
+        2 => ControlType::Vendor,
+        _ => {
+            return Err(LinkError::Usb(format!(
+                "bmRequestType 0x{request_type:02x}"
+            )));
+        }
+    };
+    let recipient = match request_type & 0x1f {
+        0 => Recipient::Device,
+        1 => Recipient::Interface,
+        2 => Recipient::Endpoint,
+        _ => Recipient::Other,
+    };
+    if request_type & 0x80 != 0 {
+        return Err(LinkError::Usb("an IN request on control_out".into()));
+    }
+    Ok(ControlOut {
+        control_type,
+        recipient,
+        request,
+        value,
+        index,
+        data: &[],
+    })
+}
+
+#[cfg(not(windows))]
+fn to_device(usb: &nusb::Device, control: ControlOut<'_>) -> Result<(), LinkError> {
+    usb.control_out(control, COMMAND_TIMEOUT)
+        .wait()
+        .map_err(link_error)
+}
+
+#[cfg(windows)]
+fn to_device(_usb: &nusb::Device, _control: ControlOut<'_>) -> Result<(), LinkError> {
+    Err(LinkError::Usb(
+        "on Windows a control request reaches a device only through an interface the tool has claimed".into(),
+    ))
+}
+
 impl DapLink for NusbDap {
     fn exchange(&mut self, request: &[u8]) -> Result<Vec<u8>, LinkError> {
         self.out
@@ -289,35 +360,9 @@ impl DapLink for NusbDap {
         value: u16,
         index: u16,
     ) -> Result<(), LinkError> {
-        let control_type = match (request_type >> 5) & 0x3 {
-            0 => ControlType::Standard,
-            1 => ControlType::Class,
-            2 => ControlType::Vendor,
-            _ => {
-                return Err(LinkError::Usb(format!(
-                    "bmRequestType 0x{request_type:02x}"
-                )));
-            }
-        };
-        let recipient = match request_type & 0x1f {
-            0 => Recipient::Device,
-            1 => Recipient::Interface,
-            2 => Recipient::Endpoint,
-            _ => Recipient::Other,
-        };
-        if request_type & 0x80 != 0 {
-            return Err(LinkError::Usb("an IN request on control_out".into()));
-        }
         self.interface
             .control_out(
-                ControlOut {
-                    control_type,
-                    recipient,
-                    request,
-                    value,
-                    index,
-                    data: &[],
-                },
+                control_out(request_type, request, value, index)?,
                 COMMAND_TIMEOUT,
             )
             .wait()

@@ -10,7 +10,7 @@ use verge_core::batch::{
     Verdict, judge,
 };
 use verge_core::bus::{BusError, UsbDevice};
-use verge_core::dap::Ours;
+use verge_core::dap::{LinkError, Ours};
 use verge_core::progress::Progress;
 use verge_core::sim::{SimBus, SimDap, SimFirmware, SimRom, firmware_image};
 use verge_core::source::{ImageVersion, Source};
@@ -82,6 +82,18 @@ impl Bus for Hooked<'_> {
             .push((self.bus.now(), device.instance.clone()));
         (self.on_open)(device);
         self.bus.open_dap(device)
+    }
+
+    fn device_control_out(
+        &self,
+        device: &UsbDevice,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+    ) -> Result<Result<(), LinkError>, BusError> {
+        self.bus
+            .device_control_out(device, request_type, request, value, index)
     }
 
     fn open_isp(&self, device: &UsbDevice) -> Result<SimRom, BusError> {
@@ -519,6 +531,7 @@ fn stock_probe(product: &str) -> verge_core::Unit {
             serial: Some("PROSERIAL".into()),
             manufacturer: Some("NXP Semiconductors".into()),
             product: Some(product.into()),
+            bcd_device: 0x0337,
             dap_v2: true,
             hid: true,
         },
@@ -1450,4 +1463,19 @@ fn a_file_batch_counts_a_unit_that_came_back_once() {
         seen.records
     );
     assert_eq!(tally.failed, 0, "{tally}");
+}
+
+/// A unit with its SWD jumper cannot say which build it runs, so a batch leaves it alone.
+#[test]
+fn a_batch_skips_a_unit_with_its_swd_jumper() {
+    let bus = SimBus::scenario("swd-jumper").unwrap();
+    let unit = verge_core::detect::detect(&bus).unwrap().remove(0);
+    let any = Filter {
+        ours: OursFilter::Any,
+        ..filter()
+    };
+    let Verdict::Skip(reason) = judge(&unit, &any, &ImageVersion::Ours("v0.3.0".into())) else {
+        panic!("taken");
+    };
+    assert!(reason.contains("SWD jumper"), "{reason}");
 }

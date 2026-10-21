@@ -758,3 +758,30 @@ fn the_advice_names_a_repository_given_on_the_command_line() {
             "run `verge flash --release v0.3.0`",
         ));
 }
+
+/// Ours names only the Pro in its product string, so a full MCU-Link with its SWD jumper asks
+/// about its board, which `--yes` does not answer.
+#[test]
+fn ours_with_its_swd_jumper_asks_about_its_board_and_stock_is_sent_to_take_it_off() {
+    tool("swd-jumper")
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ours, SWD jumper fitted"));
+    // On Windows the tool offers ours only the ISP jumper, and says so before any board question.
+    let refusal = if cfg!(windows) {
+        "cannot be updated without the jumper"
+    } else {
+        "does not say which board it is"
+    };
+    tool("swd-jumper")
+        .args(["update", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(refusal));
+    tool("stock-swd-jumper")
+        .args(["update", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("take the SWD jumper off"));
+}

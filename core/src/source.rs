@@ -176,7 +176,10 @@ pub fn check_board(
 /// in ISP mode, whose question says [`crate::paths::ISP_IDENTITY_WARNING`] instead.
 #[must_use]
 pub fn board_unknown(unit: &Unit) -> Option<&'static str> {
-    let running = matches!(unit.state, State::Probe { .. } | State::Unreadable { .. });
+    let running = matches!(
+        unit.state,
+        State::Probe { .. } | State::Unreadable { .. } | State::SwdJumper { .. }
+    );
     (running && unit.hardware() == Hardware::Unknown).then_some(
         "This unit's firmware does not say which board it is, so the tool cannot check that the image is built for it.",
     )

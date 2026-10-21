@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::detect::{Firmware, Guess, State, Unit};
+use crate::detect::{Firmware, Guess, Jumpered, State, Unit};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Path {
@@ -127,6 +127,31 @@ pub fn offer(unit: &Unit, all: &[Unit]) -> Offer {
                 );
             }
         }
+        State::SwdJumper {
+            firmware: Jumpered::Ours,
+        } => {
+            offer.notes.push(
+                "The SWD jumper is fitted. It takes away the CMSIS-DAP interface, so the tool cannot ask which build this unit runs.".into(),
+            );
+            if cfg!(windows) {
+                offer.notes.push(
+                    "On Windows the tool can send the restart request only through that interface. Take the SWD jumper off to update the unit without the ISP jumper.".into(),
+                );
+            } else {
+                jumper_free(&mut offer, Path::OursJumperFree);
+            }
+        }
+        State::SwdJumper {
+            firmware: Jumpered::Stock(version),
+        } => offer.notes.push(match version {
+            Some(version) if version.has_jumper_free_update() => {
+                "The SWD jumper is fitted. It takes away the CMSIS-DAP interface that stock's jumper-free update goes through: unplug the unit, take the SWD jumper off and plug it back in to use that update.".into()
+            }
+            Some(version) => format!(
+                "The SWD jumper is fitted. Stock V{version} has no jumper-free update either way. NXP added it in V3.122."
+            ),
+            None => "The SWD jumper is fitted, and stock's product string gives no version, so the tool does not know whether it has a jumper-free update.".into(),
+        }),
         State::Bootloader if in_isp > 1 => {
             offer.notes.push(format!(
                 "{in_isp} units are in ISP mode and every LPC55S69 bootloader looks the same. Unplug all but one."
@@ -172,6 +197,7 @@ mod tests {
                 serial: None,
                 manufacturer: None,
                 product: None,
+                bcd_device: 0,
                 dap_v2: true,
                 hid: false,
             },

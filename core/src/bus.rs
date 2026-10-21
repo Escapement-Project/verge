@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use mboot::protocols::Protocol;
 
-use crate::dap::DapLink;
+use crate::dap::{DapLink, LinkError};
 use crate::ids::{self, Role};
 
 /// A device as enumeration describes it, before anything opens it.
@@ -24,6 +24,9 @@ pub struct UsbDevice {
     pub serial: Option<String>,
     pub manufacturer: Option<String>,
     pub product: Option<String>,
+    /// bcdDevice. Ours puts the functions its jumpers leave in the low byte, bit 0 the debug
+    /// interfaces.
+    pub bcd_device: u16,
     /// Offers a vendor-class interface whose string contains "CMSIS-DAP": the v2 bulk pair.
     pub dap_v2: bool,
     /// Offers a HID interface, which is all stock V2.x and the ROM bootloader have.
@@ -71,6 +74,19 @@ pub trait Bus {
     fn devices(&self) -> Result<Vec<UsbDevice>, BusError>;
     /// Claims a probe's CMSIS-DAP v2 interface.
     fn open_dap(&self, device: &UsbDevice) -> Result<Self::Dap, BusError>;
+    /// Sends a control request with no data stage to the device itself, claiming no interface:
+    /// how the tool reaches ours once the SWD jumper has taken away the interface it would claim.
+    /// The outer error says the device could not be opened, the inner one that the request failed.
+    /// The request fails on Windows, where WinUSB sends control requests only through a claimed
+    /// interface.
+    fn device_control_out(
+        &self,
+        device: &UsbDevice,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+    ) -> Result<Result<(), LinkError>, BusError>;
     /// Opens the ROM bootloader's HID interface.
     fn open_isp(&self, device: &UsbDevice) -> Result<Self::Isp, BusError>;
     /// Time since an arbitrary start.

@@ -4,7 +4,7 @@
 use serde_json::Value;
 use verge_core::board::Board;
 use verge_core::dap::Ours;
-use verge_core::detect::{Guess, Hardware, State};
+use verge_core::detect::{Guess, Hardware, Jumpered, State};
 use verge_core::sim::{SimBus, SimFirmware};
 use verge_core::version::StockVersion;
 use verge_core::{Firmware, Path, detect, offer};
@@ -247,4 +247,87 @@ fn each_unit_says_which_board_it_is() {
         ]
     );
     let _ = plain_ours;
+}
+
+/// The SWD jumper takes the CMSIS-DAP interfaces away, so the tool reads what such a unit runs,
+/// and its board, from its USB descriptors alone. Ours names only the Pro there: its full-board
+/// string is an on-board MCU-Link's too. Ours can still be sent to its bootloader, except on
+/// Windows; stock cannot.
+#[test]
+fn a_unit_with_its_swd_jumper_is_read_from_its_usb_descriptors() {
+    let v3172 = StockVersion::parse("3.172");
+    let ours_paths = if cfg!(windows) {
+        vec![Path::Jumper]
+    } else {
+        vec![Path::OursJumperFree, Path::Jumper]
+    };
+    for (scenario, firmware, board, paths, shown) in [
+        (
+            "swd-jumper",
+            Jumpered::Ours,
+            Hardware::Unknown,
+            ours_paths.clone(),
+            "ours, SWD jumper fitted",
+        ),
+        (
+            "pro-swd-jumper",
+            Jumpered::Ours,
+            Hardware::Board(Board::McuLinkPro),
+            ours_paths.clone(),
+            "ours, SWD jumper fitted",
+        ),
+        (
+            "stock-swd-jumper",
+            Jumpered::Stock(v3172),
+            Hardware::Board(Board::McuLink),
+            vec![Path::Jumper],
+            "stock V3.172, SWD jumper fitted",
+        ),
+    ] {
+        let bus = SimBus::scenario(scenario).unwrap();
+        let units = detect(&bus).unwrap();
+        let unit = &units[0];
+        assert_eq!(unit.state, State::SwdJumper { firmware }, "{scenario}");
+        assert_eq!(unit.hardware(), board, "{scenario}");
+        assert_eq!(unit.state.to_string(), shown, "{scenario}");
+        let offer = offer(unit, &units);
+        assert_eq!(offer.paths, paths, "{scenario}");
+        assert!(
+            offer.notes[0].starts_with("The SWD jumper is fitted"),
+            "{scenario}: {:?}",
+            offer.notes
+        );
+        let log = bus.log();
+        assert!(!log.iter().any(|l| l.contains(": DAP ")), "{log:#?}");
+    }
+}
+
+/// Stock before V3.122 has no jumper-free update, so taking the SWD jumper off is not the advice.
+#[test]
+fn old_stock_with_its_swd_jumper_is_not_told_to_take_it_off() {
+    let bus = SimBus::default();
+    let unit = bus.add_stock("3.108");
+    bus.set_swd_jumper(unit, true);
+    bus.unplug(unit);
+    bus.plug_back_later(std::time::Duration::ZERO, unit);
+    let units = detect(&bus).unwrap();
+    assert_eq!(
+        units[0].state,
+        State::SwdJumper {
+            firmware: Jumpered::Stock(StockVersion::parse("3.108"))
+        }
+    );
+    let offer = offer(&units[0], &units);
+    assert_eq!(offer.paths, [Path::Jumper]);
+    assert!(
+        offer.notes[0].contains("Stock V3.108 has no jumper-free update"),
+        "{:?}",
+        offer.notes
+    );
+    assert!(
+        !offer
+            .notes
+            .iter()
+            .any(|n| n.contains("take the SWD jumper off"))
+    );
 }

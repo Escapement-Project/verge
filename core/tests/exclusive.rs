@@ -76,6 +76,17 @@ impl Bus for Exclusive<'_> {
             }
         }
     }
+    fn device_control_out(
+        &self,
+        device: &UsbDevice,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+    ) -> Result<Result<(), LinkError>, BusError> {
+        self.bus
+            .device_control_out(device, request_type, request, value, index)
+    }
     fn open_isp(&self, device: &UsbDevice) -> Result<SimRom, BusError> {
         self.bus.open_isp(device)
     }

@@ -6,6 +6,8 @@
 
 use std::time::Duration;
 
+#[cfg(not(windows))]
+use verge_core::detect::Jumpered;
 use verge_core::image::{Image, PAGE};
 use verge_core::progress::{Cancel, Progress, Step};
 use verge_core::sim::{Mode, SimBus, SimFirmware, firmware_image};
@@ -808,4 +810,174 @@ fn the_update_itself_checks_the_board() {
     )
     .unwrap();
     assert!(matches!(running(&outcome), Firmware::Stock { .. }));
+}
+
+/// With the SWD jumper fitted, ours has no interface to claim, so the reboot request goes to the
+/// device itself. It comes back with the jumper still fitted.
+#[cfg(not(windows))]
+#[test]
+fn ours_with_its_swd_jumper_updates_through_the_control_endpoint() {
+    let bus = SimBus::scenario("swd-jumper").unwrap();
+    let unit = detect(&bus).unwrap().remove(0);
+    let image = firmware_image(&ours("v0.3.0"));
+    let outcome = update::update(
+        &bus,
+        &unit,
+        Payload::new(&image, &FILE),
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    )
+    .unwrap();
+    let Outcome::Running(back) = &outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(
+        back.state,
+        State::SwdJumper {
+            firmware: Jumpered::Ours
+        }
+    );
+    let log = bus.log();
+    assert!(
+        log.iter()
+            .any(|l| l == "1-1: control 0x40 0x03 wValue 1 wIndex 0"),
+        "{log:#?}"
+    );
+    assert!(!log.iter().any(|l| l.contains(": DAP ")), "{log:#?}");
+    assert_eq!(bus.mode(0), Mode::Firmware(ours("v0.3.0")));
+    for (address, page) in expected_pages(&image) {
+        assert_eq!(
+            bus.flash(0).get(&address),
+            Some(&page),
+            "page 0x{address:x}"
+        );
+    }
+}
+
+/// The board comes from the product string, so a Pro with its SWD jumper refuses an image for
+/// the plain board as a Pro without it does.
+#[cfg(not(windows))]
+#[test]
+fn a_pro_with_its_swd_jumper_takes_only_an_image_that_declares_it() {
+    let bus = SimBus::scenario("pro-swd-jumper").unwrap();
+    let pro = detect(&bus).unwrap().remove(0);
+    let plain = firmware_image(&ours("v0.3.0"));
+    let refused = update::install(
+        &bus,
+        &pro,
+        Payload::new(&plain, &FILE),
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+        &Cancel::new(),
+    );
+    assert!(
+        matches!(&refused, Err(UpdateError::Refused(reason)) if reason.contains("the unit is an MCU-Link Pro")),
+        "{refused:?}"
+    );
+    assert!(!bus.log().iter().any(|l| l.contains("control")));
+
+    let declaring =
+        Image::parse(verge_core::sim::firmware_srecord_declaring(&ours("v0.3.0"), 0b10).as_bytes())
+            .unwrap();
+    let outcome = update::install(
+        &bus,
+        &pro,
+        Payload::new(&declaring, &FILE),
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+        &Cancel::new(),
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Running(_)), "{outcome:?}");
+    assert_eq!(bus.mode(0), Mode::Firmware(ours("v0.3.0")));
+}
+
+/// Stock's update request goes over the CMSIS-DAP interface the SWD jumper took away.
+#[test]
+fn stock_with_its_swd_jumper_is_refused_before_anything_is_sent() {
+    let bus = SimBus::scenario("stock-swd-jumper").unwrap();
+    let unit = detect(&bus).unwrap().remove(0);
+    let image = firmware_image(&ours("v0.3.0"));
+    let result = update::install(
+        &bus,
+        &unit,
+        Payload::new(&image, &FILE),
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+        &Cancel::new(),
+    );
+    let Err(UpdateError::Refused(reason)) = result else {
+        panic!("{result:?}");
+    };
+    assert!(reason.contains("take the SWD jumper off"), "{reason}");
+    let log = bus.log();
+    assert!(
+        !log.iter()
+            .any(|l| l.contains(": DAP ") || l.contains("control")),
+        "{log:#?}"
+    );
+}
+
+/// A unit gone before the request is reported as gone, not as a firmware that refused it.
+#[cfg(not(windows))]
+#[test]
+fn a_jumpered_unit_gone_before_the_request_is_named_gone() {
+    let bus = SimBus::scenario("swd-jumper").unwrap();
+    let unit = detect(&bus).unwrap().remove(0);
+    let image = firmware_image(&ours("v0.3.0"));
+    bus.unplug(0);
+    let result = update::update(
+        &bus,
+        &unit,
+        Payload::new(&image, &FILE),
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(UpdateError::Bus(verge_core::bus::BusError::Gone { .. }))
+        ),
+        "{result:?}"
+    );
+}
+
+/// Stops the update as the given step starts.
+#[cfg(not(windows))]
+struct StopAt(Step, Cancel);
+
+#[cfg(not(windows))]
+impl Progress for StopAt {
+    fn start(&mut self, step: Step, _total: u64) {
+        if step == self.0 {
+            self.1.cancel();
+        }
+    }
+}
+
+/// A stop that arrives as the entry starts, the last moment before the request, leaves a
+/// jumpered unit alone.
+#[cfg(not(windows))]
+#[test]
+fn a_stop_before_the_request_sends_nothing_to_a_jumpered_unit() {
+    let bus = SimBus::scenario("swd-jumper").unwrap();
+    let unit = detect(&bus).unwrap().remove(0);
+    let image = firmware_image(&ours("v0.3.0"));
+    let stop = Cancel::new();
+    let result = update::install(
+        &bus,
+        &unit,
+        Payload::new(&image, &FILE),
+        &Timing::default(),
+        &mut StopAt(Step::EnterBootloader, stop.clone()),
+        &Cancel::new(),
+        &stop,
+    );
+    assert!(matches!(result, Err(UpdateError::Stopped)), "{result:?}");
+    assert!(!bus.log().iter().any(|l| l.contains("control")));
 }

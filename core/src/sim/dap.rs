@@ -154,30 +154,6 @@ impl DapLink for SimDap {
     ) -> Result<(), LinkError> {
         let mut world = self.world.lock().expect("the bench lock is not poisoned");
         self.live(&mut world)?;
-        let location = world.units[self.unit].location.clone();
-        world.log.push(format!(
-            "{location}: control 0x{request_type:02x} 0x{request:02x} wValue {value} wIndex {index}"
-        ));
-        let ours = matches!(
-            world.units[self.unit].mode,
-            Mode::Firmware(SimFirmware::Ours { .. })
-        );
-        if !ours
-            || request_type != dap::REBOOT_REQUEST_TYPE
-            || request != dap::REBOOT_REQUEST
-            || index != 0
-            || value > 1
-        {
-            return Err(LinkError::Usb("the request stalled".into()));
-        }
-        // The firmware holds the disconnect for 20 ms before it resets (its src/reboot.c).
-        world.schedule(Duration::from_millis(20), self.unit, Event::Leave);
-        let after = Duration::from_millis(500);
-        if value == dap::REBOOT_TO_BOOTLOADER {
-            world.schedule(after, self.unit, Event::Appear(Mode::Bootloader));
-        } else {
-            world.schedule(after, self.unit, Event::Boot);
-        }
-        Ok(())
+        world.control_out(self.unit, request_type, request, value, index)
     }
 }

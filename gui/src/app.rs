@@ -10,7 +10,7 @@ use egui::{
 };
 use verge_core::board::{self, Board};
 use verge_core::cache::Cache;
-use verge_core::detect::{Firmware, Guess, Hardware, State};
+use verge_core::detect::{Firmware, Guess, Hardware, Jumpered, State};
 use verge_core::image::{Image, PAGE};
 use verge_core::paths::ISP_IDENTITY_WARNING;
 use verge_core::progress::{Cancel, Step, Unit as StepUnit};
@@ -172,6 +172,12 @@ fn identity(unit: &Unit) -> (&'static str, Glyph, Option<Color32>) {
             firmware: Firmware::Stock { .. },
             ..
         } => ("STOCK", glyph::STOCK, Some(color::TEXT_2)),
+        State::SwdJumper {
+            firmware: Jumpered::Ours,
+        } => ("OURS", glyph::OURS, Some(color::OURS)),
+        State::SwdJumper {
+            firmware: Jumpered::Stock(_),
+        } => ("STOCK", glyph::STOCK, Some(color::TEXT_2)),
         State::Unreadable { .. } => ("UNKNOWN", glyph::ATTENTION, None),
         State::Bootloader => ("ISP MODE", glyph::WAITING, None),
         State::MiniBootloader => ("MINI", glyph::WAITING, None),
@@ -192,6 +198,9 @@ fn version_of(unit: &Unit) -> Option<String> {
         State::Unreadable {
             guess: Guess::Stock(Some(v)),
             ..
+        }
+        | State::SwdJumper {
+            firmware: Jumpered::Stock(Some(v)),
         } => Some(format!("V{v}")),
         _ => None,
     }
@@ -1116,6 +1125,14 @@ impl VergeApp {
                     }
                     Some(Path::Jumper) => "NEEDS THE ISP JUMPER TO UPDATE",
                     _ => "CANNOT BE UPDATED AS IT IS",
+                }
+                .to_owned(),
+                State::SwdJumper { .. } => match offer(unit, &self.units).best() {
+                    Some(Path::OursJumperFree) => {
+                        "SWD JUMPER FITTED. UPDATES WITHOUT THE ISP JUMPER"
+                    }
+                    Some(Path::Jumper) => "SWD JUMPER FITTED. NEEDS THE ISP JUMPER TO UPDATE",
+                    _ => "SWD JUMPER FITTED. CANNOT BE UPDATED AS IT IS",
                 }
                 .to_owned(),
             };
