@@ -254,6 +254,11 @@ impl Bus for UsbBus {
     fn keeps_instances(&self) -> bool {
         cfg!(windows)
     }
+
+    /// Only Linux ties a HID device to its USB device ([`rom_path`]).
+    fn tells_bootloaders_apart(&self) -> bool {
+        cfg!(target_os = "linux")
+    }
 }
 
 /// A claimed CMSIS-DAP v2 interface. Dropping it releases the interface.

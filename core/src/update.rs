@@ -79,7 +79,9 @@ pub enum UpdateError {
 pub enum Outcome {
     /// Running a firmware, as this unit.
     Running(Box<Unit>),
-    /// In ISP mode again: the jumper is still fitted. Unplug it, take the jumper off, plug it in.
+    /// In ISP mode again: its ISP pin is still held low, by the jumper or by a probe on its debug
+    /// connector that drives the target's ISP pin, or (after a reset alone) its flash holds no
+    /// image the ROM starts.
     JumperStillFitted,
     /// Flashed and verified, but the bootloader was never seen to leave the bus after its reset,
     /// so the unit is still in ISP mode. `maybe_jumper` where a bootloader that restarts with its
@@ -197,14 +199,19 @@ pub fn enter_bootloader<B: Bus>(
     cancel: &Cancel,
 ) -> Result<UsbDevice, UpdateError> {
     check_entry(unit, stock)?;
-    enter(bus, unit, timing, progress, cancel, cancel)
+    enter(bus, unit, true, timing, progress, cancel, cancel)
 }
 
 /// [`enter_bootloader`], where `stop` keeps the unit out of its bootloader until the request is
 /// sent and `cancel` stops the wait after it.
+///
+/// Another unit in ISP mode closes the jumper-free path, because the flash that follows could not
+/// tell the two bootloaders apart. With `alone`, nothing follows: other bootloaders are left out
+/// of that check where the bus tells them apart and this unit has a port to find its own by.
 fn enter<B: Bus>(
     bus: &B,
     unit: &Unit,
+    alone: bool,
     timing: &Timing,
     progress: &mut dyn Progress,
     cancel: &Cancel,
@@ -215,7 +222,16 @@ fn enter<B: Bus>(
         return Err(UpdateError::Stopped);
     }
     let before: Vec<String> = all.iter().map(|u| u.device.instance.clone()).collect();
-    let offer = paths::offer(unit, &all);
+    let considered: Vec<Unit> =
+        if alone && bus.tells_bootloaders_apart() && unit.device.location.is_some() {
+            all.iter()
+                .filter(|u| u.device.role() != Some(Role::Bootloader))
+                .cloned()
+                .collect()
+        } else {
+            all.clone()
+        };
+    let offer = paths::offer(unit, &considered);
     let path = offer
         .paths
         .iter()
@@ -313,32 +329,73 @@ pub fn only_bootloader(devices: &[UsbDevice]) -> Result<UsbDevice, UpdateError> 
     }
 }
 
-/// A unit flashed and reset in ISP mode, for [`wait_for_return`].
-#[derive(Clone, Debug)]
-pub struct Flashed {
-    pub rom: UsbDevice,
-    /// Every instance on the bus just before the reset.
-    before: Vec<String>,
+/// The unit in ISP mode to act on: the one at `port`, as [`UsbDevice::location`] names it, or
+/// else the only one ([`only_bootloader`]).
+///
+/// A port picks one bootloader among several only where the bus opens the one it is given
+/// ([`Bus::tells_bootloaders_apart`]). Elsewhere every bootloader looks the same, so a port is
+/// taken only while its bootloader is the only one.
+pub fn select_bootloader<B: Bus>(
+    bus: &B,
+    devices: &[UsbDevice],
+    port: Option<&str>,
+) -> Result<UsbDevice, UpdateError> {
+    let Some(port) = port else {
+        return only_bootloader(devices);
+    };
+    let roms: Vec<&UsbDevice> = devices
+        .iter()
+        .filter(|d| d.role() == Some(Role::Bootloader))
+        .collect();
+    let Some(rom) = roms.iter().find(|d| d.location.as_deref() == Some(port)) else {
+        return Err(UpdateError::Refused(format!(
+            "no unit is in ISP mode at {port}. `verge list` names each unit's port"
+        )));
+    };
+    if roms.len() > 1 && !bus.tells_bootloaders_apart() {
+        return Err(UpdateError::Refused(format!(
+            "{} units are in ISP mode, and on this system the tool cannot tell which bootloader is the one at {port}. Unplug all but one",
+            roms.len()
+        )));
+    }
+    Ok((*rom).clone())
 }
 
-/// Flashes the one unit in ISP mode, verifies it, and resets it.
-pub fn flash_bootloader<B: Bus>(
+/// The unit [`flash_bootloader`] would flash, or why it refuses: [`select_bootloader`]'s choice,
+/// and no flash at all while a mini is in ISP mode, with a port or without.
+pub fn flash_target<B: Bus>(
     bus: &B,
-    image: &Image,
-    timing: &Timing,
-    progress: &mut dyn Progress,
-    cancel: &Cancel,
-) -> Result<Flashed, UpdateError> {
-    image.check_for_mculink()?;
-    let rom = only_bootloader(&bus.devices()?)?;
+    devices: &[UsbDevice],
+    port: Option<&str>,
+) -> Result<UsbDevice, UpdateError> {
+    if port.is_some()
+        && devices
+            .iter()
+            .any(|d| d.role() == Some(Role::MiniBootloader))
+    {
+        return Err(UpdateError::Refused(
+            "an MCU-Link mini is in ISP mode too. The tool does not flash while one is attached: unplug the mini first".into(),
+        ));
+    }
+    select_bootloader(bus, devices, port)
+}
 
-    progress.start(Step::Connect, 0);
+/// Opens `rom`'s bootloader and asks what it is, retrying while it enumerates. Then checks that
+/// the bootloader [`select_bootloader`] picks is still `rom`: the bus can change during the
+/// retries, and nothing has been sent to the unit yet.
+fn connect<B: Bus>(
+    bus: &B,
+    rom: &UsbDevice,
+    port: Option<&str>,
+    timing: &Timing,
+    cancel: &Cancel,
+) -> Result<(McuBoot<B::Isp>, isp::RomInfo), UpdateError> {
     let deadline = bus.now() + timing.rom_answers;
-    let (mut boot, info) = loop {
+    let (boot, info) = loop {
         if cancel.is_cancelled() {
             return Err(UpdateError::Cancelled);
         }
-        let last = match bus.open_isp(&rom) {
+        let last = match bus.open_isp(rom) {
             Ok(protocol) => {
                 let mut boot = McuBoot::new(protocol);
                 match isp::rom_info(&mut boot) {
@@ -357,14 +414,38 @@ pub fn flash_bootloader<B: Bus>(
         bus.sleep(timing.poll * 2);
     };
     tracing::info!("bootloader {} answers", info.version);
-    // Opening took retries, during which the bus can change. Nothing has been written yet.
-    let answering = only_bootloader(&bus.devices()?)?;
+    let answering = select_bootloader(bus, &bus.devices()?, port)?;
     if answering.instance != rom.instance {
         return Err(UpdateError::Refused(format!(
-            "the unit in ISP mode changed while the tool connected to it ({rom} then {answering}), so nothing was flashed. Check what is attached and flash it again"
+            "the unit in ISP mode changed while the tool connected to it ({rom} then {answering}), so nothing was written. Check what is attached and try again"
         )));
     }
+    Ok((boot, info))
+}
 
+/// A unit flashed and reset in ISP mode, for [`wait_for_return`].
+#[derive(Clone, Debug)]
+pub struct Flashed {
+    pub rom: UsbDevice,
+    /// Every instance on the bus just before the reset.
+    before: Vec<String>,
+}
+
+/// Flashes the unit in ISP mode, at `port` or the only one ([`flash_target`]), verifies it, and
+/// resets it.
+pub fn flash_bootloader<B: Bus>(
+    bus: &B,
+    image: &Image,
+    port: Option<&str>,
+    timing: &Timing,
+    progress: &mut dyn Progress,
+    cancel: &Cancel,
+) -> Result<Flashed, UpdateError> {
+    image.check_for_mculink()?;
+    let rom = flash_target(bus, &bus.devices()?, port)?;
+
+    progress.start(Step::Connect, 0);
+    let (mut boot, info) = connect(bus, &rom, port, timing, cancel)?;
     isp::program(&mut boot, image, &info, progress, cancel)?;
     progress.start(Step::Reset, 0);
     let before = bus.devices()?.into_iter().map(|d| d.instance).collect();
@@ -459,8 +540,8 @@ fn update_unless<B: Bus>(
         Step::Reset,
         Step::WaitForFirmware,
     ]);
-    enter(bus, unit, timing, progress, cancel, stop)?;
-    let flashed = flash_bootloader(bus, image, timing, progress, cancel)?;
+    enter(bus, unit, false, timing, progress, cancel, stop)?;
+    let flashed = flash_bootloader(bus, image, None, timing, progress, cancel)?;
     wait_for_return(bus, &flashed, timing, progress, cancel)
 }
 
@@ -485,7 +566,7 @@ pub fn install<B: Bus>(
     }
     let offer = paths::offer(unit, &units);
     match offer.best() {
-        Some(Path::FlashNow) => flash_now(bus, payload.image, timing, progress, cancel),
+        Some(Path::FlashNow) => flash_now(bus, payload.image, None, timing, progress, cancel),
         Some(Path::OursJumperFree | Path::StockJumperFree) => {
             update_unless(bus, unit, payload, timing, progress, cancel, stop)
         }
@@ -504,10 +585,12 @@ pub fn install<B: Bus>(
     }
 }
 
-/// Flashes the unit that is in ISP mode already, as after fitting the jumper.
+/// Flashes the unit that is in ISP mode already, as after fitting the jumper: the one at `port`,
+/// or the only one.
 pub fn flash_now<B: Bus>(
     bus: &B,
     image: &Image,
+    port: Option<&str>,
     timing: &Timing,
     progress: &mut dyn Progress,
     cancel: &Cancel,
@@ -520,6 +603,38 @@ pub fn flash_now<B: Bus>(
         Step::Reset,
         Step::WaitForFirmware,
     ]);
-    let flashed = flash_bootloader(bus, image, timing, progress, cancel)?;
+    let flashed = flash_bootloader(bus, image, port, timing, progress, cancel)?;
     wait_for_return(bus, &flashed, timing, progress, cancel)
+}
+
+/// Resets a unit out of ISP mode without flashing it, so it starts the image it holds: the one at
+/// `port`, or the only one. With its ISP pin still held low it comes back in ISP mode.
+pub fn reset_now<B: Bus>(
+    bus: &B,
+    port: Option<&str>,
+    timing: &Timing,
+    progress: &mut dyn Progress,
+    cancel: &Cancel,
+) -> Result<Outcome, UpdateError> {
+    progress.plan(&[Step::Connect, Step::Reset, Step::WaitForFirmware]);
+    let rom = select_bootloader(bus, &bus.devices()?, port)?;
+    progress.start(Step::Connect, 0);
+    let (mut boot, _) = connect(bus, &rom, port, timing, cancel)?;
+    progress.start(Step::Reset, 0);
+    let before = bus.devices()?.into_iter().map(|d| d.instance).collect();
+    isp::reset(&mut boot);
+    wait_for_return(bus, &Flashed { rom, before }, timing, progress, cancel)
+}
+
+/// What the bootloader of the unit in ISP mode says about itself, and the unit: the one at
+/// `port`, or the only one. Changes nothing on it.
+pub fn rom_info_now<B: Bus>(
+    bus: &B,
+    port: Option<&str>,
+    timing: &Timing,
+    cancel: &Cancel,
+) -> Result<(UsbDevice, isp::RomInfo), UpdateError> {
+    let rom = select_bootloader(bus, &bus.devices()?, port)?;
+    let (_, info) = connect(bus, &rom, port, timing, cancel)?;
+    Ok((rom, info))
 }

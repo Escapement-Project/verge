@@ -18,6 +18,7 @@ use verge_core::batch::{
 use verge_core::board;
 use verge_core::cache::Cache;
 use verge_core::detect::{Guess, Hardware, State};
+use verge_core::ids::Role;
 use verge_core::image::{Image, PAGE};
 use verge_core::paths::ISP_IDENTITY_WARNING;
 use verge_core::progress::{Progress, Step};
@@ -41,7 +42,7 @@ Examples:
   verge update             install the latest release of ours on the only unit
   verge update --serial CJ3E7A91C2 --release v0.3.0
   verge update --stock     put NXP's firmware back, from your LinkServer install
-  verge flash --file build/mculink_cjtag.elf
+  verge isp flash --file build/mculink_cjtag.elf
                            flash a unit you put into ISP mode with the jumper";
 
 /// Update the firmware on an MCU-Link: NXP's stock firmware, or ours from mculink-verge.
@@ -94,11 +95,6 @@ enum Command {
     /// The image is the latest release of ours unless you pick another. A unit already in ISP
     /// mode is flashed as it is.
     Update(UpdateArgs),
-    /// Flash the unit that is in ISP mode, as after fitting the jumper.
-    ///
-    /// With the jumper still fitted, the unit comes back in ISP mode. Then unplug it, take the
-    /// jumper off, and plug it back in.
-    Flash(FlashArgs),
     /// Update every unit of a chosen kind as it is plugged in, one at a time, until stopped.
     ///
     /// Choose the image and the units it takes once, answer one question, then plug units in one
@@ -106,19 +102,9 @@ enum Command {
     /// unplug. Ctrl-C stops taking new units; the one under way finishes. Every unit gets a line
     /// in the record file.
     Batch(BatchArgs),
-    /// Restart a unit into its ROM bootloader without the jumper, and leave it there.
-    ///
-    /// In ISP mode a unit cannot say which board it is, so `verge flash` cannot check that an
-    /// image of ours is built for it. A unit known to be another board than the full MCU-Link is
-    /// restarted only with --stock.
-    Bootloader {
-        /// The unit to restart, when more than one is attached.
-        #[arg(long)]
-        serial: Option<String>,
-        /// You mean to flash NXP's stock image next, which goes on any board.
-        #[arg(long)]
-        stock: bool,
-    },
+    /// Work with a unit's ROM bootloader, ISP mode: enter it, flash, reset out of it, ask it.
+    #[command(subcommand)]
+    Isp(IspCommand),
     /// Show a release of ours and how each attached unit compares to it.
     Release {
         /// A release tag. The latest release when left out.
@@ -129,6 +115,46 @@ enum Command {
         /// An ELF or S-record file.
         file: PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum IspCommand {
+    /// Restart a unit into its ROM bootloader without the jumper, and leave it there.
+    ///
+    /// In ISP mode a unit cannot say which board it is, so `verge isp flash` cannot check that an
+    /// image of ours is built for it. A unit known to be another board than the full MCU-Link is
+    /// restarted only with --stock.
+    Enter {
+        /// The unit to restart, when more than one is attached.
+        #[arg(long)]
+        serial: Option<String>,
+        /// You mean to flash NXP's stock image next, which goes on any board.
+        #[arg(long)]
+        stock: bool,
+    },
+    /// Flash the unit that is in ISP mode, as after fitting the jumper.
+    ///
+    /// With the jumper still fitted, the unit comes back in ISP mode. Then take the jumper off and
+    /// run `verge isp reset`.
+    Flash(FlashArgs),
+    /// Reset a unit out of ISP mode without flashing it, so it starts the image it holds.
+    Reset {
+        #[command(flatten)]
+        port: PortArg,
+    },
+    /// Ask the bootloader of a unit in ISP mode what it is. Changes nothing.
+    Info {
+        #[command(flatten)]
+        port: PortArg,
+    },
+}
+
+#[derive(Args)]
+struct PortArg {
+    /// The unit in ISP mode at this USB port, as `verge list` names it, when several are. Only
+    /// where the system ties a bootloader to its port, as Linux does.
+    #[arg(long)]
+    port: Option<String>,
 }
 
 #[derive(Args)]
@@ -220,6 +246,8 @@ fn parse_stock_version(text: &str) -> std::result::Result<StockVersion, String> 
 struct FlashArgs {
     #[command(flatten)]
     source: Source,
+    #[command(flatten)]
+    port: PortArg,
     /// Flash without asking first.
     #[arg(short, long)]
     yes: bool,
@@ -336,9 +364,13 @@ fn run<B: Bus + Sync, H: Http>(
         Some(Command::Batch(args)) => batch(bus, github, args, cancel, stop),
         None | Some(Command::List) => list(bus, cli.verbose > 0),
         Some(Command::Update(args)) => update_unit(bus, github, args, cancel),
-        Some(Command::Flash(args)) => flash(bus, github, args, cancel),
-        Some(Command::Bootloader { serial, stock }) => {
+        Some(Command::Isp(IspCommand::Enter { serial, stock })) => {
             bootloader(bus, serial.as_deref(), *stock, cancel)
+        }
+        Some(Command::Isp(IspCommand::Flash(args))) => flash(bus, github, args, cancel),
+        Some(Command::Isp(IspCommand::Reset { port })) => reset(bus, port.port.as_deref(), cancel),
+        Some(Command::Isp(IspCommand::Info { port })) => {
+            rom_info(bus, port.port.as_deref(), cancel)
         }
         Some(Command::Release { tag }) => release(bus, github, tag.as_deref()),
         Some(Command::Inspect { file }) => inspect(file),
@@ -515,7 +547,7 @@ fn report(outcome: &Outcome) {
             unit.state
         ),
         Outcome::JumperStillFitted => indicatif_println!(
-            "Flashed. The unit came back in ISP mode, so the jumper is still fitted: unplug it, take the jumper off, and plug it back in."
+            "Flashed. The unit came back in ISP mode, so its ISP pin is still held low: by the ISP jumper, or by a probe on its debug connector. Take the jumper off or unplug the probe, then run `verge isp reset`."
         ),
         Outcome::NotRestarted { maybe_jumper } => indicatif_println!(
             "Flashed and verified, but the unit is still in ISP mode: {}. Then it starts the new image.",
@@ -646,7 +678,8 @@ fn flash<B: Bus, H: Http>(
     args: &FlashArgs,
     cancel: &Cancel,
 ) -> Result<()> {
-    let rom = update::only_bootloader(&bus.devices()?)?;
+    let port = args.port.port.as_deref();
+    let rom = update::flash_target(bus, &bus.devices()?, port)?;
     let loaded = load(
         &args.source,
         github,
@@ -670,7 +703,7 @@ fn flash<B: Bus, H: Http>(
         args.yes,
     )?;
     let mut bars = Bars::default();
-    let outcome = update::flash_now(bus, image, &Timing::default(), &mut bars, cancel);
+    let outcome = update::flash_now(bus, image, port, &Timing::default(), &mut bars, cancel);
     drop(bars);
     let again = again(&args.source, &loaded.version, github);
     report(&outcome.map_err(|error| explain(error, &again, None))?);
@@ -896,30 +929,78 @@ fn bootloader<B: Bus>(bus: &B, serial: Option<&str>, stock: bool, cancel: &Cance
     let unit = update::select(&units, serial)?;
     if let Err(refused) = update::check_entry(unit, stock) {
         bail!(
-            "{refused}. To put NXP's stock image on it, run `verge bootloader --stock`, then `verge flash --stock`. To put an image of ours built for it on it, run `verge update --file IMAGE` instead, which checks that the image declares this board before anything is flashed"
+            "{refused}. To put NXP's stock image on it, run `verge isp enter --stock`, then `verge isp flash --stock`. To put an image of ours built for it on it, run `verge update --file IMAGE` instead, which checks that the image declares this board before anything is flashed"
         );
     }
     let mut bars = Bars::default();
     let rom = update::enter_bootloader(bus, unit, stock, &Timing::default(), &mut bars, cancel)?;
     drop(bars);
     let at = rom.location.as_deref().unwrap_or("?");
+    // Beside another unit in ISP mode, the flash has to be told which.
+    let several = bus
+        .devices()?
+        .iter()
+        .filter(|d| d.role() == Some(Role::Bootloader))
+        .count()
+        > 1;
+    let flash = if several {
+        format!("verge isp flash --port {at}")
+    } else {
+        "verge isp flash".to_owned()
+    };
     match unit.hardware() {
         Hardware::Board(board) if stock => indicatif_println!(
-            "The unit, {}, is in ISP mode at {at}. Flash it with `verge flash --stock`.",
+            "The unit, {}, is in ISP mode at {at}. Flash it with `{flash} --stock`.",
             board.a()
         ),
         Hardware::Board(board) => indicatif_println!(
-            "The unit, {}, is in ISP mode at {at}, where the tool cannot tell its board. Flash it with `verge flash` and an image built for {}: the question names the boards the image is for.",
+            "The unit, {}, is in ISP mode at {at}, where the tool cannot tell its board. Flash it with `{flash}` and an image built for {}: the question names the boards the image is for.",
             board.a(),
             board.a()
         ),
-        _ if stock => indicatif_println!(
-            "The unit is in ISP mode at {at}. Flash it with `verge flash --stock`."
-        ),
+        _ if stock => {
+            indicatif_println!("The unit is in ISP mode at {at}. Flash it with `{flash} --stock`.")
+        }
         _ => indicatif_println!(
-            "The unit is in ISP mode at {at}. Its firmware did not say which board it is, so check that an image is built for it before you flash it with `verge flash`."
+            "The unit is in ISP mode at {at}. Its firmware did not say which board it is, so check that an image is built for it before you flash it with `{flash}`."
         ),
     }
+    Ok(())
+}
+
+fn reset<B: Bus>(bus: &B, port: Option<&str>, cancel: &Cancel) -> Result<()> {
+    let mut bars = Bars::default();
+    let outcome = update::reset_now(bus, port, &Timing::default(), &mut bars, cancel);
+    drop(bars);
+    match outcome? {
+        Outcome::Running(unit) => indicatif_println!(
+            "Done: {} at {} runs {}.",
+            unit.serial().unwrap_or("the unit"),
+            unit.device.location.as_deref().unwrap_or("?"),
+            unit.state
+        ),
+        Outcome::JumperStillFitted => indicatif_println!(
+            "The unit came back in ISP mode. Either its ISP pin is still held low, by the ISP jumper or by a probe on its debug connector, or its flash holds no image the ROM starts. Take the jumper off or unplug the probe and reset it again, or flash an image with `verge isp flash`."
+        ),
+        Outcome::NotRestarted { maybe_jumper } => indicatif_println!(
+            "The unit is still in ISP mode: {}.",
+            update::not_restarted(maybe_jumper)
+        ),
+    }
+    Ok(())
+}
+
+fn rom_info<B: Bus>(bus: &B, port: Option<&str>, cancel: &Cancel) -> Result<()> {
+    let (rom, info) = update::rom_info_now(bus, port, &Timing::default(), cancel)?;
+    let flash = match info.flash {
+        Some((start, size)) => format!("flash from 0x{start:08x}, {} KiB", size / 1024),
+        None => "flash not reported".to_owned(),
+    };
+    indicatif_println!(
+        "{}: bootloader {}, {flash}.",
+        rom.location.as_deref().unwrap_or("?"),
+        info.version
+    );
     Ok(())
 }
 

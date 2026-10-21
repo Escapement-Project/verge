@@ -79,16 +79,16 @@ fn old_stock_is_sent_to_the_jumper() {
 #[test]
 fn flash_with_the_jumper_still_on() {
     tool("isp-jumper")
-        .args(["flash", "--yes"])
+        .args(["isp", "flash", "--yes"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("the jumper is still fitted"));
+        .stdout(predicate::str::contains("its ISP pin is still held low"));
 }
 
 #[test]
 fn flash_refuses_two_bootloaders() {
     tool("two-isp")
-        .args(["flash", "--yes"])
+        .args(["isp", "flash", "--yes"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("2 units are in ISP mode"));
@@ -198,9 +198,10 @@ fn help_has_examples() {
 #[test]
 fn flashing_a_unit_already_in_isp_mode_says_it_may_not_be_an_mculink() {
     let image = sim_image("isp-warning", None);
-    for command in ["flash", "update"] {
+    for command in [&["isp", "flash"][..], &["update"]] {
         tool("isp")
-            .args([command, "--file"])
+            .args(command)
+            .arg("--file")
             .arg(&image)
             .assert()
             .failure()
@@ -230,10 +231,10 @@ fn a_jumper_free_update_does_not_carry_the_isp_warning() {
 /// which `--yes` answers; without either, nothing is downloaded. Then the install's own question.
 #[test]
 fn a_release_is_downloaded_only_when_agreed() {
-    for command in ["update", "flash"] {
-        let scenario = if command == "flash" { "isp" } else { "stock" };
+    for command in [&["update"][..], &["isp", "flash"]] {
+        let scenario = if command[0] == "isp" { "isp" } else { "stock" };
         tool(scenario)
-            .arg(command)
+            .args(command)
             .assert()
             .failure()
             .stderr(predicate::str::contains(
@@ -253,7 +254,7 @@ fn a_release_is_downloaded_only_when_agreed() {
 #[test]
 fn a_mini_in_isp_mode_refuses_the_flash_of_the_other_bootloader() {
     tool("isp-mini")
-        .args(["flash", "--yes"])
+        .args(["isp", "flash", "--yes"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("unplug the mini first"));
@@ -437,32 +438,32 @@ fn sim_stock_dir(name: &str, version: &str) -> PathBuf {
     dir
 }
 
-/// The second review's proof, at the command line: `verge bootloader` on a Pro, then `verge
+/// The second review's proof, at the command line: `verge isp enter` on a Pro, then `verge
 /// flash` as it advised, put ours on the Pro, since a unit in ISP mode cannot say which board it
 /// is. The check is made before the unit goes into ISP mode.
 #[test]
 fn bootloader_sends_a_pro_into_isp_mode_only_for_stock() {
     tool("pro")
-        .arg("bootloader")
+        .args(["isp", "enter"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("the unit is an MCU-Link Pro"))
         .stderr(predicate::str::contains(
-            "run `verge bootloader --stock`, then `verge flash --stock`",
+            "run `verge isp enter --stock`, then `verge isp flash --stock`",
         ));
     tool("pro")
-        .args(["bootloader", "--stock"])
+        .args(["isp", "enter", "--stock"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "The unit, an MCU-Link Pro, is in ISP mode at 1-1. Flash it with `verge flash --stock`.",
+            "The unit, an MCU-Link Pro, is in ISP mode at 1-1. Flash it with `verge isp flash --stock`.",
         ));
     tool("stock")
-        .arg("bootloader")
+        .args(["isp", "enter"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "The unit, a full MCU-Link, is in ISP mode at 1-1, where the tool cannot tell its board. Flash it with `verge flash` and an image built for a full MCU-Link",
+            "The unit, a full MCU-Link, is in ISP mode at 1-1, where the tool cannot tell its board. Flash it with `verge isp flash` and an image built for a full MCU-Link",
         ));
 }
 
@@ -534,7 +535,7 @@ fn flash_says_which_boards_the_image_is_built_for() {
     ] {
         let image = sim_image(name, boards);
         tool("isp")
-            .args(["flash", "--file"])
+            .args(["isp", "flash", "--file"])
             .arg(&image)
             .assert()
             .failure()
@@ -637,14 +638,14 @@ fn a_batch_for_the_pro_needs_an_image_built_for_it() {
 
 /// The third review's proof: a Pro whose stock has no jumper-free update. The latest release
 /// declares nothing, so it is for the full MCU-Link only, and `update` refuses it as it would on
-/// the jumper-free path, rather than send the user to a plain `verge flash`.
+/// the jumper-free path, rather than send the user to a plain `verge isp flash`.
 #[test]
 fn update_on_a_pro_needing_the_jumper_does_not_advise_a_plain_flash() {
     let output = tool("pro-old").args(["update", "--yes"]).output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
     assert!(
-        !stderr.contains("run `verge flash`"),
+        !stderr.contains("run `verge isp flash`"),
         "advises a flash of ours on a known Pro: {stderr}"
     );
     assert!(
@@ -666,7 +667,7 @@ fn the_jumper_advice_names_the_image_and_the_board() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(format!(
-            "run `verge flash --file {}`",
+            "run `verge isp flash --file {}`",
             image.display()
         )))
         .stderr(predicate::str::contains(
@@ -680,7 +681,7 @@ fn the_jumper_advice_names_the_image_and_the_board() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(format!(
-            "run `verge flash --stock {}`",
+            "run `verge isp flash --stock {}`",
             dir.display()
         )));
     std::fs::remove_dir_all(&dir).unwrap();
@@ -697,14 +698,16 @@ fn a_failed_update_says_how_to_flash_the_same_image_again() {
         .stderr(predicate::str::contains(
             "The unit, a full MCU-Link, may be in ISP mode with a partial image",
         ))
-        .stderr(predicate::str::contains("`verge flash --release v0.3.0`"));
+        .stderr(predicate::str::contains(
+            "`verge isp flash --release v0.3.0`",
+        ));
 }
 
-/// `verge bootloader` refused on another board says the whole of what to do instead.
+/// `verge isp enter` refused on another board says the whole of what to do instead.
 #[test]
 fn bootloader_on_a_pro_says_how_to_put_ours_on_it() {
     tool("pro")
-        .arg("bootloader")
+        .args(["isp", "enter"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -739,7 +742,7 @@ fn the_jumper_path_asks_before_it_downloads_and_says_why() {
         .stderr(predicate::str::contains("Pass --yes"));
 }
 
-/// The advised `verge flash` names the repository the release came from where it is not the
+/// The advised `verge isp flash` names the repository the release came from where it is not the
 /// default, so that it finds the same release, and the copy `update` kept of it.
 #[test]
 fn the_advice_names_a_repository_given_on_the_command_line() {
@@ -748,14 +751,14 @@ fn the_advice_names_a_repository_given_on_the_command_line() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "run `verge flash --release v0.3.0 --repo someone/fork`",
+            "run `verge isp flash --release v0.3.0 --repo someone/fork`",
         ));
     tool("stock-old")
         .args(["update", "--yes"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "run `verge flash --release v0.3.0`",
+            "run `verge isp flash --release v0.3.0`",
         ));
 }
 
@@ -784,4 +787,109 @@ fn ours_with_its_swd_jumper_asks_about_its_board_and_stock_is_sent_to_take_it_of
         .assert()
         .failure()
         .stderr(predicate::str::contains("take the SWD jumper off"));
+}
+
+#[test]
+fn isp_reset_starts_the_image_the_unit_holds() {
+    tool("isp-ours")
+        .args(["isp", "reset"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("at 1-1 runs ours, build v0.3.0"));
+}
+
+#[test]
+fn isp_reset_with_the_jumper_says_what_holds_the_pin() {
+    tool("isp-jumper")
+        .args(["isp", "reset"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "its ISP pin is still held low, by the ISP jumper or by a probe on its debug connector",
+        ));
+}
+
+/// A unit whose flash holds nothing comes back in ISP mode too, and the advice says so.
+#[test]
+fn isp_reset_of_a_blank_unit_says_it_may_hold_no_image() {
+    tool("isp")
+        .args(["isp", "reset"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "or its flash holds no image the ROM starts",
+        ));
+}
+
+/// Two units in ISP mode: without a port the tool refuses, with one it resets that unit only.
+#[test]
+fn isp_reset_takes_a_port_among_two_bootloaders() {
+    tool("two-isp-ours")
+        .args(["isp", "reset"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("2 units are in ISP mode"));
+    tool("two-isp-ours")
+        .args(["isp", "reset", "--port", "1-2"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("at 1-2 runs ours"));
+}
+
+#[test]
+fn isp_flash_takes_a_port_among_two_bootloaders() {
+    let image = sim_image("isp-flash-port", None);
+    tool("two-isp")
+        .args(["isp", "flash", "--yes", "--port", "1-2", "--file"])
+        .arg(&image)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "at 1-2 now runs ours, build v0.3.0",
+        ));
+    std::fs::remove_file(&image).unwrap();
+}
+
+#[test]
+fn isp_info_names_the_bootloader() {
+    tool("isp")
+        .args(["isp", "info"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1-1: bootloader K"));
+}
+
+/// The old top-level commands are gone: they live under `verge isp` now.
+#[test]
+fn flash_and_bootloader_are_isp_subcommands() {
+    for command in ["flash", "bootloader"] {
+        tool("isp").arg(command).assert().failure();
+    }
+}
+
+/// Beside another unit in ISP mode, `isp enter` still sends a unit into its bootloader where the
+/// bus tells bootloaders apart, and says which port to flash; an update still waits.
+#[test]
+fn isp_enter_works_beside_another_bootloader() {
+    tool("ours-beside-isp")
+        .args(["update", "--yes", "--serial", "CJ3E7A91C2"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Another unit is in ISP mode"));
+    tool("ours-beside-isp")
+        .args(["isp", "enter", "--serial", "CJ3E7A91C2"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("`verge isp flash --port 1-1`"));
+}
+
+/// A mini beside the bootloader a port names refuses the flash before any question.
+#[test]
+fn isp_flash_by_port_beside_a_mini_refuses_first() {
+    tool("isp-mini")
+        .args(["isp", "flash", "--port", "1-1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unplug the mini first"))
+        .stderr(predicate::str::contains("Download").not());
 }

@@ -256,6 +256,7 @@ fn two_units_in_isp_mode_are_refused() {
     let result = update::flash_now(
         &bus,
         &image,
+        None,
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -274,6 +275,7 @@ fn a_mini_is_refused() {
     let result = update::flash_now(
         &bus,
         &image,
+        None,
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -291,6 +293,7 @@ fn the_jumper_path_flashes_and_says_the_jumper_is_still_on() {
     let outcome = update::flash_now(
         &bus,
         &image,
+        None,
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -302,6 +305,7 @@ fn the_jumper_path_flashes_and_says_the_jumper_is_still_on() {
     let outcome = update::flash_now(
         &bus,
         &image,
+        None,
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -321,6 +325,7 @@ fn a_unit_back_between_two_looks_at_the_bus_is_seen() {
         let outcome = update::flash_now(
             &bus,
             &image,
+            None,
             &Timing::default(),
             &mut Steps::default(),
             &Cancel::new(),
@@ -386,6 +391,7 @@ fn an_image_that_does_not_boot_is_reported() {
     let result = update::flash_now(
         &bus,
         &image,
+        None,
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -405,7 +411,7 @@ fn a_cancelled_write_leaves_a_unit_the_next_flash_recovers() {
         cancel_after: Some((Step::Write, 1, cancel.clone())),
         ..Steps::default()
     };
-    let result = update::flash_now(&bus, &image, &Timing::default(), &mut steps, &cancel);
+    let result = update::flash_now(&bus, &image, None, &Timing::default(), &mut steps, &cancel);
     assert!(
         matches!(
             result,
@@ -417,6 +423,7 @@ fn a_cancelled_write_leaves_a_unit_the_next_flash_recovers() {
     let outcome = update::flash_now(
         &bus,
         &image,
+        None,
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -447,7 +454,15 @@ fn progress_counts_every_byte_of_every_page() {
     let bus = SimBus::scenario("isp").unwrap();
     let image = firmware_image(&ours("v0.3.0"));
     let mut steps = Steps::default();
-    update::flash_now(&bus, &image, &Timing::default(), &mut steps, &Cancel::new()).unwrap();
+    update::flash_now(
+        &bus,
+        &image,
+        None,
+        &Timing::default(),
+        &mut steps,
+        &Cancel::new(),
+    )
+    .unwrap();
     let total: u64 = image.page_runs().iter().map(|r| r.data.len() as u64).sum();
     for step in [Step::Erase, Step::Write, Step::Verify] {
         assert!(
@@ -466,6 +481,7 @@ fn a_mini_in_isp_mode_refuses_the_flash_of_the_other_bootloader() {
     let result = update::flash_now(
         &bus,
         &image,
+        None,
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -511,6 +527,7 @@ fn a_second_bootloader_that_arrives_while_connecting_refuses_the_flash() {
     let result = update::flash_now(
         &bus,
         &image,
+        None,
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -538,6 +555,7 @@ fn a_bootloader_replaced_while_connecting_refuses_the_flash() {
     let result = update::flash_now(
         &bus,
         &image,
+        None,
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -578,6 +596,7 @@ fn without_ports_the_unit_back_is_taken_only_as_the_one_new_device() {
     let outcome = update::flash_now(
         &bus,
         &image,
+        None,
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -594,6 +613,7 @@ fn without_ports_the_unit_back_is_taken_only_as_the_one_new_device() {
     let result = update::flash_now(
         &bus,
         &image,
+        None,
         &Timing::default(),
         &mut Stranger {
             bus: &bus,
@@ -624,6 +644,7 @@ fn where_a_bootloader_keeps_its_instance_the_jumper_is_still_seen() {
         let outcome = update::flash_now(
             &bus,
             &image,
+            None,
             &Timing::default(),
             &mut Steps::default(),
             &Cancel::new(),
@@ -641,6 +662,7 @@ fn where_a_bootloader_keeps_its_instance_the_jumper_is_still_seen() {
     let outcome = update::flash_now(
         &bus,
         &firmware_image(&ours("v0.3.0")),
+        None,
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -671,6 +693,7 @@ fn a_bootloader_that_never_restarts_is_its_own_outcome() {
         let outcome = update::flash_now(
             &bus,
             &firmware_image(&ours("v0.3.0")),
+            None,
             &Timing::default(),
             &mut Steps::default(),
             &Cancel::new(),
@@ -685,7 +708,7 @@ fn a_bootloader_that_never_restarts_is_its_own_outcome() {
 }
 
 /// The second review's proof: `enter_bootloader` on a Pro, then `flash_now` with ours, as
-/// `verge bootloader` and the `verge flash` it advised did, put ours on the Pro. A unit in ISP
+/// `verge isp enter` and the `verge isp flash` it advised did, put ours on the Pro. A unit in ISP
 /// mode cannot say which board it is, so nothing after the entry can refuse it. The entry refuses
 /// instead, unless stock's own image follows.
 #[test]
@@ -708,6 +731,7 @@ fn a_pro_sent_to_its_bootloader_by_the_tool_is_not_then_flashed_with_ours() {
     let outcome = update::flash_now(
         &bus,
         &firmware_image(&ours("v0.3.0")),
+        None,
         &Timing::default(),
         &mut Steps::default(),
         &Cancel::new(),
@@ -980,4 +1004,190 @@ fn a_stop_before_the_request_sends_nothing_to_a_jumpered_unit() {
     );
     assert!(matches!(result, Err(UpdateError::Stopped)), "{result:?}");
     assert!(!bus.log().iter().any(|l| l.contains("control")));
+}
+
+#[test]
+fn a_reset_starts_the_image_a_unit_in_isp_mode_holds() {
+    let bus = SimBus::scenario("isp-ours").unwrap();
+    let held = bus.flash(0);
+    let outcome = update::reset_now(
+        &bus,
+        None,
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    )
+    .unwrap();
+    assert!(
+        matches!(running(&outcome), Firmware::Ours(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(bus.flash(0), held);
+}
+
+#[test]
+fn a_reset_with_the_jumper_comes_back_in_isp_mode() {
+    let bus = SimBus::scenario("isp-jumper").unwrap();
+    let outcome = update::reset_now(
+        &bus,
+        None,
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    )
+    .unwrap();
+    assert_eq!(outcome, Outcome::JumperStillFitted);
+}
+
+/// With two units in ISP mode a port picks one, for a flash and for a reset; the other is left as
+/// it was.
+#[test]
+fn a_port_picks_one_of_two_bootloaders() {
+    let bus = SimBus::scenario("two-isp").unwrap();
+    let image = firmware_image(&ours("v0.3.0"));
+    let outcome = update::flash_now(
+        &bus,
+        &image,
+        Some("1-2"),
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Running(_)), "{outcome:?}");
+    assert!(bus.flash(0).is_empty() && !bus.flash(1).is_empty());
+    assert_eq!(bus.mode(0), Mode::Bootloader);
+
+    let bus = SimBus::scenario("two-isp-ours").unwrap();
+    let outcome = update::reset_now(
+        &bus,
+        Some("1-1"),
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    )
+    .unwrap();
+    let Outcome::Running(unit) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(unit.device.location.as_deref(), Some("1-1"));
+    assert_eq!(bus.mode(1), Mode::Bootloader);
+}
+
+/// Where the bus opens the first bootloader whichever it is given, a port is no way to choose
+/// among several, so nothing is sent; with one attached, its port is as good as none.
+#[test]
+fn a_port_among_bootloaders_that_look_the_same_is_refused() {
+    let bus = SimBus::scenario("two-isp-ours").unwrap();
+    bus.set_same_bootloaders(true);
+    let result = update::reset_now(
+        &bus,
+        Some("1-2"),
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    );
+    let Err(UpdateError::Refused(reason)) = result else {
+        panic!("{result:?}");
+    };
+    assert!(reason.contains("cannot tell which bootloader"), "{reason}");
+    assert!(!bus.log().iter().any(|l| l.contains("ROM command")));
+
+    let bus = SimBus::scenario("isp-ours").unwrap();
+    bus.set_same_bootloaders(true);
+    let (rom, info) =
+        update::rom_info_now(&bus, Some("1-1"), &Timing::default(), &Cancel::new()).unwrap();
+    assert_eq!(rom.location.as_deref(), Some("1-1"));
+    assert!(!info.version.is_empty());
+}
+
+#[test]
+fn a_port_with_no_bootloader_is_refused() {
+    let bus = SimBus::scenario("isp-ours").unwrap();
+    let result = update::rom_info_now(&bus, Some("1-9"), &Timing::default(), &Cancel::new());
+    let Err(UpdateError::Refused(reason)) = result else {
+        panic!("{result:?}");
+    };
+    assert!(
+        reason.starts_with("no unit is in ISP mode at 1-9"),
+        "{reason}"
+    );
+}
+
+/// A mini in ISP mode refuses a flash even when a port names the other bootloader, as without.
+#[test]
+fn a_mini_refuses_a_flash_by_port_too() {
+    let bus = SimBus::scenario("isp-mini").unwrap();
+    let result = update::flash_now(
+        &bus,
+        &firmware_image(&ours("v0.3.0")),
+        Some("1-1"),
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    );
+    let Err(UpdateError::Refused(reason)) = result else {
+        panic!("{result:?}");
+    };
+    assert!(reason.contains("unplug the mini first"), "{reason}");
+}
+
+/// `isp enter` beside another bootloader goes ahead only where the bus tells bootloaders apart
+/// and the unit has a port to find its own by; otherwise the old refusal stands.
+#[test]
+fn entering_beside_a_bootloader_needs_ports_that_tell_them_apart() {
+    for (same, ports) in [(true, true), (false, false)] {
+        let bus = SimBus::scenario("ours-beside-isp").unwrap();
+        bus.set_same_bootloaders(same);
+        bus.set_locations(ports);
+        let unit = the_unit(&bus, "CJ3E7A91C2");
+        let result = update::enter_bootloader(
+            &bus,
+            &unit,
+            false,
+            &Timing::default(),
+            &mut Steps::default(),
+            &Cancel::new(),
+        );
+        assert!(
+            matches!(result, Err(UpdateError::Refused(_))),
+            "same {same}, ports {ports}: {result:?}"
+        );
+    }
+    let bus = SimBus::scenario("ours-beside-isp").unwrap();
+    let unit = the_unit(&bus, "CJ3E7A91C2");
+    let rom = update::enter_bootloader(
+        &bus,
+        &unit,
+        false,
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    )
+    .unwrap();
+    assert_eq!(rom.location, unit.device.location);
+}
+
+/// A second bootloader that arrives while the tool connects, where the bus cannot tell them
+/// apart, stops a flash by port before anything is written.
+#[test]
+fn a_bootloader_arriving_during_a_flash_by_port_stops_it() {
+    let bus = SimBus::scenario("isp").unwrap();
+    bus.set_same_bootloaders(true);
+    let second = bus.add_bootloader(false);
+    bus.unplug(second);
+    bus.plug_back_later(Duration::from_millis(1), second);
+    let result = update::flash_now(
+        &bus,
+        &firmware_image(&ours("v0.3.0")),
+        Some("1-1"),
+        &Timing::default(),
+        &mut Steps::default(),
+        &Cancel::new(),
+    );
+    let Err(UpdateError::Refused(reason)) = result else {
+        panic!("{result:?}");
+    };
+    assert!(reason.contains("cannot tell which bootloader"), "{reason}");
+    assert!(bus.flash(0).is_empty());
 }

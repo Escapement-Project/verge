@@ -90,7 +90,7 @@ fn a_release_is_downloaded_only_when_agreed_and_then_kept() {
         assert!(kept.is_file(), "{}", kept.display());
     }
 
-    // The next run, as the `verge flash` that `verge update` advises: the release is looked up
+    // The next run, as the `verge isp flash` that `verge update` advises: the release is looked up
     // again, and its image is not downloaded again.
     let next = self::github(&http, &cache);
     let release = next.tagged("v0.3.0").unwrap();

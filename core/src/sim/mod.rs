@@ -244,6 +244,9 @@ pub(crate) struct World {
     /// Whether a device that comes back keeps its instance, as a Windows device instance ID
     /// does: by serial number, or by port for a device without one.
     stable_instances: bool,
+    /// Whether opening a bootloader opens the first one on the bus, whichever was asked for, as
+    /// where nothing ties a HID device to its USB device.
+    same_bootloaders: bool,
 }
 
 impl World {
@@ -273,6 +276,7 @@ impl World {
             boot_after_reset: Duration::from_millis(1000),
             locations: true,
             stable_instances: false,
+            same_bootloaders: false,
         }
     }
 
@@ -346,7 +350,12 @@ impl World {
             }
             Event::Boot => {
                 let u = &self.units[unit];
-                let mode = if u.jumper {
+                // The ROM starts ISP mode when flash holds no image at all (UM11126, passive boot).
+                let blank = u
+                    .flash
+                    .get(&0)
+                    .is_none_or(|page| page.iter().all(|&b| b == 0xFF));
+                let mode = if u.jumper || blank {
                     Mode::Bootloader
                 } else {
                     match boot_from(&u.flash) {
@@ -582,6 +591,18 @@ pub const SCENARIOS: &[(&str, &str)] = &[
         "one unit in ISP mode with the jumper still fitted",
     ),
     ("two-isp", "two units in ISP mode"),
+    (
+        "ours-beside-isp",
+        "one unit running ours, build 14d05d4, and another in ISP mode",
+    ),
+    (
+        "isp-ours",
+        "one unit in ISP mode whose flash holds ours, build v0.3.0",
+    ),
+    (
+        "two-isp-ours",
+        "two units in ISP mode whose flash holds ours, build v0.3.0",
+    ),
     ("mini", "an MCU-Link mini in ISP mode"),
     (
         "isp-mini",
@@ -777,6 +798,12 @@ impl SimBus {
         self.world().units[unit].leds_on
     }
 
+    /// A unit in ISP mode whose flash holds `firmware`, which it starts once reset without the
+    /// jumper.
+    pub fn add_bootloader_holding(&self, firmware: SimFirmware) -> usize {
+        self.add(Mode::Bootloader, programmed(&firmware_image(&firmware)))
+    }
+
     /// Makes a unit a board other than the plain MCU-Link, by the board byte ours reports.
     pub fn set_board(&self, unit: usize, board: u8) {
         self.world().units[unit].board = Some(board);
@@ -795,6 +822,11 @@ impl SimBus {
     /// Makes every device report no port, as on a platform that does not say.
     pub fn set_locations(&self, on: bool) {
         self.world().locations = on;
+    }
+
+    /// Makes the bus unable to open one bootloader among several, as on Windows and macOS.
+    pub fn set_same_bootloaders(&self, on: bool) {
+        self.world().same_bootloaders = on;
     }
 
     /// Makes a device that comes back keep its instance, as on Windows. Applies from the next
@@ -862,6 +894,19 @@ impl SimBus {
             "two-isp" => {
                 bus.add_bootloader(false);
                 bus.add_bootloader(false);
+            }
+            "ours-beside-isp" => {
+                bus.add_ours("14d05d4");
+                bus.add_bootloader(false);
+            }
+            "isp-ours" | "two-isp-ours" => {
+                let ours = || SimFirmware::Ours {
+                    build: "v0.3.0".to_owned(),
+                };
+                bus.add_bootloader_holding(ours());
+                if name == "two-isp-ours" {
+                    bus.add_bootloader_holding(ours());
+                }
             }
             "mini" => {
                 bus.add_mini_bootloader();
@@ -1003,9 +1048,18 @@ impl Bus for SimBus {
     fn open_isp(&self, device: &UsbDevice) -> Result<SimRom, BusError> {
         let mut world = self.world();
         world.settle();
-        let unit = world.unit_for(device).ok_or_else(|| BusError::Gone {
+        let mut unit = world.unit_for(device).ok_or_else(|| BusError::Gone {
             device: device.to_string(),
         })?;
+        if world.same_bootloaders {
+            unit = (0..world.units.len())
+                .find(|&u| {
+                    world.units[u].mode == Mode::Bootloader
+                        && !world.units[u].mini
+                        && world.device(u).is_some()
+                })
+                .unwrap_or(unit);
+        }
         if world.units[unit].mode != Mode::Bootloader {
             return Err(BusError::Open {
                 device: device.to_string(),
@@ -1013,12 +1067,11 @@ impl Bus for SimBus {
             });
         }
         let generation = world.units[unit].generation;
-        Ok(SimRom::new(
-            self.world.clone(),
-            unit,
-            device.instance.clone(),
-            generation,
-        ))
+        let instance = world.units[unit]
+            .instance
+            .clone()
+            .unwrap_or_else(|| device.instance.clone());
+        Ok(SimRom::new(self.world.clone(), unit, instance, generation))
     }
 
     fn now(&self) -> Duration {
@@ -1034,5 +1087,9 @@ impl Bus for SimBus {
 
     fn keeps_instances(&self) -> bool {
         self.world().stable_instances
+    }
+
+    fn tells_bootloaders_apart(&self) -> bool {
+        !self.world().same_bootloaders
     }
 }

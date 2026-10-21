@@ -27,13 +27,13 @@ built before declarations did. The tool puts an image of ours, a release or a fi
 board its declaration names. It refuses it on any other board, and on a board it knows no number
 for, such as an MCU-Link MR. Stock's own image can go on any board stock runs on.
 
-A unit in ISP mode cannot say which board it is, so `flash` cannot check it. Its question says
-which boards the image is built for instead. For the same reason, `verge bootloader` sends a unit
+A unit in ISP mode cannot say which board it is, so `verge isp flash` cannot check it. Its question says
+which boards the image is built for instead. For the same reason, `verge isp enter` sends a unit
 it knows is another board than the full MCU-Link into ISP mode only with `--stock`, for
-`verge flash --stock` to follow. An image of ours built for that board goes on with `verge
+`verge isp flash --stock` to follow. An image of ours built for that board goes on with `verge
 update --file IMAGE`, which checks that the image declares the board before it flashes anything.
 
-Wherever the tool sends you to `verge flash` for a unit whose board it knows, it names the board
+Wherever the tool sends you to `verge isp flash` for a unit whose board it knows, it names the board
 and the image to flash: the release by its tag, the file by its path, or `--stock`. That covers
 the jumper advice for a unit with no jumper-free update, and what to do after an update fails
 halfway. `update` checks the image against the unit's board before it gives the jumper advice, so
@@ -83,8 +83,10 @@ verge                       # list what is attached, and how each unit can be up
 verge update                # install the latest release of ours on the only unit
 verge update --serial CJ3E7A91C2 --release v0.3.0
 verge update --stock        # put NXP's firmware back
-verge flash --file mculink_cjtag.elf
-verge bootloader            # send a unit into ISP mode without the jumper, for `verge flash`
+verge isp enter             # send a unit into ISP mode without the jumper, for `verge isp flash`
+verge isp flash --file mculink_cjtag.elf
+verge isp reset             # start the image a unit in ISP mode holds, without flashing it
+verge isp info              # what the bootloader of a unit in ISP mode says about itself
 verge batch                 # update each unit as it is plugged in, until Ctrl-C
 verge release               # the latest release, and how each unit compares
 verge inspect image.s19     # what an image puts into flash; touches no USB device
@@ -92,27 +94,40 @@ verge inspect image.s19     # what an image puts into flash; touches no USB devi
 
 `update` asks before it downloads a release, and names the repository, the tag and the size.
 It asks again before it flashes. Pass `--yes` to skip both questions, for example in a script.
-Without `--yes`, and without a terminal to answer at, nothing is downloaded. `flash` asks the
-same two questions. A release downloaded once is kept, and needs no download question the next
+Without `--yes`, and without a terminal to answer at, nothing is downloaded. `verge isp flash`
+asks the same two questions. A release downloaded once is kept, and needs no download question the next
 time (see "Releases").
 
 `update` refuses to install a release the unit already runs, or one older than it. Pass
 `--force` to install it anyway.
 
-`flash` is for a unit you put into ISP mode with the jumper. With the jumper still on, the unit
-comes back in ISP mode after flashing, and the tool tells you so. Unplug it, take the jumper off,
-and plug it back in.
+## ISP mode
 
-Every LPC55S69 bootloader looks the same over USB, so the tool flashes only while exactly one is
-attached. It refuses while a second unit or an MCU-Link mini is in ISP mode, whichever unit you
-asked for. It will not start a jumper-free update while anything sits in ISP mode either.
+`verge isp` works with a unit's ROM bootloader. `enter` sends a unit into it without the jumper,
+`flash` writes an image, `reset` starts the image the unit already holds, and `info` asks the
+bootloader its version.
+
+Every LPC55S69 bootloader looks the same over USB. So `flash`, `reset` and `info` act on the only
+unit in ISP mode, and refuse while there are several. With several attached, pass `--port` with
+the port `verge` lists. That works on Linux, which ties each bootloader to its USB port. On
+Windows and macOS the tool cannot tell which bootloader it opened, so it still refuses and asks
+you to unplug all but one. `flash` also refuses while an MCU-Link mini is in ISP mode, with or
+without `--port`. On Linux `enter` works beside another unit in ISP mode and names the port to
+flash; `update` and a batch still wait until that unit is flashed or unplugged.
+
+`flash` is for a unit you put into ISP mode with the jumper or with `enter`. A unit that comes back
+in ISP mode after a flash still has its ISP pin held low. Either its ISP jumper is fitted, or a
+probe on its debug connector holds the pin. An MCU-Link's target connector carries an ISP line on
+pin 7, which reaches the ISP pin of an NXP board on the other end. Take the jumper off or unplug
+the probe, then run `verge isp reset`. After `reset` alone there is a third cause: the unit's flash
+holds no image the ROM starts.
 
 For the same reason, the tool cannot tell an MCU-Link in ISP mode from any other LPC55S69 board
 in ISP mode. Before it flashes a unit that was in ISP mode already, its question says so.
 
 The bootloader can take a few seconds to answer, and the bus can change meanwhile. Once it
-answers, the tool looks again, and flashes only if it is still the one bootloader attached and
-the one it checked. On Linux it also opens that very device, by its path.
+answers, the tool looks again, and flashes only if the bootloader it would pick now is still the
+one it checked. On Linux it also opens that very device, by its path.
 
 After a flash the unit restarts, and the tool finds it again on the same USB port. Where the
 system reports no port, the tool takes the unit back only if it is the one new device. If two
@@ -125,7 +140,7 @@ jumper fitted, looks the same, so there the tool names both causes: unplug the u
 jumper off if it is fitted, and plug it back in. Either way the unit is not counted as updated.
 
 Ctrl-C stops at the next safe point. A unit stopped halfway through a write stays in ISP mode,
-and `verge flash` with the same image, which the tool names, finishes the job. A Ctrl-C that
+and `verge isp flash` with the same image, which the tool names, finishes the job. A Ctrl-C that
 comes before the unit is asked for its bootloader leaves it as it was.
 
 ### Batch updates
@@ -174,7 +189,7 @@ It says why, and carries on once that unit is unplugged.
 
 A unit is taken once. Updated, failed, skipped or back in ISP mode with its jumper fitted, it is
 left alone until it is unplugged. A failure does not stop the batch, but a unit left in ISP mode
-pauses it: unplug that unit, or flash it again with `verge flash` and the batch's image, which
+pauses it: unplug that unit, or flash it again with `verge isp flash` and the batch's image, which
 the pause names with the unit's board. So does a unit whose bootloader did not restart; plugged
 back in, it starts the new image.
 
@@ -269,7 +284,7 @@ A lookup or download that stalls fails with a message. The tool allows 15 second
 30 for GitHub to answer, and 60 for a download to finish.
 
 A release, once downloaded, is kept in your cache directory: `~/.cache/verge` on Linux,
-`~/Library/Caches/verge` on macOS and `%LOCALAPPDATA%\verge` on Windows. So the `verge flash`
+`~/Library/Caches/verge` on macOS and `%LOCALAPPDATA%\verge` on Windows. So the `verge isp flash`
 that `verge update` sends you to does not download the image again. A kept release is checked
 every time it is used, as a fresh download is: its signature, its checksum file, and GitHub's
 digest of the image where GitHub reports one. One that fails is deleted. The tool asks before it

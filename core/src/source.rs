@@ -322,12 +322,12 @@ pub fn download_what(repo: &Repo, release: &Release) -> String {
 #[must_use]
 pub fn flash_command(source: &Source, version: &ImageVersion) -> String {
     match (source, version) {
-        (Source::Release(_), ImageVersion::Ours(tag)) => format!("verge flash --release {tag}"),
-        (Source::Release(Some(tag)), _) => format!("verge flash --release {tag}"),
-        (Source::Release(None), _) => "verge flash --release".to_owned(),
-        (Source::File(path), _) => format!("verge flash --file {}", shell_word(path)),
-        (Source::Stock(Some(dir)), _) => format!("verge flash --stock {}", shell_word(dir)),
-        (Source::Stock(None), _) => "verge flash --stock".to_owned(),
+        (Source::Release(_), ImageVersion::Ours(tag)) => format!("verge isp flash --release {tag}"),
+        (Source::Release(Some(tag)), _) => format!("verge isp flash --release {tag}"),
+        (Source::Release(None), _) => "verge isp flash --release".to_owned(),
+        (Source::File(path), _) => format!("verge isp flash --file {}", shell_word(path)),
+        (Source::Stock(Some(dir)), _) => format!("verge isp flash --stock {}", shell_word(dir)),
+        (Source::Stock(None), _) => "verge isp flash --stock".to_owned(),
     }
 }
 
@@ -395,33 +395,33 @@ mod tests {
         let release = ImageVersion::Ours("v0.3.0".into());
         assert_eq!(
             flash_command(&Source::Release(None), &release),
-            "verge flash --release v0.3.0"
+            "verge isp flash --release v0.3.0"
         );
         let file = |path: &str| flash_command(&Source::File(path.into()), &ImageVersion::Unknown);
         if cfg!(windows) {
             assert_eq!(
                 file(r"C:\NXP\mculink.s19"),
-                r"verge flash --file C:\NXP\mculink.s19"
+                r"verge isp flash --file C:\NXP\mculink.s19"
             );
             assert_eq!(
                 file(r"C:\My images\mculink.s19"),
-                r#"verge flash --file "C:\My images\mculink.s19""#
+                r#"verge isp flash --file "C:\My images\mculink.s19""#
             );
         } else {
             assert_eq!(
                 file("/tmp/build/mculink.s19"),
-                "verge flash --file /tmp/build/mculink.s19"
+                "verge isp flash --file /tmp/build/mculink.s19"
             );
             assert_eq!(
                 file("/tmp/my images/it's.s19"),
-                r"verge flash --file '/tmp/my images/it'\''s.s19'"
+                r"verge isp flash --file '/tmp/my images/it'\''s.s19'"
             );
             assert_eq!(
                 flash_command(
                     &Source::Stock(Some("/opt/Link Server/probe_firmware".into())),
                     &ImageVersion::Unknown
                 ),
-                "verge flash --stock '/opt/Link Server/probe_firmware'"
+                "verge isp flash --stock '/opt/Link Server/probe_firmware'"
             );
         }
     }

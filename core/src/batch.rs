@@ -836,7 +836,7 @@ impl<'b, B: Bus + Sync> Batch<'b, B> {
                         update::not_restarted(*maybe_jumper)
                     )),
                     _ => Some(format!(
-                        "A unit in ISP mode that this batch does not take is attached at {at}. The batch waits until it is unplugged or flashed with `verge flash`."
+                        "A unit in ISP mode that this batch does not take is attached at {at}. The batch waits until it is unplugged or flashed with `verge isp flash`."
                     )),
                 }
             }

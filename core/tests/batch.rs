@@ -274,7 +274,7 @@ fn a_failure_does_not_stop_the_batch_and_its_bootloader_is_named() {
         "{paused}"
     );
     assert!(
-        paused.contains("`verge flash --release v0.3.0`"),
+        paused.contains("`verge isp flash --release v0.3.0`"),
         "{paused}"
     );
     assert_eq!(seen.records[0].result, Settled::Failed);

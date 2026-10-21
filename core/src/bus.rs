@@ -95,4 +95,9 @@ pub trait Bus {
     /// Whether a device that leaves the bus and comes back keeps its [`UsbDevice::instance`], as
     /// on Windows. Where it does not, an instance still there means the device never left.
     fn keeps_instances(&self) -> bool;
+    /// Whether [`Bus::open_isp`] opens the bootloader of the device it is given, so one among
+    /// several can be chosen. Where it does not, it opens the first bootloader it finds.
+    fn tells_bootloaders_apart(&self) -> bool {
+        false
+    }
 }
