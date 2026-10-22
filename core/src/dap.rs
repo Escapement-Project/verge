@@ -182,7 +182,7 @@ impl Ours {
     /// [`VENDOR_DIO`] acts: a Pro whose USB-SIO jumper, J15, was not fitted when it started.
     pub const FLAG_DIO: u8 = 1 << 6;
 
-    /// The board byte's values (`BOARD_*` in the firmware's `src/board_pins.h`).
+    /// The board byte's values (`BOARD_KIND_*` in the firmware's `src/board_straps.h`).
     pub const BOARD_MCU_LINK: u8 = 0;
     pub const BOARD_MCU_LINK_PRO: u8 = 1;
     pub const BOARD_ON_BOARD: u8 = 2;

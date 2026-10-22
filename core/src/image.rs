@@ -630,8 +630,8 @@ mod tests {
         assert_eq!(parse(up_to_the_end), Ok(()));
     }
 
-    /// A declaration as the firmware's spec table lays it out, written out by
-    /// hand: magic, format, length, two zero bytes, boards.
+    /// A declaration as the firmware lays it out, written out by hand: magic, format, length, two
+    /// zero bytes, boards.
     fn record(format: u8, len: u8, boards: u32) -> Vec<u8> {
         let mut bytes = b"VERGEIMG".to_vec();
         bytes.extend_from_slice(&[format, len, 0, 0]);
