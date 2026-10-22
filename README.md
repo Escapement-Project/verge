@@ -101,7 +101,9 @@ time (see "Releases").
 
 `cjtag` shows the two-pin (cJTAG) scan formats a unit running ours offers a host, which picks the
 fastest one the target has too. `--oscan1-only` limits it to OScan1, the format to look at on an
-analyser, and `--all` lifts the limit; a restart lifts it as well.
+analyser. `--formats` picks a set by name or number, `--formats oscan5` or `--formats 9,13`, so you
+can hold a host to one format to test it or compare it with another; OScan1 always stays. `--all`
+lifts the limit, and so does a restart.
 
 `update` refuses to install a release the unit already runs, or one older than it. Pass
 `--force` to install it anyway.

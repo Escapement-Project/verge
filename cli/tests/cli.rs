@@ -911,7 +911,29 @@ fn cjtag_shows_the_formats() {
         .arg("cjtag")
         .assert()
         .success()
-        .stdout(predicate::str::contains("offers two-pin OScan1, OScan2."));
+        .stdout(predicate::str::contains(
+            "offers two-pin OScan1, OScan2, OScan5.",
+        ));
+}
+
+#[test]
+fn cjtag_limits_the_formats_to_a_set() {
+    tool("ours-pro")
+        .args(["cjtag", "--formats", "oscan5,9"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "offers two-pin OScan1, OScan5, until it restarts.",
+        ));
+}
+
+#[test]
+fn cjtag_refuses_an_unknown_format() {
+    tool("ours-pro")
+        .args(["cjtag", "--formats", "oscan9"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("oscan9 is not a scan format"));
 }
 
 #[test]

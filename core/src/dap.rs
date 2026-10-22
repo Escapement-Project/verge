@@ -20,6 +20,7 @@ pub const CJTAG_SET_FORMATS: u8 = 4;
 /// The scan formats by their IEEE 1149.7 SCNFMT numbers.
 pub const SCNFMT_OSCAN1: u32 = 9;
 pub const SCNFMT_OSCAN2: u32 = 10;
+pub const SCNFMT_OSCAN5: u32 = 13;
 pub const IDENTIFY_MAGIC: &[u8; 5] = b"CJTAG";
 
 /// Stock's jumper-free way into the bootloader, as LinkServer's `probe update` sends it.

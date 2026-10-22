@@ -189,9 +189,10 @@ pub struct SimUnit {
     pub scan_formats: u32,
 }
 
-/// What ours offers after a restart: OScan1 and OScan2.
-pub(crate) const SIM_SCAN_FORMATS: u32 =
-    (1 << crate::dap::SCNFMT_OSCAN1) | (1 << crate::dap::SCNFMT_OSCAN2);
+/// What ours offers after a restart: OScan1, OScan2 and OScan5.
+pub(crate) const SIM_SCAN_FORMATS: u32 = (1 << crate::dap::SCNFMT_OSCAN1)
+    | (1 << crate::dap::SCNFMT_OSCAN2)
+    | (1 << crate::dap::SCNFMT_OSCAN5);
 
 #[derive(Clone, Debug)]
 pub(crate) enum Event {

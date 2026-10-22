@@ -118,7 +118,8 @@ enum Command {
     /// Show or limit the two-pin (cJTAG) scan formats a unit running ours offers a host.
     ///
     /// A host frames the fastest format both the unit and the target have. --oscan1-only leaves it
-    /// OScan1, which is what to look at on an analyser. The limit lasts until the unit restarts.
+    /// OScan1, which is what to look at on an analyser, and --formats picks a set, so that a host
+    /// can be held to one format to test or compare it. A limit lasts until the unit restarts.
     Cjtag(CjtagArgs),
 }
 
@@ -128,11 +129,31 @@ struct CjtagArgs {
     #[arg(long)]
     serial: Option<String>,
     /// Offer OScan1 alone.
-    #[arg(long, conflicts_with = "all")]
+    #[arg(long, conflicts_with_all = ["all", "formats"])]
     oscan1_only: bool,
     /// Offer every format the image frames again.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "formats")]
     all: bool,
+    /// Offer these formats, by name or SCNFMT number: `--formats oscan1,oscan5` or `9,13`. OScan1
+    /// stays offered whatever the list says, and a format the image does not frame is left out.
+    #[arg(long, value_delimiter = ',', value_parser = parse_scan_format)]
+    formats: Option<Vec<u32>>,
+}
+
+/// A scan format named as `scan_format_name` names it, in any case, or its SCNFMT number.
+fn parse_scan_format(text: &str) -> Result<u32, String> {
+    if let Ok(number) = text.parse::<u32>() {
+        return if number < 32 {
+            Ok(number)
+        } else {
+            Err(format!("SCNFMT {number} is past 31"))
+        };
+    }
+    (0..32)
+        .find(|&n| dap::scan_format_name(n).eq_ignore_ascii_case(text))
+        .ok_or_else(|| {
+            format!("{text} is not a scan format: name one as OScan5 or give its SCNFMT, 13")
+        })
 }
 
 #[derive(Subcommand)]
@@ -974,7 +995,9 @@ fn cjtag<B: Bus>(bus: &B, args: &CjtagArgs) -> Result<()> {
     } else if args.all {
         Some(u32::MAX)
     } else {
-        None
+        args.formats
+            .as_ref()
+            .map(|formats| formats.iter().fold(0, |mask, n| mask | 1 << n))
     };
     if let Some(mask) = mask {
         dap::set_scan_formats(&mut link, mask).with_context(|| format!("limiting {serial}"))?;
@@ -982,7 +1005,7 @@ fn cjtag<B: Bus>(bus: &B, args: &CjtagArgs) -> Result<()> {
     let names = dap::identify(&mut link)?
         .and_then(|ours| ours.scan_format_names())
         .unwrap_or_default();
-    let until = if args.oscan1_only {
+    let until = if args.oscan1_only || args.formats.is_some() {
         ", until it restarts"
     } else {
         ""
