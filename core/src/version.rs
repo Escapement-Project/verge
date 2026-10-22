@@ -218,10 +218,7 @@ mod tests {
                 minor: 172
             })
         );
-        assert_eq!(
-            StockVersion::from_product_string("Verge CMSIS-DAP"),
-            None
-        );
+        assert_eq!(StockVersion::from_product_string("Verge CMSIS-DAP"), None);
     }
 
     #[test]

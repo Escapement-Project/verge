@@ -185,7 +185,13 @@ pub struct SimUnit {
     pub stock_product: Option<String>,
     /// The SWD jumper is fitted, so a running firmware offers no CMSIS-DAP interface.
     pub swd_jumper: bool,
+    /// The two-pin scan formats ours offers, bit n for SCNFMT n, which a restart sets back.
+    pub scan_formats: u32,
 }
+
+/// What ours offers after a restart: OScan1 and OScan2.
+pub(crate) const SIM_SCAN_FORMATS: u32 =
+    (1 << crate::dap::SCNFMT_OSCAN1) | (1 << crate::dap::SCNFMT_OSCAN2);
 
 #[derive(Clone, Debug)]
 pub(crate) enum Event {
@@ -349,6 +355,7 @@ impl World {
                 self.enumerate(unit);
             }
             Event::Boot => {
+                self.units[unit].scan_formats = SIM_SCAN_FORMATS;
                 let u = &self.units[unit];
                 // The ROM starts ISP mode when flash holds no image at all (UM11126, passive boot).
                 let blank = u
@@ -615,6 +622,10 @@ pub const SCENARIOS: &[(&str, &str)] = &[
     ),
     ("pro", "one MCU-Link Pro running stock V3.172"),
     (
+        "ours-pro",
+        "one MCU-Link Pro running a current image of ours",
+    ),
+    (
         "pro-old",
         "one MCU-Link Pro running stock V3.108, which needs the jumper",
     ),
@@ -686,6 +697,7 @@ impl SimBus {
             board: None,
             stock_product: None,
             swd_jumper: false,
+            scan_formats: SIM_SCAN_FORMATS,
         });
         world.units[index].mode = mode;
         if world.units[index].mode != Mode::Silent {
@@ -870,6 +882,10 @@ impl SimBus {
             }
             "ours" => {
                 bus.add_ours("14d05d4");
+            }
+            "ours-pro" => {
+                let unit = bus.add_ours("26ea505");
+                bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK_PRO);
             }
             "stock" => {
                 bus.add_stock("3.172");

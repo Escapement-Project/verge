@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::{Event, Mode, SimFirmware, World};
+use super::{Event, Mode, SIM_SCAN_FORMATS, SimFirmware, World};
 use crate::dap::{self, DapLink, LinkError};
 
 /// Each command costs this much simulated time.
@@ -75,9 +75,11 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
         },
         [dap::VENDOR_IDENTIFY] => match &firmware {
             SimFirmware::Ours { build } => {
+                // A unit with a board answers as the current image does, in format 4; one without
+                // as recorded.
                 let board = world.units[unit].board;
                 let format = if board.is_some() {
-                    3
+                    4
                 } else {
                     world.ours.1.format
                 };
@@ -85,7 +87,10 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
                 reply.extend_from_slice(dap::IDENTIFY_MAGIC);
                 reply.extend_from_slice(&[format, world.ours.1.flags, build.len() as u8]);
                 reply.extend_from_slice(build.as_bytes());
-                reply.extend(board);
+                if let Some(board) = board {
+                    reply.push(board);
+                    reply.extend_from_slice(&world.units[unit].scan_formats.to_le_bytes());
+                }
                 reply
             }
             _ => vec![dap::ID_DAP_INVALID],
@@ -102,6 +107,17 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
             }
             _ => vec![dap::ID_DAP_INVALID],
         },
+        [dap::VENDOR_CJTAG_CONTROL, dap::CJTAG_SET_FORMATS, mask @ ..] if mask.len() == 4 => {
+            match &firmware {
+                SimFirmware::Ours { .. } => {
+                    let mask = u32::from_le_bytes(mask.try_into().expect("four bytes"));
+                    world.units[unit].scan_formats =
+                        (mask & SIM_SCAN_FORMATS) | (1 << dap::SCNFMT_OSCAN1);
+                    vec![dap::VENDOR_CJTAG_CONTROL, dap::DAP_OK]
+                }
+                _ => vec![dap::ID_DAP_INVALID],
+            }
+        }
         [dap::DAP_DISCONNECT] => vec![dap::DAP_DISCONNECT, dap::DAP_OK],
         [dap::DAP_HOST_STATUS, 0 | 1, on @ (0 | 1)] => {
             world.units[unit].host_status += 1;

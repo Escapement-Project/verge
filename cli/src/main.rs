@@ -32,7 +32,7 @@ use verge_core::update::{self, Outcome, Timing, UpdateError};
 use verge_core::usb::UsbBus;
 use verge_core::version::Relation;
 use verge_core::version::StockVersion;
-use verge_core::{Bus, Cancel, Firmware, Path, Unit, detect, offer};
+use verge_core::{Bus, Cancel, Firmware, Path, Unit, dap, detect, offer};
 
 use crate::progress::Bars;
 
@@ -115,6 +115,24 @@ enum Command {
         /// An ELF or S-record file.
         file: PathBuf,
     },
+    /// Show or limit the two-pin (cJTAG) scan formats a unit running ours offers a host.
+    ///
+    /// A host frames the fastest format both the unit and the target have. --oscan1-only leaves it
+    /// OScan1, which is what to look at on an analyser. The limit lasts until the unit restarts.
+    Cjtag(CjtagArgs),
+}
+
+#[derive(Args)]
+struct CjtagArgs {
+    /// The unit, when more than one is attached.
+    #[arg(long)]
+    serial: Option<String>,
+    /// Offer OScan1 alone.
+    #[arg(long, conflicts_with = "all")]
+    oscan1_only: bool,
+    /// Offer every format the image frames again.
+    #[arg(long)]
+    all: bool,
 }
 
 #[derive(Subcommand)]
@@ -363,6 +381,7 @@ fn run<B: Bus + Sync, H: Http>(
     match &cli.command {
         Some(Command::Batch(args)) => batch(bus, github, args, cancel, stop),
         None | Some(Command::List) => list(bus, cli.verbose > 0),
+        Some(Command::Cjtag(args)) => cjtag(bus, args),
         Some(Command::Update(args)) => update_unit(bus, github, args, cancel),
         Some(Command::Isp(IspCommand::Enter { serial, stock })) => {
             bootloader(bus, serial.as_deref(), *stock, cancel)
@@ -417,6 +436,9 @@ fn list<B: Bus>(bus: &B, verbose: bool) -> Result<()> {
             field("packets", packets.as_deref());
             if let Firmware::Ours(ours) = firmware {
                 field("capabilities", Some(&ours.flag_names().join(", ")));
+                if let Some(names) = ours.scan_format_names() {
+                    field("two-pin", Some(&names.join(", ")));
+                }
             }
         }
         let offer = offer(unit, &units);
@@ -922,6 +944,51 @@ fn arm_refusal(error: &ArmError) -> anyhow::Error {
         ),
         ArmError::Image(_) => anyhow::anyhow!("{error}"),
     }
+}
+
+fn cjtag<B: Bus>(bus: &B, args: &CjtagArgs) -> Result<()> {
+    let units = detect(bus).context("looking for MCU-Links")?;
+    let unit = update::select(&units, args.serial.as_deref())?;
+    let serial = unit.serial().unwrap_or("the unit");
+    let State::Probe {
+        firmware: Firmware::Ours(ours),
+        ..
+    } = &unit.state
+    else {
+        bail!(
+            "{serial} is {}, not running ours, so it has no two-pin formats to show or limit",
+            unit.state
+        );
+    };
+    if ours.scan_formats.is_none() {
+        bail!(
+            "{serial} runs build {}, older than the scan formats: it frames OScan1 alone",
+            ours.build
+        );
+    }
+    let mut link = bus
+        .open_dap(&unit.device)
+        .with_context(|| format!("opening {serial}"))?;
+    let mask = if args.oscan1_only {
+        Some(1 << dap::SCNFMT_OSCAN1)
+    } else if args.all {
+        Some(u32::MAX)
+    } else {
+        None
+    };
+    if let Some(mask) = mask {
+        dap::set_scan_formats(&mut link, mask).with_context(|| format!("limiting {serial}"))?;
+    }
+    let names = dap::identify(&mut link)?
+        .and_then(|ours| ours.scan_format_names())
+        .unwrap_or_default();
+    let until = if args.oscan1_only {
+        ", until it restarts"
+    } else {
+        ""
+    };
+    indicatif_println!("{serial} offers two-pin {}{until}.", names.join(", "));
+    Ok(())
 }
 
 fn bootloader<B: Bus>(bus: &B, serial: Option<&str>, stock: bool, cancel: &Cancel) -> Result<()> {

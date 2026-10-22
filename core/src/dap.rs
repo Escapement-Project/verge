@@ -13,6 +13,13 @@ pub const DAP_OK: u8 = 0x00;
 
 /// Ours answers this with its identity; stock does not know it.
 pub const VENDOR_IDENTIFY: u8 = 0x82;
+/// Ours' two-pin (cJTAG) control. Mode 4 sets the scan formats the unit offers a host until it
+/// restarts: a little-endian mask after the mode, bit n for SCNFMT n.
+pub const VENDOR_CJTAG_CONTROL: u8 = 0x83;
+pub const CJTAG_SET_FORMATS: u8 = 4;
+/// The scan formats by their IEEE 1149.7 SCNFMT numbers.
+pub const SCNFMT_OSCAN1: u32 = 9;
+pub const SCNFMT_OSCAN2: u32 = 10;
 pub const IDENTIFY_MAGIC: &[u8; 5] = b"CJTAG";
 
 /// Stock's jumper-free way into the bootloader, as LinkServer's `probe update` sends it.
@@ -79,6 +86,8 @@ pub enum DapError {
     OutOfStep { asked: u8, got: String },
     #[error("the reply to command 0x{command:02x} was {len} bytes, too short to parse")]
     Short { command: u8, len: usize },
+    #[error("the probe refused command 0x{command:02x}")]
+    Refused { command: u8 },
 }
 
 /// Sends a command and checks that the reply echoes it.
@@ -154,6 +163,8 @@ pub struct Ours {
     pub build: String,
     /// The board byte, from format 3 on: [`Ours::BOARD_MCU_LINK`] or another board.
     pub board: Option<u8>,
+    /// The two-pin scan formats the unit offers, from format 4 on: bit n for SCNFMT n.
+    pub scan_formats: Option<u32>,
 }
 
 impl Ours {
@@ -184,6 +195,29 @@ impl Ours {
         .filter(|(bit, _)| self.flags & bit != 0)
         .map(|(_, name)| name)
         .collect()
+    }
+
+    /// The two-pin scan formats offered, by name, or `None` before format 4.
+    #[must_use]
+    pub fn scan_format_names(&self) -> Option<Vec<String>> {
+        self.scan_formats.map(|mask| {
+            (0..32)
+                .filter(|n| mask >> n & 1 != 0)
+                .map(scan_format_name)
+                .collect()
+        })
+    }
+}
+
+/// A scan format's name: OScan1 for SCNFMT 9, and so on.
+#[must_use]
+pub fn scan_format_name(scnfmt: u32) -> String {
+    match scnfmt {
+        0..=3 => format!("JScan{scnfmt}"),
+        4..=7 => format!("SScan{}", scnfmt - 4),
+        8..=15 => format!("OScan{}", scnfmt - 8),
+        16 => "MScan".to_owned(),
+        _ => format!("SCNFMT {scnfmt}"),
     }
 }
 
@@ -216,6 +250,7 @@ pub fn parse_identify(reply: &[u8]) -> Result<Option<Ours>, DapError> {
             flags: 0,
             build: String::new(),
             board: None,
+            scan_formats: None,
         }));
     }
     let flags = *body.get(6).ok_or_else(short)?;
@@ -227,12 +262,38 @@ pub fn parse_identify(reply: &[u8]) -> Result<Option<Ours>, DapError> {
     } else {
         None
     };
+    let scan_formats = if format >= 4 {
+        let bytes = body.get(9 + len..13 + len).ok_or_else(short)?;
+        Some(u32::from_le_bytes(bytes.try_into().expect("four bytes")))
+    } else {
+        None
+    };
     Ok(Some(Ours {
         format,
         flags,
         build: String::from_utf8_lossy(build).into_owned(),
         board,
+        scan_formats,
     }))
+}
+
+/// Limits the two-pin scan formats ours offers a host to `mask` (bit n for SCNFMT n) until the
+/// unit restarts. The unit keeps OScan1 whatever the mask, and drops formats its image does not
+/// frame; `u32::MAX` offers every one it does.
+pub fn set_scan_formats(link: &mut dyn DapLink, mask: u32) -> Result<(), DapError> {
+    let mut request = vec![VENDOR_CJTAG_CONTROL, CJTAG_SET_FORMATS];
+    request.extend_from_slice(&mask.to_le_bytes());
+    let reply = command(link, &request)?;
+    match reply.get(1) {
+        Some(&DAP_OK) => Ok(()),
+        Some(_) => Err(DapError::Refused {
+            command: VENDOR_CJTAG_CONTROL,
+        }),
+        None => Err(DapError::Short {
+            command: VENDOR_CJTAG_CONTROL,
+            len: reply.len(),
+        }),
+    }
 }
 
 pub fn identify(link: &mut dyn DapLink) -> Result<Option<Ours>, DapError> {
@@ -386,6 +447,26 @@ mod tests {
         assert_eq!(padded.board, None);
         assert!(matches!(
             parse_identify(&identify_reply(3, "v0.3.0", &[])),
+            Err(DapError::Short { command: 0x82, .. })
+        ));
+    }
+
+    #[test]
+    fn the_scan_formats_are_read_from_format_4_on() {
+        let ours = parse_identify(&identify_reply(4, "26ea505", &[0, 0x00, 0x06, 0, 0]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(ours.scan_formats, Some(0x600));
+        assert_eq!(
+            ours.scan_format_names(),
+            Some(vec!["OScan1".to_owned(), "OScan2".to_owned()])
+        );
+        let older = parse_identify(&identify_reply(3, "v0.3.0", &[0, 0, 0, 0, 0]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(older.scan_formats, None);
+        assert!(matches!(
+            parse_identify(&identify_reply(4, "26ea505", &[0, 0x00, 0x06])),
             Err(DapError::Short { command: 0x82, .. })
         ));
     }

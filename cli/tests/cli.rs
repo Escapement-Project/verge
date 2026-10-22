@@ -893,3 +893,34 @@ fn isp_flash_by_port_beside_a_mini_refuses_first() {
         .stderr(predicate::str::contains("unplug the mini first"))
         .stderr(predicate::str::contains("Download").not());
 }
+
+#[test]
+fn cjtag_limits_the_formats_to_oscan1() {
+    tool("ours-pro")
+        .args(["cjtag", "--oscan1-only"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "offers two-pin OScan1, until it restarts.",
+        ));
+}
+
+#[test]
+fn cjtag_shows_the_formats() {
+    tool("ours-pro")
+        .arg("cjtag")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("offers two-pin OScan1, OScan2."));
+}
+
+#[test]
+fn cjtag_refuses_stock() {
+    tool("pro")
+        .args(["cjtag", "--oscan1-only"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "is stock V3.172, not running ours",
+        ));
+}

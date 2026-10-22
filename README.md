@@ -90,6 +90,7 @@ verge isp info              # what the bootloader of a unit in ISP mode says abo
 verge batch                 # update each unit as it is plugged in, until Ctrl-C
 verge release               # the latest release, and how each unit compares
 verge inspect image.s19     # what an image puts into flash; touches no USB device
+verge cjtag --oscan1-only   # offer a host two-pin OScan1 alone, until the unit restarts
 ```
 
 `update` asks before it downloads a release, and names the repository, the tag and the size.
@@ -97,6 +98,10 @@ It asks again before it flashes. Pass `--yes` to skip both questions, for exampl
 Without `--yes`, and without a terminal to answer at, nothing is downloaded. `verge isp flash`
 asks the same two questions. A release downloaded once is kept, and needs no download question the next
 time (see "Releases").
+
+`cjtag` shows the two-pin (cJTAG) scan formats a unit running ours offers a host, which picks the
+fastest one the target has too. `--oscan1-only` limits it to OScan1, the format to look at on an
+analyser, and `--all` lifts the limit; a restart lifts it as well.
 
 `update` refuses to install a release the unit already runs, or one older than it. Pass
 `--force` to install it anyway.

@@ -213,6 +213,7 @@ mod tests {
                 flags: 0,
                 build: "14d05d4".into(),
                 board: None,
+                scan_formats: None,
             }),
         })
     }
