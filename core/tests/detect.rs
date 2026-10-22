@@ -331,3 +331,24 @@ fn old_stock_with_its_swd_jumper_is_not_told_to_take_it_off() {
             .any(|n| n.contains("take the SWD jumper off"))
     );
 }
+
+#[test]
+fn naming_a_unit_leaves_a_unit_another_program_holds_unopened() {
+    let bus = SimBus::default();
+    let mine = bus.add_ours("v0.3.0");
+    let theirs = bus.add_ours("v0.3.0");
+    bus.set_serials(mine, "CJ00000001", "NXP0000001");
+    bus.set_serials(theirs, "CJ00000002", "NXP0000002");
+    bus.set_busy(theirs, true);
+    let units = verge_core::detect::detect_named(&bus, Some("CJ00000001")).unwrap();
+    assert_eq!(units.len(), 1, "the other unit was asked");
+    assert_eq!(units[0].serial(), Some("CJ00000001"));
+    // A serial no USB descriptor carries asks every unit, as DAP_Info may still name it.
+    let units = verge_core::detect::detect_named(&bus, Some("CJ0000000X")).unwrap();
+    assert_eq!(units.len(), 2);
+    assert!(
+        units
+            .iter()
+            .any(|u| matches!(u.state, State::Unreadable { .. }))
+    );
+}

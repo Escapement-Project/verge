@@ -280,6 +280,31 @@ pub fn detect<B: Bus>(bus: &B) -> Result<Vec<Unit>, BusError> {
         .collect())
 }
 
+/// [`detect`] for a command about the unit `serial` names. A probe whose USB serial is another is not
+/// opened, so a unit another program is using between its own commands is left alone; bootloaders
+/// are listed as ever, since they are never opened. When no probe's USB serial is `serial`, every
+/// probe is asked, because the serial a user names is what the unit's `DAP_Info` reports.
+pub fn detect_named<B: Bus>(bus: &B, serial: Option<&str>) -> Result<Vec<Unit>, BusError> {
+    let Some(serial) = serial else {
+        return detect(bus);
+    };
+    let devices = bus.devices()?;
+    let named = |device: &UsbDevice| device.serial.as_deref() == Some(serial);
+    let any_named = devices
+        .iter()
+        .any(|device| device.role() == Some(Role::Probe) && named(device));
+    Ok(devices
+        .into_iter()
+        .filter_map(|device| {
+            let role = device.role()?;
+            if any_named && role == Role::Probe && !named(&device) {
+                return None;
+            }
+            Some(query(bus, device, role))
+        })
+        .collect())
+}
+
 /// What one device runs, asked as [`detect`] asks every device. `None` for a device this tool
 /// ignores.
 pub fn query_device<B: Bus>(bus: &B, device: UsbDevice) -> Option<Unit> {

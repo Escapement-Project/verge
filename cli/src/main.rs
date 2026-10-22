@@ -17,7 +17,7 @@ use verge_core::batch::{
 };
 use verge_core::board;
 use verge_core::cache::Cache;
-use verge_core::detect::{Guess, Hardware, State};
+use verge_core::detect::{Guess, Hardware, State, detect_named};
 use verge_core::ids::Role;
 use verge_core::image::{Image, PAGE};
 use verge_core::paths::ISP_IDENTITY_WARNING;
@@ -621,7 +621,7 @@ fn update_unit<B: Bus, H: Http>(
     args: &UpdateArgs,
     cancel: &Cancel,
 ) -> Result<()> {
-    let units = detect(bus).context("looking for MCU-Links")?;
+    let units = detect_named(bus, args.serial.as_deref()).context("looking for MCU-Links")?;
     let unit = update::select(&units, args.serial.as_deref())?;
     let offer = offer(unit, &units);
     let Some(path) = offer.best() else {
@@ -971,7 +971,7 @@ fn arm_refusal(error: &ArmError) -> anyhow::Error {
 }
 
 fn cjtag<B: Bus>(bus: &B, args: &CjtagArgs) -> Result<()> {
-    let units = detect(bus).context("looking for MCU-Links")?;
+    let units = detect_named(bus, args.serial.as_deref()).context("looking for MCU-Links")?;
     let unit = update::select(&units, args.serial.as_deref())?;
     let serial = unit.serial().unwrap_or("the unit");
     let State::Probe {
@@ -1018,7 +1018,7 @@ fn cjtag<B: Bus>(bus: &B, args: &CjtagArgs) -> Result<()> {
 }
 
 fn bootloader<B: Bus>(bus: &B, serial: Option<&str>, stock: bool, cancel: &Cancel) -> Result<()> {
-    let units = detect(bus).context("looking for MCU-Links")?;
+    let units = detect_named(bus, serial).context("looking for MCU-Links")?;
     let unit = update::select(&units, serial)?;
     if let Err(refused) = update::check_entry(unit, stock) {
         bail!(
