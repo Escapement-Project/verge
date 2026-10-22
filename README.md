@@ -484,7 +484,7 @@ Two tests read real images and are skipped by default:
 
 ```
 VERGE_FIRMWARE_ELF=<firmware checkout>/build/mculink_cjtag.elf \
-VERGE_STOCK_S19=/opt/linkserver/MCU-LINK/probe_firmware/MCU-LINK_CMSIS-DAP_V3_172.s19 \
+VERGE_STOCK_S19=<LinkServer>/MCU-LINK/probe_firmware/MCU-LINK_CMSIS-DAP_V3_172.s19 \
     cargo test -p verge-core --test image -- --ignored
 ```
 
