@@ -294,7 +294,10 @@ struct FlashArgs {
 
 fn init_tracing(verbose: u8) {
     let default = match verbose {
-        0 => "warn,verge_core=info",
+        // nusb logs a claim it could not make as an error of its own, which verge reports in its
+        // own words where it matters: a unit another program holds is listed as such, and one not
+        // asked for is left alone.
+        0 => "warn,nusb=off,verge_core=info",
         // The bootloader and USB crates log every packet at info, so they wait for -vv.
         1 => "warn,verge_core=debug,verge=debug",
         _ => "debug",
