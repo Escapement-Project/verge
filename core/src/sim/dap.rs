@@ -4,11 +4,45 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::{Event, Mode, SIM_SCAN_FORMATS, SimFirmware, World};
+use super::{Event, Mode, SIM_SCAN_FORMATS, SimFirmware, SimUnit, World};
 use crate::dap::{self, DapLink, LinkError};
 
 /// Each command costs this much simulated time.
 const COMMAND_TIME: Duration = Duration::from_micros(250);
+
+/// The Pro's DIO pins and the groups that change direction together, as the firmware reports them.
+const DIO_PINS: u8 = 0x0F;
+const DIO_GROUPS: [u8; 2] = [0x07, 0x08];
+
+/// Ours' answer to the DIO command: a Pro sets its pins as a group or not at all, and any other
+/// board has none. An input reads what is attached holds it at.
+fn dio_reply(u: &mut SimUnit, mask: u8, outputs: u8, levels: u8) -> Vec<u8> {
+    let pro = u.board == Some(dap::Ours::BOARD_MCU_LINK_PRO);
+    let next = (u.dio_outputs & !mask) | (outputs & mask);
+    let accepted = pro
+        && mask & !DIO_PINS == 0
+        && DIO_GROUPS
+            .iter()
+            .all(|&group| next & group == 0 || next & group == group);
+    if accepted {
+        u.dio_outputs = next;
+        u.dio_levels = (u.dio_levels & !mask) | (levels & mask);
+    }
+    let mut reply = vec![
+        dap::VENDOR_DIO,
+        if accepted { dap::DAP_OK } else { 0xFF },
+        u.dio_outputs,
+        u.dio_levels,
+        (u.dio_levels & u.dio_outputs) | (u.dio_held & !u.dio_outputs),
+    ];
+    if pro {
+        reply.extend_from_slice(&[DIO_PINS, DIO_GROUPS.len() as u8]);
+        reply.extend_from_slice(&DIO_GROUPS);
+    } else {
+        reply.extend_from_slice(&[0, 0]);
+    }
+    reply
+}
 
 pub struct SimDap {
     world: Arc<Mutex<World>>,
@@ -83,9 +117,14 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
                 } else {
                     world.ours.1.format
                 };
+                let flags = if board == Some(dap::Ours::BOARD_MCU_LINK_PRO) {
+                    world.ours.1.flags | dap::Ours::FLAG_DIO
+                } else {
+                    world.ours.1.flags
+                };
                 let mut reply = vec![dap::VENDOR_IDENTIFY];
                 reply.extend_from_slice(dap::IDENTIFY_MAGIC);
-                reply.extend_from_slice(&[format, world.ours.1.flags, build.len() as u8]);
+                reply.extend_from_slice(&[format, flags, build.len() as u8]);
                 reply.extend_from_slice(build.as_bytes());
                 if let Some(board) = board {
                     reply.push(board);
@@ -118,6 +157,13 @@ fn answer(world: &mut World, unit: usize, request: &[u8]) -> Vec<u8> {
                 _ => vec![dap::ID_DAP_INVALID],
             }
         }
+        // A unit without a board answers as the recorded image, which predates the command.
+        [dap::VENDOR_DIO, mask, outputs, levels] => match &firmware {
+            SimFirmware::Ours { .. } if world.units[unit].board.is_some() => {
+                dio_reply(&mut world.units[unit], *mask, *outputs, *levels)
+            }
+            _ => vec![dap::ID_DAP_INVALID],
+        },
         [dap::DAP_DISCONNECT] => vec![dap::DAP_DISCONNECT, dap::DAP_OK],
         [dap::DAP_HOST_STATUS, 0 | 1, on @ (0 | 1)] => {
             world.units[unit].host_status += 1;

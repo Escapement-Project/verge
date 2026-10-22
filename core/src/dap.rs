@@ -22,6 +22,10 @@ pub const SCNFMT_OSCAN1: u32 = 9;
 pub const SCNFMT_OSCAN2: u32 = 10;
 pub const SCNFMT_OSCAN5: u32 = 13;
 pub const IDENTIFY_MAGIC: &[u8; 5] = b"CJTAG";
+/// Ours' DIO pins on the MCU-Link Pro's J19: `mask, outputs, levels` sets the direction and the
+/// level of each pin in `mask`, bit n for DIOn; a mask of 0 only reads. Always three bytes after
+/// the id, so it can sit inside `DAP_ExecuteCommands`.
+pub const VENDOR_DIO: u8 = 0x8E;
 
 /// Stock's jumper-free way into the bootloader, as LinkServer's `probe update` sends it.
 pub const STOCK_BOOTLOADER_REQUEST: [u8; 2] = [0x81, 0x01];
@@ -175,6 +179,8 @@ impl Ours {
     pub const FLAG_SWD_CODEGEN: u8 = 1 << 3;
     pub const FLAG_OSCAN1_ENTER: u8 = 1 << 4;
     pub const FLAG_JTAG_CODEGEN: u8 = 1 << 5;
+    /// [`VENDOR_DIO`] acts: a Pro whose USB-SIO jumper, J15, was not fitted when it started.
+    pub const FLAG_DIO: u8 = 1 << 6;
 
     /// The board byte's values (`BOARD_*` in the firmware's `src/board_pins.h`).
     pub const BOARD_MCU_LINK: u8 = 0;
@@ -191,6 +197,7 @@ impl Ours {
             (Self::FLAG_SWD_CODEGEN, "generated SWD"),
             (Self::FLAG_OSCAN1_ENTER, "host-driven OScan1 entry"),
             (Self::FLAG_JTAG_CODEGEN, "generated JTAG"),
+            (Self::FLAG_DIO, "DIO pins"),
         ]
         .into_iter()
         .filter(|(bit, _)| self.flags & bit != 0)
@@ -295,6 +302,75 @@ pub fn set_scan_formats(link: &mut dyn DapLink, mask: u32) -> Result<(), DapErro
             len: reply.len(),
         }),
     }
+}
+
+/// The DIO pins as a [`VENDOR_DIO`] reply describes them, bit n for DIOn throughout.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dio {
+    /// Whether the unit made the change asked for. A refused one changes nothing.
+    pub accepted: bool,
+    /// The pins there are: none on a board without them, or on a Pro started with J15 fitted.
+    pub pins: u8,
+    /// The pins the unit drives.
+    pub outputs: u8,
+    /// Each pin's output level: what it drives, or will once it is an output.
+    pub levels: u8,
+    /// The levels on the unit's side of the pins' translators, so an output reads its own drive.
+    pub read: u8,
+    /// The pins that change direction together.
+    pub groups: Vec<u8>,
+}
+
+impl Dio {
+    /// The group that setting the pins in `mask` to the directions in `outputs` would leave
+    /// partly driven, which the unit refuses.
+    #[must_use]
+    pub fn split(&self, mask: u8, outputs: u8) -> Option<u8> {
+        let next = (self.outputs & !mask) | (outputs & mask);
+        self.groups
+            .iter()
+            .copied()
+            .find(|&group| next & group != 0 && next & group != group)
+    }
+}
+
+/// Reads a reply to [`VENDOR_DIO`]: `None` from an image of ours that predates the command.
+pub fn parse_dio(reply: &[u8]) -> Result<Option<Dio>, DapError> {
+    match reply.first() {
+        Some(&ID_DAP_INVALID) => return Ok(None),
+        Some(&VENDOR_DIO) => {}
+        other => {
+            return Err(DapError::OutOfStep {
+                asked: VENDOR_DIO,
+                got: other.map_or_else(|| "empty".to_owned(), |id| format!("0x{id:02x}")),
+            });
+        }
+    }
+    let short = || DapError::Short {
+        command: VENDOR_DIO,
+        len: reply.len(),
+    };
+    let fixed = reply.get(1..7).ok_or_else(short)?;
+    let groups = reply.get(7..7 + usize::from(fixed[5])).ok_or_else(short)?;
+    Ok(Some(Dio {
+        accepted: fixed[0] == DAP_OK,
+        outputs: fixed[1],
+        levels: fixed[2],
+        read: fixed[3],
+        pins: fixed[4],
+        groups: groups.to_vec(),
+    }))
+}
+
+/// Sets the directions (1 an output) and the levels of the DIO pins in `mask`, and returns the
+/// pins as they are afterwards; a mask of 0 only reads. `None` from an image that predates them.
+pub fn dio(
+    link: &mut dyn DapLink,
+    mask: u8,
+    outputs: u8,
+    levels: u8,
+) -> Result<Option<Dio>, DapError> {
+    parse_dio(&link.exchange(&[VENDOR_DIO, mask, outputs & mask, levels & mask])?)
 }
 
 pub fn identify(link: &mut dyn DapLink) -> Result<Option<Ours>, DapError> {
@@ -469,6 +545,35 @@ mod tests {
         assert!(matches!(
             parse_identify(&identify_reply(4, "26ea505", &[0, 0x00, 0x06])),
             Err(DapError::Short { command: 0x82, .. })
+        ));
+    }
+
+    #[test]
+    fn a_dio_reply_carries_its_groups() {
+        let dio = parse_dio(&[0x8E, 0x00, 0x07, 0x05, 0x0D, 0x0F, 2, 0x07, 0x08])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            dio,
+            Dio {
+                accepted: true,
+                pins: 0x0F,
+                outputs: 0x07,
+                levels: 0x05,
+                read: 0x0D,
+                groups: vec![0x07, 0x08],
+            }
+        );
+        // Turning DIO0 back to an input alone would leave DIO1 and DIO2 driving.
+        assert_eq!(dio.split(0x01, 0x00), Some(0x07));
+        assert_eq!(dio.split(0x07, 0x00), None);
+        assert_eq!(dio.split(0x08, 0x08), None);
+        let refused = parse_dio(&[0x8E, 0xFF, 0, 0, 0, 0, 0]).unwrap().unwrap();
+        assert!(!refused.accepted && refused.pins == 0 && refused.groups.is_empty());
+        assert_eq!(parse_dio(&[0xFF]).unwrap(), None);
+        assert!(matches!(
+            parse_dio(&[0x8E, 0x00, 0x07, 0x05, 0x0D, 0x0F, 2, 0x07]),
+            Err(DapError::Short { command: 0x8E, .. })
         ));
     }
 

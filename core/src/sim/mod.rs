@@ -187,6 +187,13 @@ pub struct SimUnit {
     pub swd_jumper: bool,
     /// The two-pin scan formats ours offers, bit n for SCNFMT n, which a restart sets back.
     pub scan_formats: u32,
+    /// The DIO pins a Pro running ours drives, bit n for DIOn. A restart makes them inputs again.
+    pub dio_outputs: u8,
+    /// Each DIO pin's output level, which a restart clears.
+    pub dio_levels: u8,
+    /// What something attached holds the DIO pins at, which an input reads: low, the Pro's own
+    /// pull-downs, unless set.
+    pub dio_held: u8,
 }
 
 /// What ours offers after a restart: OScan1, OScan2 and OScan5.
@@ -357,6 +364,8 @@ impl World {
             }
             Event::Boot => {
                 self.units[unit].scan_formats = SIM_SCAN_FORMATS;
+                self.units[unit].dio_outputs = 0;
+                self.units[unit].dio_levels = 0;
                 let u = &self.units[unit];
                 // The ROM starts ISP mode when flash holds no image at all (UM11126, passive boot).
                 let blank = u
@@ -627,6 +636,14 @@ pub const SCENARIOS: &[(&str, &str)] = &[
         "one MCU-Link Pro running a current image of ours",
     ),
     (
+        "ours-pro-held",
+        "one MCU-Link Pro running a current image of ours, with something holding DIO3 high",
+    ),
+    (
+        "ours-plain",
+        "one plain MCU-Link running a current image of ours",
+    ),
+    (
         "pro-old",
         "one MCU-Link Pro running stock V3.108, which needs the jumper",
     ),
@@ -699,6 +716,9 @@ impl SimBus {
             stock_product: None,
             swd_jumper: false,
             scan_formats: SIM_SCAN_FORMATS,
+            dio_outputs: 0,
+            dio_levels: 0,
+            dio_held: 0,
         });
         world.units[index].mode = mode;
         if world.units[index].mode != Mode::Silent {
@@ -818,6 +838,11 @@ impl SimBus {
     }
 
     /// Makes a unit a board other than the plain MCU-Link, by the board byte ours reports.
+    /// Something attached holds these DIO pins high, bit n for DIOn, which they read as inputs.
+    pub fn hold_dio(&self, unit: usize, high: u8) {
+        self.world.lock().unwrap().units[unit].dio_held = high;
+    }
+
     pub fn set_board(&self, unit: usize, board: u8) {
         self.world().units[unit].board = Some(board);
     }
@@ -887,6 +912,15 @@ impl SimBus {
             "ours-pro" => {
                 let unit = bus.add_ours("26ea505");
                 bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK_PRO);
+            }
+            "ours-pro-held" => {
+                let unit = bus.add_ours("26ea505");
+                bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK_PRO);
+                bus.hold_dio(unit, 1 << 3);
+            }
+            "ours-plain" => {
+                let unit = bus.add_ours("26ea505");
+                bus.set_board(unit, crate::dap::Ours::BOARD_MCU_LINK);
             }
             "stock" => {
                 bus.add_stock("3.172");

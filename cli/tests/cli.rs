@@ -946,3 +946,101 @@ fn cjtag_refuses_stock() {
             "is stock V3.172, not running ours",
         ));
 }
+
+#[test]
+fn dio_reads_the_pins() {
+    tool("ours-pro")
+        .arg("dio")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DIO0  input   reads low"))
+        .stdout(predicate::str::contains("DIO1  input   reads low"))
+        .stdout(predicate::str::contains("DIO2  input   reads low"))
+        .stdout(predicate::str::contains("DIO3  input   reads low"))
+        .stdout(predicate::str::contains(
+            "Direction groups: DIO0, DIO1, DIO2; DIO3.",
+        ));
+}
+
+#[test]
+fn dio_drives_a_group() {
+    tool("ours-pro")
+        .args(["dio", "--high", "dio0,2", "--low", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DIO0  output  driven high"))
+        .stdout(predicate::str::contains("DIO1  output  driven low"))
+        .stdout(predicate::str::contains("DIO2  output  driven high"))
+        .stdout(predicate::str::contains("DIO3  input   reads low"));
+}
+
+#[test]
+fn dio_refuses_to_split_a_group() {
+    tool("ours-pro")
+        .args(["dio", "--high", "0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "DIO0, DIO1, DIO2 change direction together",
+        ));
+}
+
+#[test]
+fn dio_refuses_a_pin_named_twice() {
+    tool("ours-pro")
+        .args(["dio", "--high", "all", "--input", "3"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "DIO3 named in both --high and --input",
+        ));
+}
+
+#[test]
+fn dio_refuses_an_image_that_predates_it() {
+    tool("ours")
+        .arg("dio")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("which predates the DIO pins"));
+}
+
+#[test]
+fn dio_refuses_stock() {
+    tool("pro")
+        .arg("dio")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "is stock V3.172, not running ours",
+        ));
+}
+
+#[test]
+fn dio_reads_what_holds_an_input() {
+    tool("ours-pro-held")
+        .arg("dio")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DIO0  input   reads low"))
+        .stdout(predicate::str::contains("DIO3  input   reads high"));
+}
+
+#[test]
+fn dio_turns_a_group_to_input() {
+    tool("ours-pro")
+        .args(["dio", "--low", "3", "--input", "0,1,2"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DIO2  input   reads low"))
+        .stdout(predicate::str::contains("DIO3  output  driven low"));
+}
+
+#[test]
+fn dio_refuses_a_board_without_the_pins() {
+    tool("ours-plain")
+        .arg("dio")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is not an MCU-Link Pro"));
+}

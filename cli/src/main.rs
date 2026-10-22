@@ -121,6 +121,56 @@ enum Command {
     /// OScan1, which is what to look at on an analyser, and --formats picks a set, so that a host
     /// can be held to one format to test or compare it. A limit lasts until the unit restarts.
     Cjtag(CjtagArgs),
+    /// Drive and read the four DIO pins on an MCU-Link Pro's J19 header, on a unit running ours.
+    ///
+    /// With no options it reads them. --high and --low make pins outputs at that level, and
+    /// --input makes them inputs again. DIO0, DIO1 and DIO2 change direction together, and DIO3
+    /// on its own, so a change has to turn a whole group round. The pins keep their state between
+    /// debug sessions and go back to inputs when the unit restarts. LED6 (SIO) is lit while any
+    /// of them is driven.
+    Dio(DioArgs),
+}
+
+#[derive(Args)]
+struct DioArgs {
+    /// The unit, when more than one is attached.
+    #[arg(long)]
+    serial: Option<String>,
+    /// Drive these pins high: 0 to 3, as `--high 0,1`, or `dio0` to `dio3`, or `all`.
+    #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = parse_dio_pins)]
+    high: Vec<u8>,
+    /// Drive these pins low.
+    #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = parse_dio_pins)]
+    low: Vec<u8>,
+    /// Make these pins inputs.
+    #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = parse_dio_pins)]
+    input: Vec<u8>,
+}
+
+/// A DIO pin as a mask: `2`, `dio2` in any case, or `all`.
+fn parse_dio_pins(text: &str) -> Result<u8, String> {
+    if text.eq_ignore_ascii_case("all") {
+        return Ok(0x0F);
+    }
+    let digits = text
+        .get(..3)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("dio"))
+        .map_or(text, |_| &text[3..]);
+    match digits.parse::<u8>() {
+        Ok(n) if n < 4 && digits.bytes().all(|b| b.is_ascii_digit()) => Ok(1 << n),
+        _ => Err(format!(
+            "{text} is not a DIO pin: name one as 0 to 3, dio0 to dio3, or all"
+        )),
+    }
+}
+
+/// DIO pins by name, as `DIO0, DIO1`.
+fn dio_names(mask: u8) -> String {
+    (0..8)
+        .filter(|n| mask >> n & 1 != 0)
+        .map(|n| format!("DIO{n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(Args)]
@@ -406,6 +456,7 @@ fn run<B: Bus + Sync, H: Http>(
         Some(Command::Batch(args)) => batch(bus, github, args, cancel, stop),
         None | Some(Command::List) => list(bus, cli.verbose > 0),
         Some(Command::Cjtag(args)) => cjtag(bus, args),
+        Some(Command::Dio(args)) => dio(bus, args),
         Some(Command::Update(args)) => update_unit(bus, github, args, cancel),
         Some(Command::Isp(IspCommand::Enter { serial, stock })) => {
             bootloader(bus, serial.as_deref(), *stock, cancel)
@@ -1014,6 +1065,94 @@ fn cjtag<B: Bus>(bus: &B, args: &CjtagArgs) -> Result<()> {
         ""
     };
     indicatif_println!("{serial} offers two-pin {}{until}.", names.join(", "));
+    Ok(())
+}
+
+fn dio<B: Bus>(bus: &B, args: &DioArgs) -> Result<()> {
+    let fold = |pins: &[u8]| pins.iter().fold(0, |mask, pin| mask | pin);
+    let (high, low, input) = (fold(&args.high), fold(&args.low), fold(&args.input));
+    for (a, b, names) in [
+        (high, low, "--high and --low"),
+        (high, input, "--high and --input"),
+        (low, input, "--low and --input"),
+    ] {
+        if a & b != 0 {
+            bail!("{} named in both {names}", dio_names(a & b));
+        }
+    }
+    let units = detect_named(bus, args.serial.as_deref()).context("looking for MCU-Links")?;
+    let unit = update::select(&units, args.serial.as_deref())?;
+    let serial = unit.serial().unwrap_or("the unit");
+    let State::Probe {
+        firmware: Firmware::Ours(ours),
+        ..
+    } = &unit.state
+    else {
+        bail!(
+            "{serial} is {}, not running ours, so the tool cannot reach its DIO pins",
+            unit.state
+        );
+    };
+    if let Some(board) = ours.board
+        && board != dap::Ours::BOARD_MCU_LINK_PRO
+    {
+        bail!("{serial} is not an MCU-Link Pro, so it has no DIO pins");
+    }
+    let mut link = bus
+        .open_dap(&unit.device)
+        .with_context(|| format!("opening {serial}"))?;
+    let Some(before) =
+        dap::dio(&mut link, 0, 0, 0).with_context(|| format!("reading {serial}'s DIO pins"))?
+    else {
+        bail!(
+            "{serial} runs build {}, which predates the DIO pins: update it first",
+            ours.build
+        );
+    };
+    if before.pins == 0 {
+        if ours.board == Some(dap::Ours::BOARD_MCU_LINK_PRO) {
+            bail!(
+                "{serial} started with its USB-SIO jumper, J15, fitted, which turns the DIO pins off. Remove the jumper and replug the unit"
+            );
+        }
+        bail!("{serial} is not an MCU-Link Pro, so it has no DIO pins");
+    }
+    let mask = high | low | input;
+    let after = if mask == 0 {
+        before
+    } else {
+        if let Some(group) = before.split(mask, high | low) {
+            bail!(
+                "{} change direction together, so make them all outputs or all inputs",
+                dio_names(group)
+            );
+        }
+        let after = dap::dio(&mut link, mask, high | low, high)
+            .with_context(|| format!("setting {serial}'s DIO pins"))?
+            .with_context(|| format!("{serial} no longer knows the DIO command"))?;
+        if !after.accepted {
+            bail!("{serial} refused the change to {}", dio_names(mask));
+        }
+        after
+    };
+    indicatif_println!("{serial}'s DIO pins, on J19 pins 2 to 5:");
+    for n in 0..8 {
+        let bit = 1 << n;
+        if after.pins & bit == 0 {
+            continue;
+        }
+        let level = |on: bool| if on { "high" } else { "low" };
+        if after.outputs & bit != 0 {
+            indicatif_println!(
+                "  DIO{n}  output  driven {}",
+                level(after.levels & bit != 0)
+            );
+        } else {
+            indicatif_println!("  DIO{n}  input   reads {}", level(after.read & bit != 0));
+        }
+    }
+    let groups: Vec<String> = after.groups.iter().map(|&g| dio_names(g)).collect();
+    indicatif_println!("Direction groups: {}.", groups.join("; "));
     Ok(())
 }
 

@@ -91,6 +91,7 @@ verge batch                 # update each unit as it is plugged in, until Ctrl-C
 verge release               # the latest release, and how each unit compares
 verge inspect image.s19     # what an image puts into flash; touches no USB device
 verge cjtag --oscan1-only   # offer a host two-pin OScan1 alone, until the unit restarts
+verge dio --high all        # drive all four of a Pro's DIO pins high
 ```
 
 `update` asks before it downloads a release, and names the repository, the tag and the size.
@@ -104,6 +105,14 @@ one it prefers of those the target has too. `--oscan1-only` limits it to OScan1,
 analyser. `--formats` picks a set by name or number, `--formats oscan5` or `--formats 9,13`, so you
 can hold a host to one format to test it or compare it with another; OScan1 always stays. `--all`
 lifts the limit, and so does a restart.
+
+`dio` reads and drives the four DIO pins on an MCU-Link Pro's J19 header (pins 2 to 5), on a unit
+running ours. With no options it says what each pin is doing. `--high` and `--low` make pins
+outputs at that level, and `--input` makes them inputs. Name pins as `0` to `3`, `dio0` to `dio3`,
+or `all`. DIO0, DIO1 and DIO2 change direction together, and DIO3 on its own, so a change turns a
+whole group round: `--high 0` alone is refused while DIO1 and DIO2 are inputs. The pins keep their
+state between debug sessions, so one can hold a target's boot mode through a reset, and they go
+back to inputs when the unit restarts. The Pro's LED6 (SIO) is lit while any pin is driven.
 
 `update` refuses to install a release the unit already runs, or one older than it. Pass
 `--force` to install it anyway.
