@@ -117,7 +117,7 @@ enum Command {
     },
     /// Show or limit the two-pin (cJTAG) scan formats a unit running ours offers a host.
     ///
-    /// A host frames the fastest format both the unit and the target have. --oscan1-only leaves it
+    /// A host frames the format it prefers of those both the unit and the target have. --oscan1-only leaves it
     /// OScan1, which is what to look at on an analyser, and --formats picks a set, so that a host
     /// can be held to one format to test or compare it. A limit lasts until the unit restarts.
     Cjtag(CjtagArgs),

@@ -99,8 +99,8 @@ Without `--yes`, and without a terminal to answer at, nothing is downloaded. `ve
 asks the same two questions. A release downloaded once is kept, and needs no download question the next
 time (see "Releases").
 
-`cjtag` shows the two-pin (cJTAG) scan formats a unit running ours offers a host, which picks the
-fastest one the target has too. `--oscan1-only` limits it to OScan1, the format to look at on an
+`cjtag` shows the two-pin (cJTAG) scan formats a unit running ours offers a host. The host picks the
+one it prefers of those the target has too. `--oscan1-only` limits it to OScan1, the format to look at on an
 analyser. `--formats` picks a set by name or number, `--formats oscan5` or `--formats 9,13`, so you
 can hold a host to one format to test it or compare it with another; OScan1 always stays. `--all`
 lifts the limit, and so does a restart.
