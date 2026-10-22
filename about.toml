@@ -1,0 +1,22 @@
+# cargo-about's settings for THIRD-PARTY-LICENSES.html, which each release archive carries.
+# A dependency under a licence missing here fails the release build: check what it asks of a binary
+# before adding it.
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "0BSD",
+    "Unlicense",
+    "CDLA-Permissive-2.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    # File-level copyleft: the source of each MPL file stays available from the crate it ships in,
+    # which the page links.
+    "MPL-2.0",
+]

@@ -1,0 +1,202 @@
+# Builds verge and verge-gui for a version tag, signs each archive, and attaches them to the tag's
+# release:
+#
+#   verge-<tag>-<platform>.<tar.gz|zip>          both binaries, LICENSE, and
+#                                                THIRD-PARTY-LICENSES.html for what they link
+#   verge-<tag>-<platform>.<ext>.sha256          sha256sum's line for it
+#   verge-<tag>-<platform>.<ext>.minisig         minisign's signature; its trusted comment names
+#                                                the file and the tag
+#
+# Platforms: x86_64-linux (built on the oldest Ubuntu runner, so the binaries need no newer glibc
+# than it has), x86_64-windows, and universal-macos (arm64 and x86_64 joined by lipo).
+#
+# The same split as the firmware's release workflow, with the same key: `build` has no secret,
+# `sign` runs only minisign in the `release` environment, which holds the key and waits for a
+# required reviewer, and `publish` attaches the files without the key. No build cache, so nothing a
+# branch's workflow wrote can reach a release. README.md, "Releases", has the settings.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - platform: x86_64-linux
+            runner: ubuntu-22.04
+            targets: x86_64-unknown-linux-gnu
+          - platform: x86_64-windows
+            runner: windows-latest
+            targets: x86_64-pc-windows-msvc
+          - platform: universal-macos
+            runner: macos-latest
+            targets: aarch64-apple-darwin x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: The tag names the workspace's version
+        run: |
+          set -eu
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match the workspace version $version" >&2
+            exit 1
+          fi
+
+      - name: hidapi's build needs libudev
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+
+      - name: Install Rust
+        run: |
+          # GitHub's runners have rustup; act's images do not.
+          if ! command -v rustup > /dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          for target in ${{ matrix.targets }}; do rustup target add "$target"; done
+
+      - name: Install cargo-about
+        run: cargo install --locked cargo-about --features cli
+
+      - name: Build
+        run: |
+          set -eu
+          for target in ${{ matrix.targets }}; do
+            cargo build --release --locked --target "$target" -p verge -p verge-gui
+          done
+
+      - name: Package
+        run: |
+          set -eu
+          stem="verge-${GITHUB_REF_NAME}-${{ matrix.platform }}"
+          mkdir -p "pkg/$stem" out
+          set -- ${{ matrix.targets }}
+          case "${{ matrix.platform }}" in
+            universal-macos)
+              for tool in verge verge-gui; do
+                lipo -create -output "pkg/$stem/$tool" \
+                  "target/$1/release/$tool" "target/$2/release/$tool"
+              done
+              ;;
+            x86_64-windows)
+              cp "target/$1/release/verge.exe" "target/$1/release/verge-gui.exe" "pkg/$stem/"
+              ;;
+            *)
+              cp "target/$1/release/verge" "target/$1/release/verge-gui" "pkg/$stem/"
+              ;;
+          esac
+          cp LICENSE "pkg/$stem/"
+          # The licences of everything the binaries link, for every target in the archive.
+          about_targets=""
+          for target in ${{ matrix.targets }}; do about_targets="$about_targets --target $target"; done
+          # shellcheck disable=SC2086
+          cargo about generate --locked --fail $about_targets -o "pkg/$stem/THIRD-PARTY-LICENSES.html" about.hbs
+          if [ "${{ matrix.platform }}" = x86_64-windows ]; then
+            name="$stem.zip"
+            (cd pkg && 7z a -tzip "../out/$name" "$stem" > /dev/null)
+          else
+            name="$stem.tar.gz"
+            tar -C pkg -czf "out/$name" "$stem"
+          fi
+          (cd out && sha256sum "$name" > "$name.sha256")
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: archive-${{ matrix.platform }}
+          path: out/
+          if-no-files-found: error
+
+  sign:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      actions: read
+    steps:
+      # GitHub creates an environment named in a workflow on first use, with no protection. This
+      # catches that, not a hostile tag: a tag's own workflow decides this job's steps.
+      - name: Refuse an environment nobody has to approve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          reviewers=$(gh api "repos/$GITHUB_REPOSITORY/environments/release" --jq \
+            '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length')
+          if [ "$reviewers" -eq 0 ]; then
+            echo "the release environment has no required reviewer; nothing is signed" >&2
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: archive-*
+          path: out
+          merge-multiple: true
+
+      - name: Install minisign
+        run: sudo apt-get update && sudo apt-get install -y minisign
+
+      - name: Sign
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PUBLIC_KEY: ${{ vars.MINISIGN_PUBLIC_KEY }}
+        run: |
+          set -eu
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "the release environment has no MINISIGN_SECRET_KEY; nothing is published unsigned" >&2
+            exit 1
+          fi
+          key="$RUNNER_TEMP/minisign.key"
+          (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key")
+          for archive in out/*.tar.gz out/*.zip; do
+            name=$(basename "$archive")
+            minisign -S -s "$key" -m "$archive" -x "$archive.minisig" \
+              -t "file:$name tag:$GITHUB_REF_NAME"
+            if [ -n "$MINISIGN_PUBLIC_KEY" ]; then
+              minisign -V -P "$MINISIGN_PUBLIC_KEY" -m "$archive" -x "$archive.minisig"
+            fi
+          done
+          rm -f "$key"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: signatures
+          path: out/*.minisig
+          if-no-files-found: error
+
+  publish:
+    needs: sign
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: out
+          merge-multiple: true
+
+      - name: Attach to the release
+        run: |
+          set -eu
+          if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes ""
+          fi
+          gh release upload "$GITHUB_REF_NAME" --clobber out/*

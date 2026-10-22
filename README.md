@@ -76,6 +76,22 @@ The command line tool is `target/release/verge`, and the window is `target/relea
 On Linux, building needs the libudev headers (`libudev-dev` on Debian and Ubuntu,
 `systemd-devel` on Fedora). The HID library that talks to the bootloader uses them.
 
+### Releases of verge
+
+`.github/workflows/release.yml` builds verge and verge-gui when a tag `v<version>` is pushed, the
+version being the workspace's in `Cargo.toml`. Each release carries one archive a platform:
+x86_64 Linux (glibc 2.35 or newer), x86_64 Windows, and macOS for both Apple silicon and Intel in
+one binary. Each archive holds both tools, `LICENSE`, and `THIRD-PARTY-LICENSES.html` with the
+licence of every crate they are built from. Beside it are a `.sha256` file and a minisign
+signature, made with the same key as the firmware's releases. To check one:
+
+```
+minisign -V -P <the public key> -m verge-v0.1.0-x86_64-linux.tar.gz
+```
+
+The workflow signs as the firmware's does, in a `release` environment with a required reviewer,
+and needs the same settings in this repository: mculink-verge's README, "Releases", lists them.
+
 ## Using it
 
 ```
@@ -292,8 +308,7 @@ image is still loading ends the batch at once, since nothing has been flashed.
 
 ### Releases
 
-The tool looks for releases in `Escapement-Project/mculink-verge`, a placeholder until the
-repository is public. Point it elsewhere with `--repo OWNER/NAME` or `VERGE_REPO`. Public
+The tool looks for releases in `Escapement-Project/mculink-verge`. Point it elsewhere with `--repo OWNER/NAME` or `VERGE_REPO`. Public
 releases need no token. For a private repository, set `GITHUB_TOKEN`.
 
 A lookup or download that stalls fails with a message. The tool allows 15 seconds to connect,
