@@ -281,10 +281,12 @@ between two looks counts as never having left.
 
 ### The window
 
-`verge-gui` does the same in a window. The attached units are on the left. Pick one, and the
-right side shows what it runs, the way it can be updated, and the image to install: the latest
-release, the stock image from LinkServer, or a file. A file can also be dropped on the window,
-except under Wayland, which does not pass dropped files on; use FILE and its dialog there.
+`verge-gui` does the same in a window. The attached units are on the left. Select one to see its
+firmware, update path and image choices: RELEASE, STOCK or FILE. Browse for a file with FILE's
+dialog, or drop it on the window. This app cannot receive file drops under Wayland.
+
+Read the board and jumper advice, choose the update or install action shown, and confirm. The
+window shows download and flash progress. When it finishes, check the result and the log below.
 
 The window asks before it flashes. Where the release has to be downloaded first, the same
 question says so, and so does the batch view's. While a unit is being written, the window shows
