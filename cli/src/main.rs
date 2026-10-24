@@ -1288,7 +1288,7 @@ fn inspect(file: &FsPath) -> Result<()> {
     if let Some(header) = &image.header {
         indicatif_println!("  header {header:?}");
     }
-    for chunk in &image.chunks {
+    for chunk in image.chunks() {
         indicatif_println!(
             "  0x{:08x}..0x{:08x}  {} bytes",
             chunk.address,
