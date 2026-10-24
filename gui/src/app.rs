@@ -341,7 +341,7 @@ fn outline(ui: &mut Ui, words: &str, enabled: bool) -> egui::Response {
 
 impl VergeApp {
     pub fn new(backend: Box<dyn Backend>, log: Log, config: Config) -> VergeApp {
-        let stock = stock::find(&config.stock_dirs).into_iter().next();
+        let stock = stock::newest_from(&config.stock_dirs);
         let batch_form = BatchForm::new(&config.record_dir);
         let mut app = VergeApp {
             backend,
