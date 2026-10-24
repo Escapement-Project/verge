@@ -11,28 +11,28 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::filter::{EnvFilter, filter_fn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use verge_core::batch::{
+use verge_probe::batch::{
     ArmError, Armed, Batch, Board, Entry, Filter, Observer, OursFilter, Record, StockFilter,
     open_record,
 };
-use verge_core::board;
-use verge_core::cache::Cache;
-use verge_core::detect::{Guess, Hardware, State, detect_named};
-use verge_core::ids::Role;
-use verge_core::image::{Image, PAGE};
-use verge_core::paths::ISP_IDENTITY_WARNING;
-use verge_core::progress::{Progress, Step};
-use verge_core::release::{DEFAULT_REPO, GitHub, Http, Repo, Ureq};
+use verge_probe::board;
+use verge_probe::cache::Cache;
+use verge_probe::detect::{Guess, Hardware, State, detect_named};
+use verge_probe::ids::Role;
+use verge_probe::image::{Image, PAGE};
+use verge_probe::paths::ISP_IDENTITY_WARNING;
+use verge_probe::progress::{Progress, Step};
+use verge_probe::release::{DEFAULT_REPO, GitHub, Http, Repo, Ureq};
 #[cfg(feature = "simulate")]
-use verge_core::sim::http::SimHttp;
+use verge_probe::sim::http::SimHttp;
 #[cfg(feature = "simulate")]
-use verge_core::sim::{SCENARIOS, SimBus};
-use verge_core::source::{self, ImageVersion, LoadError, Loaded};
-use verge_core::update::{self, Outcome, Timing, UpdateError};
-use verge_core::usb::UsbBus;
-use verge_core::version::Relation;
-use verge_core::version::StockVersion;
-use verge_core::{Bus, Cancel, Firmware, Path, Unit, dap, detect, offer};
+use verge_probe::sim::{SCENARIOS, SimBus};
+use verge_probe::source::{self, ImageVersion, LoadError, Loaded};
+use verge_probe::update::{self, Outcome, Timing, UpdateError};
+use verge_probe::usb::UsbBus;
+use verge_probe::version::Relation;
+use verge_probe::version::StockVersion;
+use verge_probe::{Bus, Cancel, Firmware, Path, Unit, dap, detect, offer};
 
 use crate::progress::Bars;
 
@@ -347,9 +347,9 @@ fn init_tracing(verbose: u8) {
         // nusb logs a claim it could not make as an error of its own, which verge reports in its
         // own words where it matters: a unit another program holds is listed as such, and one not
         // asked for is left alone.
-        0 => "warn,nusb=off,verge_core=info",
+        0 => "warn,nusb=off,verge_probe=info",
         // The bootloader and USB crates log every packet at info, so they wait for -vv.
-        1 => "warn,verge_core=debug,verge=debug",
+        1 => "warn,verge_probe=debug,verge=debug",
         _ => "debug",
     };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));

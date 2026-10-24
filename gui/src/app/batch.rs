@@ -4,11 +4,11 @@
 use std::path::{Path as FsPath, PathBuf};
 
 use egui::{Color32, Margin, Stroke, Ui, vec2};
-use verge_core::batch::{self, Board, Filter, OursFilter, Record, Settled, StockFilter, Tally};
-use verge_core::paths::ISP_IDENTITY_WARNING;
-use verge_core::progress::{Cancel, Unit as StepUnit};
-use verge_core::source::{ImageVersion, Source};
-use verge_core::version::StockVersion;
+use verge_probe::batch::{self, Board, Filter, OursFilter, Record, Settled, StockFilter, Tally};
+use verge_probe::paths::ISP_IDENTITY_WARNING;
+use verge_probe::progress::{Cancel, Unit as StepUnit};
+use verge_probe::source::{ImageVersion, Source};
+use verge_probe::version::StockVersion;
 
 use super::{
     Choice, Current, Picked, VergeApp, edged, field, frame, kib, label, outline, slot, wrapping,

@@ -15,7 +15,7 @@ serde_json = "1.0.154"
 tracing = "0.1.44"
 tracing-indicatif = "0.3.14"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-verge-core = { version = "0.1.0", path = "../core" }
+verge-probe = { version = "0.1.0", path = "../../verge-probe" }
 
 [lints]
 workspace = true
@@ -23,7 +23,7 @@ workspace = true
 [features]
 # `--simulate`, the simulated bench. On for the tests, through the dev-dependency below, and for
 # development with `--features simulate`; off in release builds.
-simulate = ["verge-core/simulate"]
+simulate = ["verge-probe/simulate"]
 
 [dev-dependencies]
 verge = { path = ".", features = ["simulate"] }

@@ -11,13 +11,13 @@ use std::time::Duration;
 use egui::{Role, ViewportCommand, ViewportEvent, ViewportId, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
-use verge_core::Unit;
-use verge_core::cache::Cache;
-use verge_core::release::{Download, GitHub, Repo};
-use verge_core::sim::http::SimHttp;
-use verge_core::sim::{SimBus, SimFirmware, firmware_srecord};
-use verge_core::update::Outcome;
-use verge_core::version::StockVersion;
+use verge_probe::Unit;
+use verge_probe::cache::Cache;
+use verge_probe::release::{Download, GitHub, Repo};
+use verge_probe::sim::http::SimHttp;
+use verge_probe::sim::{SimBus, SimFirmware, firmware_srecord};
+use verge_probe::update::Outcome;
+use verge_probe::version::StockVersion;
 
 use crate::app::{Config, VergeApp};
 use crate::log::Log;
@@ -46,7 +46,7 @@ fn sim_app(bus: SimBus, stock_dirs: Vec<PathBuf>) -> VergeApp {
 /// A window on `bus`, with releases from `github`.
 fn app_on<H>(bus: SimBus, github: GitHub<H>, stock_dirs: Vec<PathBuf>) -> VergeApp
 where
-    H: verge_core::release::Http + Clone + Send + 'static,
+    H: verge_probe::release::Http + Clone + Send + 'static,
 {
     let worker = Worker::spawn(bus, github, || {});
     VergeApp::new(
@@ -231,7 +231,7 @@ fn a_unit_on_the_release_needs_install_anyway() {
 /// A window whose backend the test drives by hand, showing the one unit of `scenario`.
 fn manual_app(scenario: &str, release: bool) -> (VergeApp, Shared) {
     let bus = SimBus::scenario(scenario).unwrap();
-    let units: Vec<Unit> = verge_core::detect(&bus).unwrap();
+    let units: Vec<Unit> = verge_probe::detect(&bus).unwrap();
     let backend: Shared = Arc::new(Mutex::new(Manual::default()));
     {
         let mut manual = backend.lock().unwrap();
@@ -410,7 +410,7 @@ fn pictures() {
     press(&mut h, "CONFIRM");
     {
         let mut manual = backend.lock().unwrap();
-        use verge_core::progress::Step;
+        use verge_probe::progress::Step;
         manual.queued.push_back(Event::Start {
             step: Step::Download,
             total: 7000,
@@ -482,8 +482,8 @@ fn pictures() {
     shoot(&mut h, "13-batch-confirm");
     press(&mut h, "CONFIRM");
     {
-        use verge_core::batch::{Record, Tally};
-        use verge_core::progress::Step;
+        use verge_probe::batch::{Record, Tally};
+        use verge_probe::progress::Step;
         let mut manual = backend.lock().unwrap();
         manual.queued.push_back(Event::BatchArmed {
             name: "release v0.3.0 (mculink-verge-v0.3.0.s19)".into(),
@@ -493,7 +493,7 @@ fn pictures() {
                       serial: &str,
                       before: &str,
                       after: Option<&str>,
-                      result: verge_core::batch::Settled,
+                      result: verge_probe::batch::Settled,
                       reason: Option<&str>| {
             Event::BatchRecord(Box::new(Record {
                 time: "2026-10-20T14:26:08Z".into(),
@@ -512,7 +512,7 @@ fn pictures() {
             "QK7RM2VTX8D41",
             "stock V3.172",
             Some("ours, build v0.3.0"),
-            verge_core::batch::Settled::Updated,
+            verge_probe::batch::Settled::Updated,
             None,
         ));
         manual.queued.push_back(record(
@@ -520,10 +520,10 @@ fn pictures() {
             "CJ3E7AC4F5",
             "ours, build v0.3.0",
             None,
-            verge_core::batch::Settled::Current,
+            verge_probe::batch::Settled::Current,
             None,
         ));
-        manual.queued.push_back(record("1-4", "QK7RM2VTX8D45", "stock V3.108", None, verge_core::batch::Settled::Skipped, Some("needs the ISP jumper. Stock V3.108 has no jumper-free update. NXP added it in V3.122.")));
+        manual.queued.push_back(record("1-4", "QK7RM2VTX8D45", "stock V3.108", None, verge_probe::batch::Settled::Skipped, Some("needs the ISP jumper. Stock V3.108 has no jumper-free update. NXP added it in V3.122.")));
         manual.queued.push_back(Event::BatchStarting("1-2".into()));
         manual.queued.push_back(Event::Start {
             step: Step::Write,
@@ -546,7 +546,7 @@ fn pictures() {
     }
     shoot(&mut h, "14-batch-running");
     backend.lock().unwrap().queued.push_back(Event::BatchState(crate::worker::BatchState {
-        tally: verge_core::batch::Tally { updated: 1, current: 1, skipped: 1, failed: 1, waiting: 1 },
+        tally: verge_probe::batch::Tally { updated: 1, current: 1, skipped: 1, failed: 1, waiting: 1 },
         waiting: vec![("1-5".into(), Some("CJ3E7AE717".into()))],
         paused: Some("The unit at 1-2, a full MCU-Link, failed and is in ISP mode, maybe with a partial image. The batch waits until it is unplugged. In ISP mode the tool cannot tell its board, so flash it again with the batch's image, which is built for it: `verge isp flash --release v0.3.0`.".into()),
     }));
@@ -771,12 +771,12 @@ fn a_worker_that_dies_during_a_batch_lets_the_window_close() {
 #[derive(Clone)]
 struct Stalled {
     http: SimHttp,
-    release: verge_core::Cancel,
+    release: verge_probe::Cancel,
 }
 
 /// Lets a stalled download go when the test ends, passed or not, so that the worker it holds can
 /// be joined. Declared after the harness, it is dropped before it.
-struct Free(verge_core::Cancel);
+struct Free(verge_probe::Cancel);
 
 impl Drop for Free {
     fn drop(&mut self) {
@@ -784,12 +784,12 @@ impl Drop for Free {
     }
 }
 
-impl verge_core::release::Http for Stalled {
+impl verge_probe::release::Http for Stalled {
     fn get(
         &self,
         url: &str,
         headers: &[(&str, &str)],
-    ) -> Result<Vec<u8>, verge_core::release::HttpError> {
+    ) -> Result<Vec<u8>, verge_probe::release::HttpError> {
         if url.contains("/releases/download/") {
             let started = std::time::Instant::now();
             while !self.release.is_cancelled() && started.elapsed() < Duration::from_secs(60) {
@@ -800,10 +800,10 @@ impl verge_core::release::Http for Stalled {
     }
 }
 
-fn stalled_app() -> (VergeApp, verge_core::Cancel) {
+fn stalled_app() -> (VergeApp, verge_probe::Cancel) {
     let http = SimHttp::new(repo());
     http.publish_ours("v0.3.0");
-    let release = verge_core::Cancel::new();
+    let release = verge_probe::Cancel::new();
     let key = http.public_key();
     let stalled = Stalled {
         http,
@@ -912,7 +912,7 @@ fn ours_goes_on_a_pro_only_where_its_image_declares_it() {
     let pro = dir.join("pro.s19");
     std::fs::write(
         &pro,
-        verge_core::sim::firmware_srecord_declaring(&ours, 1 << 1),
+        verge_probe::sim::firmware_srecord_declaring(&ours, 1 << 1),
     )
     .unwrap();
     drop_file(&mut h, &plain);
@@ -939,7 +939,7 @@ fn a_unit_that_names_no_board_is_asked_about() {
 #[test]
 fn a_batch_adds_to_an_existing_record_file() {
     use crate::worker::{Backend, Request};
-    use verge_core::batch::{Board, Filter, OursFilter, StockFilter};
+    use verge_probe::batch::{Board, Filter, OursFilter, StockFilter};
     let dir = record_dir("append");
     let record = dir.join("record.jsonl");
     std::fs::write(&record, "{\"from\":\"an earlier batch\"}\n").unwrap();
@@ -952,7 +952,7 @@ fn a_batch_adds_to_an_existing_record_file() {
         || {},
     );
     worker.send(Request::Batch {
-        source: verge_core::Source::Release(None),
+        source: verge_probe::Source::Release(None),
         filter: Filter {
             board: Board::McuLink,
             stock: StockFilter::Any,
@@ -963,8 +963,8 @@ fn a_batch_adds_to_an_existing_record_file() {
         download: Download::Agreed,
         limit: Some(1),
         record: record.clone(),
-        stop: verge_core::Cancel::new(),
-        cancel: verge_core::Cancel::new(),
+        stop: verge_probe::Cancel::new(),
+        cancel: verge_probe::Cancel::new(),
     });
     let mut ended = None;
     for _ in 0..2000 {
@@ -1022,7 +1022,7 @@ fn batch_records_go_in_the_users_data_directory() {
 #[test]
 fn a_batch_makes_its_record_files_directory() {
     use crate::worker::{Backend, Request};
-    use verge_core::batch::{Board, Filter, OursFilter, StockFilter};
+    use verge_probe::batch::{Board, Filter, OursFilter, StockFilter};
     let dir = record_dir("made");
     let record = dir.join("not/there/yet/record.jsonl");
     let http = SimHttp::new(repo());
@@ -1034,7 +1034,7 @@ fn a_batch_makes_its_record_files_directory() {
         || {},
     );
     worker.send(Request::Batch {
-        source: verge_core::Source::Release(None),
+        source: verge_probe::Source::Release(None),
         filter: Filter {
             board: Board::McuLink,
             stock: StockFilter::Any,
@@ -1045,8 +1045,8 @@ fn a_batch_makes_its_record_files_directory() {
         download: Download::Agreed,
         limit: Some(1),
         record: record.clone(),
-        stop: verge_core::Cancel::new(),
-        cancel: verge_core::Cancel::new(),
+        stop: verge_probe::Cancel::new(),
+        cancel: verge_probe::Cancel::new(),
     });
     let mut ended = None;
     for _ in 0..2000 {
@@ -1128,7 +1128,7 @@ fn the_jumper_advice_names_the_board_and_the_image() {
     let pro = dir.join("pro.s19");
     std::fs::write(
         &pro,
-        verge_core::sim::firmware_srecord_declaring(&ours, 1 << 1),
+        verge_probe::sim::firmware_srecord_declaring(&ours, 1 << 1),
     )
     .unwrap();
     drop_file(&mut h, &plain);
@@ -1151,7 +1151,7 @@ fn the_question_names_the_boards_a_file_is_built_for() {
     let pro = dir.join("pro.s19");
     std::fs::write(
         &pro,
-        verge_core::sim::firmware_srecord_declaring(
+        verge_probe::sim::firmware_srecord_declaring(
             &SimFirmware::Ours {
                 build: "v0.3.0".into(),
             },
@@ -1172,7 +1172,7 @@ fn the_question_names_the_boards_a_file_is_built_for() {
 #[test]
 fn the_worker_refuses_an_undatable_batch_before_loading() {
     use crate::worker::{Backend, Request};
-    use verge_core::batch::{Board, Filter, OursFilter, StockFilter};
+    use verge_probe::batch::{Board, Filter, OursFilter, StockFilter};
     let dir = record_dir("undated");
     let record = dir.join("record.jsonl");
     let http = SimHttp::new(repo());
@@ -1182,7 +1182,7 @@ fn the_worker_refuses_an_undatable_batch_before_loading() {
         || {},
     );
     worker.send(Request::Batch {
-        source: verge_core::Source::Stock(Some(PathBuf::from("/nonexistent/probe_firmware"))),
+        source: verge_probe::Source::Stock(Some(PathBuf::from("/nonexistent/probe_firmware"))),
         filter: Filter {
             board: Board::McuLink,
             stock: StockFilter::Any,
@@ -1193,8 +1193,8 @@ fn the_worker_refuses_an_undatable_batch_before_loading() {
         download: Download::Agreed,
         limit: None,
         record: record.clone(),
-        stop: verge_core::Cancel::new(),
-        cancel: verge_core::Cancel::new(),
+        stop: verge_probe::Cancel::new(),
+        cancel: verge_probe::Cancel::new(),
     });
     let mut ended = None;
     for _ in 0..2000 {
@@ -1231,7 +1231,7 @@ fn the_question_names_the_boards_of_the_file_it_flashes() {
     };
     std::fs::write(
         &pro,
-        verge_core::sim::firmware_srecord_declaring(&ours, 1 << 1),
+        verge_probe::sim::firmware_srecord_declaring(&ours, 1 << 1),
     )
     .unwrap();
     std::fs::write(&plain, firmware_srecord(&ours)).unwrap();
@@ -1290,13 +1290,17 @@ fn cached_app(scenario: &str, cache: &Cache) -> (VergeApp, SimHttp) {
 }
 
 /// Puts `http`'s latest release in `cache`, as an earlier run would have.
-fn keep(http: &SimHttp, cache: &Cache) -> verge_core::release::Release {
+fn keep(http: &SimHttp, cache: &Cache) -> verge_probe::release::Release {
     let github = GitHub::new(http.clone(), repo(), None)
         .with_key(Some(http.public_key()))
         .with_cache(Some(cache.clone()));
     let release = github.latest().unwrap();
     github
-        .download(&release, Download::Agreed, &mut verge_core::progress::Quiet)
+        .download(
+            &release,
+            Download::Agreed,
+            &mut verge_probe::progress::Quiet,
+        )
         .unwrap();
     release
 }
@@ -1442,12 +1446,12 @@ struct Republished {
     switched: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl verge_core::release::Http for Republished {
+impl verge_probe::release::Http for Republished {
     fn get(
         &self,
         url: &str,
         headers: &[(&str, &str)],
-    ) -> Result<Vec<u8>, verge_core::release::HttpError> {
+    ) -> Result<Vec<u8>, verge_probe::release::HttpError> {
         if self.switched.load(std::sync::atomic::Ordering::SeqCst) {
             self.after.get(url, headers)
         } else {
@@ -1459,8 +1463,8 @@ impl verge_core::release::Http for Republished {
 /// A window on the `stock` bench whose cache keeps v0.3.0, and whose GitHub serves v0.3.0 again,
 /// signed by the same key for the same name and tag but of another size, once the flag is set.
 fn republished_app(name: &str) -> (VergeApp, Arc<std::sync::atomic::AtomicBool>, Cache) {
-    use verge_core::sim::firmware_image;
-    use verge_core::sim::http::{SimAsset, SimRelease};
+    use verge_probe::sim::firmware_image;
+    use verge_probe::sim::http::{SimAsset, SimRelease};
 
     let cache = Cache::at(record_dir(name));
     let _ = std::fs::remove_dir_all(cache.root());
@@ -1471,7 +1475,7 @@ fn republished_app(name: &str) -> (VergeApp, Arc<std::sync::atomic::AtomicBool>,
         build: "v0.3.0".into(),
     })
     .to_srecord("simulated, built again");
-    let sha = verge_core::image::Image::parse(image.as_bytes())
+    let sha = verge_probe::image::Image::parse(image.as_bytes())
         .unwrap()
         .sha256_hex();
     let file = "mculink-verge-v0.3.0.s19";

@@ -18,7 +18,7 @@ fn tool(scenario: &str) -> Command {
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../core/tests/fixtures")
+        .join("../../verge-probe/tests/fixtures")
         .join(name)
 }
 
@@ -407,7 +407,7 @@ fn ours_is_refused_for_a_pro() {
 
 /// A simulated image of ours in a file of its own, declaring `boards` where they are given.
 fn sim_image(name: &str, boards: Option<u32>) -> PathBuf {
-    use verge_core::sim::{SimFirmware, firmware_srecord, firmware_srecord_declaring};
+    use verge_probe::sim::{SimFirmware, firmware_srecord, firmware_srecord_declaring};
     let ours = SimFirmware::Ours {
         build: "v0.3.0".into(),
     };
@@ -422,7 +422,7 @@ fn sim_image(name: &str, boards: Option<u32>) -> PathBuf {
 
 /// A LinkServer-like directory holding the simulator's stock image of `version`.
 fn sim_stock_dir(name: &str, version: &str) -> PathBuf {
-    use verge_core::sim::{SimFirmware, firmware_srecord};
+    use verge_probe::sim::{SimFirmware, firmware_srecord};
     let dir = std::env::temp_dir().join(format!("verge-cli-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -431,7 +431,7 @@ fn sim_stock_dir(name: &str, version: &str) -> PathBuf {
             version.replace('.', "_")
         )),
         firmware_srecord(&SimFirmware::Stock {
-            version: verge_core::version::StockVersion::parse(version).unwrap(),
+            version: verge_probe::version::StockVersion::parse(version).unwrap(),
         }),
     )
     .unwrap();

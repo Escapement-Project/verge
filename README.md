@@ -348,8 +348,8 @@ another name. Naming the tag stops an old image being published again as a newer
 its own name. The tool also checks the image against the checksum file and against the digest
 GitHub keeps for every asset.
 
-The key is `RELEASE_KEY` in `core/src/release.rs`, the base64 line of minisign's `.pub` file. It
-is not set yet, so this build installs no release. A file or stock still works.
+The key is `RELEASE_KEY` in `verge-probe/src/release.rs`, the base64 line of minisign's `.pub`
+file. It is not set yet, so this build installs no release. A file or stock still works.
 
 The firmware repository publishes the releases. Its README, under "Releases", describes the
 workflow that builds, signs and attaches the three assets, how the key pair is made and kept, and
@@ -437,7 +437,7 @@ cargo fmt --all -- --check
 `.github/workflows/check.yml` runs these on every push and pull request, with a check that a
 release build leaves the simulator out and the Windows check below.
 
-No test opens a USB device. They run against a simulated bench (`core/src/sim/`): probes that
+No test opens a USB device. They run against `verge-probe`'s simulated bench: probes that
 answer with the identities recorded from the real units, a bootloader that keeps flash's rules,
 and a fake GitHub. Time on the simulated bench passes only when the tool waits. A test of a
 fifteen-second timeout takes no real time, and units can be plugged in and out on a schedule.
@@ -487,7 +487,7 @@ Two tests read real images and are skipped by default:
 ```
 VERGE_FIRMWARE_ELF=<firmware checkout>/build/mculink_cjtag.elf \
 VERGE_STOCK_S19=<LinkServer>/MCU-LINK/probe_firmware/MCU-LINK_CMSIS-DAP_V3_172.s19 \
-    cargo test -p verge-core --test image -- --ignored
+    cargo test --manifest-path ../verge-probe/Cargo.toml --test image -- --ignored
 ```
 
 They hold the image reader to `arm-none-eabi-objcopy`'s reading of the same files.

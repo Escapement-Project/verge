@@ -7,14 +7,14 @@ use std::time::Duration;
 use std::io::Write as _;
 use std::path::PathBuf;
 
-use verge_core::batch::{
+use verge_probe::batch::{
     ArmError, Armed, Batch, Entry, Filter, Observer, Record, Status, Tally, open_record,
 };
-use verge_core::progress::{Cancel, Progress, Step};
-use verge_core::release::{Download, GitHub, Http, Release, ReleaseError};
-use verge_core::source::{self, LoadError, Loaded, Source};
-use verge_core::update::{self, Outcome, Timing, UpdateError};
-use verge_core::{Bus, Unit, detect};
+use verge_probe::progress::{Cancel, Progress, Step};
+use verge_probe::release::{Download, GitHub, Http, Release, ReleaseError};
+use verge_probe::source::{self, LoadError, Loaded, Source};
+use verge_probe::update::{self, Outcome, Timing, UpdateError};
+use verge_probe::{Bus, Unit, detect};
 
 pub enum Request {
     Detect,
