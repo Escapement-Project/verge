@@ -487,7 +487,7 @@ Two tests read real images and are skipped by default:
 ```
 VERGE_FIRMWARE_ELF=<firmware checkout>/build/mculink_cjtag.elf \
 VERGE_STOCK_S19=<LinkServer>/MCU-LINK/probe_firmware/MCU-LINK_CMSIS-DAP_V3_172.s19 \
-    cargo test --manifest-path ../verge-probe/Cargo.toml --test image -- --ignored
+    cargo test --manifest-path ../../Escapement-Projects/verge-probe/Cargo.toml --test image -- --ignored
 ```
 
 They hold the image reader to `arm-none-eabi-objcopy`'s reading of the same files.
