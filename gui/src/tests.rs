@@ -28,6 +28,62 @@ fn repo() -> Repo {
     "someone/mculink-verge".parse().unwrap()
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn a_record_failure_stops_the_worker_before_the_next_unit() {
+    use crate::worker::{Backend, Request};
+    use verge_probe::batch::{Board, Filter, OursFilter, StockFilter};
+    use verge_probe::{Cancel, Source};
+
+    let bus = SimBus::scenario("arrivals").unwrap();
+    let http = SimHttp::new(repo());
+    http.publish_ours("v0.3.0");
+    let key = http.public_key();
+    let mut worker = Worker::spawn(
+        bus,
+        GitHub::new(http, repo(), None).with_key(Some(key)),
+        || {},
+    );
+    let stop = Cancel::new();
+    worker.send(Request::Batch {
+        source: Source::Release(None),
+        filter: Filter {
+            board: Board::McuLink,
+            stock: StockFilter::Any,
+            ours: OursFilter::Any,
+            bootloaders: false,
+            attached: false,
+        },
+        download: Download::Agreed,
+        limit: None,
+        record: "/dev/full".into(),
+        stop: stop.clone(),
+        cancel: Cancel::new(),
+    });
+    let mut started = 0;
+    for _ in 0..400 {
+        while let Some(event) = worker.try_recv() {
+            match event {
+                Event::BatchStarting(_) => started += 1,
+                Event::BatchEnded(result) => {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .contains("writing the batch record file")
+                    );
+                    assert!(stop.is_cancelled());
+                    assert_eq!(started, 1);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    stop.cancel();
+    panic!("the batch did not stop after its record failed");
+}
+
 /// How a question opens where the simulated release has to be downloaded first. The size
 /// follows it.
 const DOWNLOAD: &str = "Download release v0.3.0 of someone/mculink-verge from GitHub (";

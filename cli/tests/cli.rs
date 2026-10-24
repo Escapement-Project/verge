@@ -264,6 +264,17 @@ fn temp_record(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("verge-cli-{}-{name}.jsonl", std::process::id()))
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_record_write_stops_the_batch() {
+    tool("arrivals")
+        .args(["batch", "--yes", "--count", "3", "--record", "/dev/full"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("writing the batch record file"))
+        .stdout(predicate::str::contains("Batch done:").not());
+}
+
 #[test]
 fn a_batch_updates_each_unit_as_it_arrives_and_records_it() {
     let record = temp_record("batch");

@@ -12,8 +12,8 @@ use tracing_subscriber::filter::{EnvFilter, filter_fn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use verge_probe::batch::{
-    ArmError, Armed, Batch, Board, Entry, Filter, Observer, OursFilter, Record, StockFilter,
-    open_record,
+    ArmError, Armed, Batch, Board, Entry, Filter, Observer, OursFilter, Record, RecordWriter,
+    StockFilter, open_record,
 };
 use verge_probe::board;
 use verge_probe::cache::Cache;
@@ -810,7 +810,9 @@ fn flash<B: Bus, H: Http>(
 /// A batch's output: bars for the unit under way, a line and a record line for each unit.
 struct BatchOutput {
     bars: Bars,
-    record: std::io::BufWriter<std::fs::File>,
+    record: RecordWriter<std::io::BufWriter<std::fs::File>>,
+    record_error: Option<std::io::Error>,
+    stop: Cancel,
 }
 
 impl Progress for BatchOutput {
@@ -839,13 +841,12 @@ impl Observer for BatchOutput {
 
     fn record(&mut self, record: &Record) {
         self.bars.clear();
-        use std::io::Write as _;
-        let written = serde_json::to_writer(&mut self.record, record)
-            .map_err(std::io::Error::from)
-            .and_then(|()| writeln!(self.record))
-            .and_then(|()| self.record.flush());
-        if let Err(error) = written {
+        if self.record_error.is_none()
+            && let Err(error) = self.record.write(record)
+        {
             tracing::error!("the record file: {error}");
+            self.record_error = Some(error);
+            self.stop.cancel();
         }
         let serial = match (&record.serial_before, &record.serial_after) {
             (Some(before), Some(after)) if before != after => format!("{before} -> {after}"),
@@ -979,7 +980,9 @@ fn batch<B: Bus + Sync, H: Http>(
         .with_context(|| format!("opening the record file {}", path.display()))?;
     let mut output = BatchOutput {
         bars: Bars::default(),
-        record: std::io::BufWriter::new(file),
+        record: RecordWriter::new(std::io::BufWriter::new(file)),
+        record_error: None,
+        stop: stop.clone(),
     };
     indicatif_println!(
         "Armed: {name}, for {}. Recording to {}. Plug units in; Ctrl-C stops taking new ones.",
@@ -995,7 +998,11 @@ fn batch<B: Bus + Sync, H: Http>(
         cancel.clone(),
         args.count,
     )?;
-    batch.run_to_end(&mut output)?;
+    let result = batch.run_to_end(&mut output);
+    if let Some(error) = output.record_error {
+        return Err(error).context("writing the batch record file");
+    }
+    result?;
     let tally = batch.tally();
     indicatif_println!("Batch done: {tally}.");
     if tally.failed > 0 {

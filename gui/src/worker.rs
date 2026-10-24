@@ -4,11 +4,11 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel}
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use std::io::Write as _;
 use std::path::PathBuf;
 
 use verge_probe::batch::{
-    ArmError, Armed, Batch, Entry, Filter, Observer, Record, Status, Tally, open_record,
+    ArmError, Armed, Batch, Entry, Filter, Observer, Record, RecordWriter, Status, Tally,
+    open_record,
 };
 use verge_probe::progress::{Cancel, Progress, Step};
 use verge_probe::release::{Download, GitHub, Http, Release, ReleaseError};
@@ -312,7 +312,9 @@ fn install<B: Bus, H: Http + Clone + Send + 'static>(
 /// A batch's events, and its record file.
 struct BatchForward<'a, 'b> {
     forward: &'a mut Forward<'b>,
-    record: std::io::BufWriter<std::fs::File>,
+    record: RecordWriter<std::io::BufWriter<std::fs::File>>,
+    record_error: Option<std::io::Error>,
+    stop: Cancel,
 }
 
 impl Progress for BatchForward<'_, '_> {
@@ -337,12 +339,12 @@ impl Observer for BatchForward<'_, '_> {
     }
 
     fn record(&mut self, record: &Record) {
-        let written = serde_json::to_writer(&mut self.record, record)
-            .map_err(std::io::Error::from)
-            .and_then(|()| writeln!(self.record))
-            .and_then(|()| self.record.flush());
-        if let Err(error) = written {
+        if self.record_error.is_none()
+            && let Err(error) = self.record.write(record)
+        {
             tracing::error!("the record file: {error}");
+            self.record_error = Some(error);
+            self.stop.cancel();
         }
         tracing::info!("{}: {}", record.port, record.result);
         self.forward
@@ -436,7 +438,9 @@ fn run_batch<B: Bus + Sync, H: Http + Clone + Send + 'static>(
     .map_err(|error| arm_error(&error))?;
     let mut observer = BatchForward {
         forward,
-        record: std::io::BufWriter::new(file),
+        record: RecordWriter::new(std::io::BufWriter::new(file)),
+        record_error: None,
+        stop: stop.clone(),
     };
     let mut shown = None;
     let mut stepped = Ok(());
@@ -449,6 +453,9 @@ fn run_batch<B: Bus + Sync, H: Http + Clone + Send + 'static>(
         }
     }
     batch.close(&mut observer);
+    if let Some(error) = observer.record_error {
+        return Err(format!("writing the batch record file: {error}"));
+    }
     stepped.map_err(|e| e.to_string())?;
     Ok(batch.tally())
 }
