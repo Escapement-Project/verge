@@ -190,7 +190,7 @@ fn version_of(unit: &Unit) -> Option<String> {
         State::Probe {
             firmware: Firmware::Ours(ours),
             ..
-        } => Some(ours.build.clone()),
+        } => Some(ours.firmware.clone()),
         State::Probe {
             firmware: Firmware::Stock { version },
             ..

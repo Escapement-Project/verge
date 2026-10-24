@@ -1035,10 +1035,10 @@ fn cjtag<B: Bus>(bus: &B, args: &CjtagArgs) -> Result<()> {
             unit.state
         );
     };
-    if ours.scan_formats.is_none() {
+    if ours.version < 4 {
         bail!(
             "{serial} runs build {}, older than the scan formats: it frames OScan1 alone",
-            ours.build
+            ours.firmware
         );
     }
     let mut link = bus
@@ -1093,7 +1093,7 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs) -> Result<()> {
             unit.state
         );
     };
-    if let Some(board) = ours.board
+    if let Some(board) = ours.board.map(verge_probe::BoardKind::number)
         && board != dap::Ours::BOARD_MCU_LINK_PRO
     {
         bail!("{serial} is not an MCU-Link Pro, so it has no DIO pins");
@@ -1106,11 +1106,11 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs) -> Result<()> {
     else {
         bail!(
             "{serial} runs build {}, which predates the DIO pins: update it first",
-            ours.build
+            ours.firmware
         );
     };
     if before.pins == 0 {
-        if ours.board == Some(dap::Ours::BOARD_MCU_LINK_PRO) {
+        if ours.board.map(verge_probe::BoardKind::number) == Some(dap::Ours::BOARD_MCU_LINK_PRO) {
             bail!(
                 "{serial} started with its USB-SIO jumper, J15, fitted, which turns the DIO pins off. Remove the jumper and replug the unit"
             );
@@ -1130,7 +1130,7 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs) -> Result<()> {
         let after = dap::dio(&mut link, mask, high | low, high)
             .with_context(|| format!("setting {serial}'s DIO pins"))?
             .with_context(|| format!("{serial} no longer knows the DIO command"))?;
-        if !after.accepted {
+        if !after.accepted() {
             bail!("{serial} refused the change to {}", dio_names(mask));
         }
         after
