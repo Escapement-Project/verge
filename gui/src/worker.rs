@@ -57,20 +57,36 @@ pub struct JobError {
 }
 
 #[derive(Clone, Debug)]
-pub enum Event {
-    Units(Result<Vec<Unit>, String>),
-    Release(Result<Box<Release>, String>),
-    Loaded(String),
+pub enum ProgressEvent {
     Plan(Vec<Step>),
     Start { step: Step, total: u64 },
     Advance(u64),
     Note(String),
+}
+
+#[derive(Clone, Debug)]
+pub enum InstallEvent {
+    Loaded(String),
     Finished(Result<Outcome, JobError>),
-    BatchArmed { name: String, filter: String },
-    BatchStarting(String),
-    BatchRecord(Box<Record>),
-    BatchState(BatchState),
-    BatchEnded(Result<Tally, String>),
+}
+
+#[derive(Clone, Debug)]
+pub enum BatchEvent {
+    Armed { name: String, filter: String },
+    Starting(String),
+    Record(Box<Record>),
+    State(BatchState),
+    Ended(Result<Tally, String>),
+}
+
+#[derive(Clone, Debug)]
+pub enum Event {
+    Units(Result<Vec<Unit>, String>),
+    Release(Result<Box<Release>, String>),
+    Progress(ProgressEvent),
+    Install(InstallEvent),
+    Batch(BatchEvent),
+    WorkerFailed(JobError),
 }
 
 /// What the window talks to: a worker thread, or in tests a hand-driven stand-in.
@@ -95,16 +111,16 @@ impl Forward<'_> {
 
 impl Progress for Forward<'_> {
     fn plan(&mut self, steps: &[Step]) {
-        self.send(Event::Plan(steps.to_vec()));
+        self.send(Event::Progress(ProgressEvent::Plan(steps.to_vec())));
     }
     fn start(&mut self, step: Step, total: u64) {
-        self.send(Event::Start { step, total });
+        self.send(Event::Progress(ProgressEvent::Start { step, total }));
     }
     fn advance(&mut self, done: u64) {
-        self.send(Event::Advance(done));
+        self.send(Event::Progress(ProgressEvent::Advance(done)));
     }
     fn note(&mut self, text: &str) {
-        self.send(Event::Note(text.to_owned()));
+        self.send(Event::Progress(ProgressEvent::Note(text.to_owned())));
     }
 }
 
@@ -125,16 +141,16 @@ impl Relay {
 
 impl Progress for Relay {
     fn plan(&mut self, steps: &[Step]) {
-        self.send(Event::Plan(steps.to_vec()));
+        self.send(Event::Progress(ProgressEvent::Plan(steps.to_vec())));
     }
     fn start(&mut self, step: Step, total: u64) {
-        self.send(Event::Start { step, total });
+        self.send(Event::Progress(ProgressEvent::Start { step, total }));
     }
     fn advance(&mut self, done: u64) {
-        self.send(Event::Advance(done));
+        self.send(Event::Progress(ProgressEvent::Advance(done)));
     }
     fn note(&mut self, text: &str) {
-        self.send(Event::Note(text.to_owned()));
+        self.send(Event::Progress(ProgressEvent::Note(text.to_owned())));
     }
 }
 
@@ -295,7 +311,7 @@ fn install<B: Bus, H: Http + Clone + Send + 'static>(
         advice: None,
         left_in_isp: false,
     })?;
-    progress.send(Event::Loaded(loaded.name.clone()));
+    progress.send(Event::Install(InstallEvent::Loaded(loaded.name.clone())));
     tracing::info!("installing {}", loaded.name);
     update::install(
         bus,
@@ -335,7 +351,8 @@ impl Progress for BatchForward<'_, '_> {
 impl Observer for BatchForward<'_, '_> {
     fn starting(&mut self, entry: &Entry) {
         tracing::info!("{}: updating", entry.port);
-        self.forward.send(Event::BatchStarting(entry.port.clone()));
+        self.forward
+            .send(Event::Batch(BatchEvent::Starting(entry.port.clone())));
     }
 
     fn record(&mut self, record: &Record) {
@@ -348,7 +365,7 @@ impl Observer for BatchForward<'_, '_> {
         }
         tracing::info!("{}: {}", record.port, record.result);
         self.forward
-            .send(Event::BatchRecord(Box::new(record.clone())));
+            .send(Event::Batch(BatchEvent::Record(Box::new(record.clone()))));
     }
 
     fn paused(&mut self, reason: Option<&str>) {
@@ -421,10 +438,10 @@ fn run_batch<B: Bus + Sync, H: Http + Clone + Send + 'static>(
     }
     let file = open_record(record)
         .map_err(|e| format!("opening the record file {}: {e}", record.display()))?;
-    forward.send(Event::BatchArmed {
+    forward.send(Event::Batch(BatchEvent::Armed {
         name: armed.name.clone(),
         filter: filter.describe(),
-    });
+    }));
     tracing::info!("armed: {}, for {}", armed.name, filter.describe());
     let mut batch = Batch::arm(
         bus,
@@ -448,7 +465,9 @@ fn run_batch<B: Bus + Sync, H: Http + Clone + Send + 'static>(
         stepped = batch.step(&mut observer);
         let now = state(&batch);
         if shown.as_ref() != Some(&now) {
-            observer.forward.send(Event::BatchState(now.clone()));
+            observer
+                .forward
+                .send(Event::Batch(BatchEvent::State(now.clone())));
             shown = Some(now);
         }
     }
@@ -500,7 +519,7 @@ fn serve<B: Bus + Sync, H: Http + Clone + Send + 'static>(
                     Ok(_) => tracing::info!("the update finished"),
                     Err(error) => tracing::error!("{}", error.message),
                 }
-                forward.send(Event::Finished(result));
+                forward.send(Event::Install(InstallEvent::Finished(result)));
             }
             Request::Batch {
                 source,
@@ -526,7 +545,7 @@ fn serve<B: Bus + Sync, H: Http + Clone + Send + 'static>(
                 if let Err(error) = &result {
                     tracing::error!("the batch stopped: {error}");
                 }
-                forward.send(Event::BatchEnded(result));
+                forward.send(Event::Batch(BatchEvent::Ended(result)));
             }
         }
     }
@@ -581,13 +600,13 @@ impl Backend for Worker {
                         .or_else(|| panic.downcast_ref::<String>().cloned())
                         .unwrap_or_else(|| "no message".into());
                     tracing::error!("the USB worker stopped: {text}");
-                    return Some(Event::Finished(Err(JobError {
+                    return Some(Event::WorkerFailed(JobError {
                         message: format!("the USB worker stopped unexpectedly: {text}"),
                         advice: Some(
                             "Restart the tool. If a flash was under way, flash the unit again.",
                         ),
                         left_in_isp: true,
-                    })));
+                    }));
                 }
                 None
             }

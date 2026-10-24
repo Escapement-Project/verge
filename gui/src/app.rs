@@ -23,7 +23,7 @@ use verge_probe::{Path, Unit, offer};
 use crate::glyph::{self, Glyph};
 use crate::log::Log;
 use crate::style::{self, Role, color, space, text};
-use crate::worker::{Backend, Event, JobError, Request};
+use crate::worker::{Backend, BatchEvent, Event, InstallEvent, JobError, ProgressEvent, Request};
 
 mod batch;
 
@@ -82,6 +82,33 @@ struct Job {
     cancel: Cancel,
 }
 
+#[derive(Default)]
+enum Operation {
+    #[default]
+    Idle,
+    Installing(Job),
+    Batch(BatchRun),
+}
+
+impl Operation {
+    fn job(&self) -> Option<&Job> {
+        match self {
+            Self::Installing(job) => Some(job),
+            _ => None,
+        }
+    }
+
+    fn take_job(&mut self) -> Option<Job> {
+        if !matches!(self, Self::Installing(_)) {
+            return None;
+        }
+        match std::mem::take(self) {
+            Self::Installing(job) => Some(job),
+            _ => unreachable!(),
+        }
+    }
+}
+
 struct Ended {
     result: Result<Outcome, JobError>,
     target: String,
@@ -138,6 +165,7 @@ pub struct VergeApp {
     config: Config,
     units: Vec<Unit>,
     scan: Scan,
+    worker_error: Option<String>,
     selected: Option<String>,
     release: Option<Result<Release, String>>,
     stock: Option<StockImage>,
@@ -145,7 +173,7 @@ pub struct VergeApp {
     picked: Option<Picked>,
     force: bool,
     confirming: Option<Confirming>,
-    job: Option<Job>,
+    operation: Operation,
     ended: Option<Ended>,
     close_pending: bool,
     log_open: bool,
@@ -154,7 +182,7 @@ pub struct VergeApp {
     notice: Option<String>,
     view: View,
     batch_form: BatchForm,
-    batch: Option<BatchRun>,
+    last_batch: Option<BatchRun>,
 }
 
 fn kib(bytes: u64) -> String {
@@ -321,6 +349,7 @@ impl VergeApp {
             config,
             units: Vec::new(),
             scan: Scan::Scanning,
+            worker_error: None,
             selected: None,
             release: None,
             stock,
@@ -328,7 +357,7 @@ impl VergeApp {
             picked: None,
             force: false,
             confirming: None,
-            job: None,
+            operation: Operation::Idle,
             ended: None,
             close_pending: false,
             log_open: false,
@@ -337,7 +366,7 @@ impl VergeApp {
             notice: None,
             view: View::Units,
             batch_form,
-            batch: None,
+            last_batch: None,
         };
         app.backend.send(Request::Detect);
         app.backend.send(Request::Release);
@@ -347,10 +376,17 @@ impl VergeApp {
     /// Whether an update or a batch is running, which holds the window open.
     #[must_use]
     pub fn busy(&self) -> bool {
-        self.job.is_some() || self.batch.as_ref().is_some_and(BatchRun::running)
+        match &self.operation {
+            Operation::Idle => false,
+            Operation::Installing(_) => true,
+            Operation::Batch(run) => run.running(),
+        }
     }
 
     fn rescan(&mut self) {
+        if self.worker_error.is_some() {
+            return;
+        }
         self.scan = Scan::Scanning;
         self.backend.send(Request::Detect);
     }
@@ -386,34 +422,46 @@ impl VergeApp {
             }
             Event::Units(Err(error)) => self.scan = Scan::Failed(error),
             Event::Release(release) => self.release = Some(release.map(|r| *r)),
-            Event::Loaded(name) => {
-                if let Some(job) = &mut self.job {
+            Event::Install(InstallEvent::Loaded(name)) => {
+                if let Operation::Installing(job) = &mut self.operation {
                     job.image = Some(name);
                 }
             }
-            Event::Plan(_) | Event::Start { .. } | Event::Advance(_)
-                if self.job.is_none() && self.batch.is_some() =>
-            {
-                if let Some(run) = &mut self.batch {
-                    run.progress(event, now);
-                }
+            Event::Progress(progress) => self.progress(progress, now),
+            Event::Batch(event) => {
+                self.batch_event(event, now);
             }
-            Event::BatchArmed { .. }
-            | Event::BatchStarting(_)
-            | Event::BatchRecord(_)
-            | Event::BatchState(_)
-            | Event::BatchEnded(_) => {
-                let ended = matches!(event, Event::BatchEnded(_));
-                if let Some(run) = &mut self.batch {
-                    run.handle(event, now);
-                }
-                if ended {
-                    self.rescan();
-                }
+            Event::Install(InstallEvent::Finished(result)) => {
+                self.finish_job(result, now);
+                self.rescan();
             }
-            Event::Plan(steps) => {
-                if let Some(job) = &mut self.job {
-                    let downloaded = job.finished.iter().any(|(s, _)| *s == Step::Download)
+            Event::WorkerFailed(error) => {
+                self.worker_error = Some(error.message.clone());
+                self.finish_job(Err(error.clone()), now);
+                self.batch_event(BatchEvent::Ended(Err(error.message.clone())), now);
+                self.scan = Scan::Failed(error.message.clone());
+                if self.release.is_none() {
+                    self.release = Some(Err(error.message.clone()));
+                }
+                self.notice = Some(error.message);
+            }
+        }
+    }
+
+    fn batch(&self) -> Option<&BatchRun> {
+        match &self.operation {
+            Operation::Batch(run) => Some(run),
+            _ => self.last_batch.as_ref(),
+        }
+    }
+
+    fn progress(&mut self, event: ProgressEvent, now: f64) {
+        match &mut self.operation {
+            Operation::Idle => {}
+            Operation::Batch(run) => run.progress(event, now),
+            Operation::Installing(job) => match event {
+                ProgressEvent::Plan(steps) => {
+                    let downloaded = job.finished.iter().any(|(step, _)| *step == Step::Download)
                         || job
                             .current
                             .as_ref()
@@ -424,9 +472,7 @@ impl VergeApp {
                         steps
                     };
                 }
-            }
-            Event::Start { step, total } => {
-                if let Some(job) = &mut self.job {
+                ProgressEvent::Start { step, total } => {
                     if let Some(current) = job.current.take() {
                         job.finished.push((current.step, now - current.since));
                     }
@@ -437,48 +483,49 @@ impl VergeApp {
                         since: now,
                     });
                 }
-            }
-            Event::Advance(done) => {
-                if let Some(current) = self.job.as_mut().and_then(|j| j.current.as_mut()) {
-                    current.done = done;
-                }
-            }
-            Event::Note(note) => {
-                if let Some(job) = &mut self.job {
-                    job.notes.push(note);
-                }
-            }
-            // The worker reports its own death this way, whatever it was doing.
-            Event::Finished(Err(error))
-                if self.job.is_none() && self.batch.as_ref().is_some_and(BatchRun::running) =>
-            {
-                if let Some(run) = &mut self.batch {
-                    run.handle(Event::BatchEnded(Err(error.message)), now);
-                }
-                self.rescan();
-            }
-            Event::Finished(result) => {
-                if let Some(mut job) = self.job.take() {
-                    if let Some(current) = job.current.take() {
-                        job.finished.push((current.step, now - current.since));
+                ProgressEvent::Advance(done) => {
+                    if let Some(current) = &mut job.current {
+                        current.done = done;
                     }
-                    self.ended = Some(Ended {
-                        result,
-                        target: job.target,
-                        location: job.location,
-                        image: job.image,
-                        seconds: now - job.started,
-                        steps: job.finished,
-                        notes: job.notes,
-                    });
                 }
-                self.rescan();
+                ProgressEvent::Note(note) => job.notes.push(note),
+            },
+        }
+    }
+
+    fn finish_job(&mut self, result: Result<Outcome, JobError>, now: f64) {
+        if let Some(mut job) = self.operation.take_job() {
+            if let Some(current) = job.current.take() {
+                job.finished.push((current.step, now - current.since));
             }
+            self.ended = Some(Ended {
+                result,
+                target: job.target,
+                location: job.location,
+                image: job.image,
+                seconds: now - job.started,
+                steps: job.finished,
+                notes: job.notes,
+            });
+        }
+    }
+
+    fn batch_event(&mut self, event: BatchEvent, now: f64) {
+        let Operation::Batch(run) = &mut self.operation else {
+            return;
+        };
+        let ended = matches!(event, BatchEvent::Ended(_));
+        run.handle(event, now);
+        if ended {
+            if let Operation::Batch(run) = std::mem::take(&mut self.operation) {
+                self.last_batch = Some(run);
+            }
+            self.rescan();
         }
     }
 
     fn take_file(&mut self, path: PathBuf) {
-        if self.job.is_some() {
+        if self.operation.job().is_some() {
             self.notice = Some(format!(
                 "{} arrived while an update was running, and was ignored.",
                 path.display()
@@ -538,6 +585,9 @@ impl VergeApp {
             label: label.to_owned(),
             reason,
         };
+        if let Some(error) = &self.worker_error {
+            return blocked("Worker stopped", format!("{error}. Restart the tool."));
+        }
         let Some(unit) = self.selected_unit() else {
             return if self.units.is_empty() {
                 blocked(
@@ -667,7 +717,7 @@ impl VergeApp {
 
     fn start(&mut self, unit: Box<Unit>, source: Source, download: Download, now: f64) {
         let cancel = Cancel::new();
-        self.job = Some(Job {
+        self.operation = Operation::Installing(Job {
             target: unit_name(&unit),
             location: unit.device.location.clone(),
             image: None,
@@ -702,7 +752,7 @@ impl VergeApp {
         if ctx.input(|i| i.viewport().close_requested()) && self.busy() {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.close_pending = true;
-            if let Some(run) = &self.batch {
+            if let Operation::Batch(run) = &self.operation {
                 run.stop.cancel();
             }
         }
@@ -842,7 +892,7 @@ impl VergeApp {
                 if outline(ui, "Licences", true).clicked() {
                     self.about_open = true;
                 }
-                let rescan = outline(ui, "Rescan", idle);
+                let rescan = outline(ui, "Rescan", idle && self.worker_error.is_none());
                 if !idle {
                     rescan.on_disabled_hover_text("Wait for what is running to finish.");
                 } else if rescan.clicked() {
@@ -856,7 +906,7 @@ impl VergeApp {
             edged(
                 ui,
                 color::ATTENTION,
-                if self.batch.is_some() {
+                if matches!(self.operation, Operation::Batch(_)) {
                     "The window closes when the batch's unit under way finishes. The batch takes no new units."
                 } else {
                     "The window closes when this update finishes. Cancel stops it at the next safe point and leaves the unit in ISP mode for the next flash."
@@ -881,7 +931,7 @@ impl VergeApp {
             );
         }
         ui.add_space(space::S);
-        let idle = self.job.is_none();
+        let idle = self.operation.job().is_none();
         let mut clicked = None;
         for unit in &self.units {
             let selected = self.selected.as_deref() == Some(unit.device.instance.as_str());
@@ -956,7 +1006,7 @@ impl VergeApp {
     }
 
     fn main(&mut self, ui: &mut Ui, now: f64) {
-        if let Some(job) = &self.job {
+        if let Some(job) = self.operation.job() {
             Self::working(ui, job, now);
             ui.add_space(space::L);
             if job.cancel.is_cancelled() {
@@ -1572,7 +1622,7 @@ pub fn sentence(message: &str) -> String {
 /// stop first, so that the join ends once the unit under way is done.
 impl Drop for VergeApp {
     fn drop(&mut self) {
-        if let Some(run) = &self.batch {
+        if let Operation::Batch(run) = &self.operation {
             run.stop.cancel();
         }
     }

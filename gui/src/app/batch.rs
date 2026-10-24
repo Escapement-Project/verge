@@ -15,7 +15,7 @@ use super::{
 };
 use crate::glyph::{self, Glyph};
 use crate::style::{Role, color, space, text};
-use crate::worker::{BatchState, Event, Request, arm_error};
+use crate::worker::{BatchEvent, BatchState, ProgressEvent, Request, arm_error};
 
 fn record_path(dir: &FsPath) -> String {
     let stamp = humantime::format_rfc3339_millis(std::time::SystemTime::now())
@@ -133,12 +133,12 @@ impl BatchRun {
     }
 
     /// An update's progress, for the unit under way.
-    pub(in crate::app) fn progress(&mut self, event: Event, now: f64) {
+    pub(in crate::app) fn progress(&mut self, event: ProgressEvent, now: f64) {
         let Some((_, current)) = &mut self.current else {
             return;
         };
         match event {
-            Event::Start { step, total } => {
+            ProgressEvent::Start { step, total } => {
                 *current = Some(Current {
                     step,
                     total,
@@ -146,7 +146,7 @@ impl BatchRun {
                     since: now,
                 });
             }
-            Event::Advance(done) => {
+            ProgressEvent::Advance(done) => {
                 if let Some(current) = current {
                     current.done = done;
                 }
@@ -155,14 +155,14 @@ impl BatchRun {
         }
     }
 
-    pub(in crate::app) fn handle(&mut self, event: Event, _now: f64) {
+    pub(in crate::app) fn handle(&mut self, event: BatchEvent, _now: f64) {
         match event {
-            Event::BatchArmed { name, filter } => {
+            BatchEvent::Armed { name, filter } => {
                 self.name = Some(name);
                 self.filter = filter;
             }
-            Event::BatchStarting(port) => self.current = Some((port, None)),
-            Event::BatchRecord(record) => {
+            BatchEvent::Starting(port) => self.current = Some((port, None)),
+            BatchEvent::Record(record) => {
                 if self
                     .current
                     .as_ref()
@@ -172,15 +172,14 @@ impl BatchRun {
                 }
                 self.records.push(*record);
             }
-            Event::BatchState(state) => self.state = state,
-            Event::BatchEnded(result) => {
+            BatchEvent::State(state) => self.state = state,
+            BatchEvent::Ended(result) => {
                 self.current = None;
                 if let Ok(tally) = &result {
                     self.state.tally = *tally;
                 }
                 self.ended = Some(result);
             }
-            _ => {}
         }
     }
 }
@@ -244,7 +243,7 @@ impl VergeApp {
     }
 
     pub(in crate::app) fn batch_view(&mut self, ui: &mut Ui, now: f64) {
-        if self.batch.is_some() {
+        if self.batch().is_some() {
             self.batch_running(ui, now);
         } else {
             self.batch_setup(ui, now);
@@ -252,6 +251,10 @@ impl VergeApp {
     }
 
     fn batch_setup(&mut self, ui: &mut Ui, now: f64) {
+        if let Some(error) = &self.worker_error {
+            edged(ui, color::FAULT, &format!("{error}. Restart the tool."));
+            return;
+        }
         frame(ui, None, Stroke::new(1.0, color::BORDER), |ui| {
             ui.horizontal(|ui| {
                 glyph::WAITING.show(ui, 48.0, color::TEXT);
@@ -404,7 +407,7 @@ impl VergeApp {
                     let record = PathBuf::from(self.batch_form.record.trim());
                     let stop = Cancel::new();
                     let cancel = Cancel::new();
-                    self.batch = Some(BatchRun {
+                    self.operation = super::Operation::Batch(BatchRun {
                         name: None,
                         filter: filter.describe(),
                         record: record.clone(),
@@ -442,7 +445,7 @@ impl VergeApp {
     }
 
     fn batch_running(&mut self, ui: &mut Ui, now: f64) {
-        let Some(run) = &self.batch else {
+        let Some(run) = self.batch() else {
             return;
         };
         let (word, instruction, glyph, fill) = match &run.ended {
@@ -624,7 +627,7 @@ impl VergeApp {
                 run.stop.cancel();
             }
         } else if slot(ui, "Back", None).clicked() {
-            self.batch = None;
+            self.last_batch = None;
             self.batch_form.record = record_path(&self.batch_form.dir);
         }
     }

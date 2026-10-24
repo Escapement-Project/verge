@@ -22,7 +22,7 @@ use verge_probe::version::StockVersion;
 use crate::app::{Config, VergeApp};
 use crate::log::Log;
 use crate::style::{self, color};
-use crate::worker::{Event, Manual, Shared, Worker};
+use crate::worker::{BatchEvent, Event, InstallEvent, Manual, ProgressEvent, Shared, Worker};
 
 fn repo() -> Repo {
     "someone/mculink-verge".parse().unwrap()
@@ -64,8 +64,8 @@ fn a_record_failure_stops_the_worker_before_the_next_unit() {
     for _ in 0..400 {
         while let Some(event) = worker.try_recv() {
             match event {
-                Event::BatchStarting(_) => started += 1,
-                Event::BatchEnded(result) => {
+                Event::Batch(BatchEvent::Starting(_)) => started += 1,
+                Event::Batch(BatchEvent::Ended(result)) => {
                     assert!(
                         result
                             .unwrap_err()
@@ -359,7 +359,9 @@ fn the_window_stays_open_while_an_update_writes() {
         .lock()
         .unwrap()
         .queued
-        .push_back(Event::Finished(Ok(Outcome::JumperStillFitted)));
+        .push_back(Event::Install(InstallEvent::Finished(Ok(
+            Outcome::JumperStillFitted,
+        ))));
     h.step();
     assert!(
         root_commands(&h).contains(&ViewportCommand::Close),
@@ -467,36 +469,46 @@ fn pictures() {
     {
         let mut manual = backend.lock().unwrap();
         use verge_probe::progress::Step;
-        manual.queued.push_back(Event::Start {
-            step: Step::Download,
-            total: 7000,
-        });
-        manual.queued.push_back(Event::Plan(vec![
-            Step::EnterBootloader,
-            Step::WaitForBootloader,
-            Step::Connect,
-            Step::Erase,
-            Step::Write,
-            Step::Verify,
-            Step::Reset,
-            Step::WaitForFirmware,
-        ]));
-        manual.queued.push_back(Event::Loaded(
+        manual
+            .queued
+            .push_back(Event::Progress(ProgressEvent::Start {
+                step: Step::Download,
+                total: 7000,
+            }));
+        manual
+            .queued
+            .push_back(Event::Progress(ProgressEvent::Plan(vec![
+                Step::EnterBootloader,
+                Step::WaitForBootloader,
+                Step::Connect,
+                Step::Erase,
+                Step::Write,
+                Step::Verify,
+                Step::Reset,
+                Step::WaitForFirmware,
+            ])));
+        manual.queued.push_back(Event::Install(InstallEvent::Loaded(
             "release v0.3.0 (mculink-verge-v0.3.0.s19)".into(),
-        ));
+        )));
         for step in [
             Step::EnterBootloader,
             Step::WaitForBootloader,
             Step::Connect,
             Step::Erase,
         ] {
-            manual.queued.push_back(Event::Start { step, total: 0 });
+            manual
+                .queued
+                .push_back(Event::Progress(ProgressEvent::Start { step, total: 0 }));
         }
-        manual.queued.push_back(Event::Start {
-            step: Step::Write,
-            total: 235_520,
-        });
-        manual.queued.push_back(Event::Advance(98_304));
+        manual
+            .queued
+            .push_back(Event::Progress(ProgressEvent::Start {
+                step: Step::Write,
+                total: 235_520,
+            }));
+        manual
+            .queued
+            .push_back(Event::Progress(ProgressEvent::Advance(98_304)));
     }
     shoot(&mut h, "04-working");
     request_close(&mut h);
@@ -518,14 +530,14 @@ fn pictures() {
         .lock()
         .unwrap()
         .queued
-        .push_back(Event::Finished(Err(crate::worker::JobError {
+        .push_back(Event::Install(InstallEvent::Finished(Err(crate::worker::JobError {
             message: "the bootloader: unexpected status code: 10203 (0x27DB) MemoryCumulativeWrite"
                 .into(),
             advice: Some(
                 "The unit may be in ISP mode with a partial image. Flashing it again recovers it.",
             ),
             left_in_isp: true,
-        })));
+        }))));
     shoot(&mut h, "07-failed");
 
     // The batch view: set up, running, and done.
@@ -541,17 +553,17 @@ fn pictures() {
         use verge_probe::batch::{Record, Tally};
         use verge_probe::progress::Step;
         let mut manual = backend.lock().unwrap();
-        manual.queued.push_back(Event::BatchArmed {
+        manual.queued.push_back(Event::Batch(BatchEvent::Armed{
             name: "release v0.3.0 (mculink-verge-v0.3.0.s19)".into(),
             filter: "every full MCU-Link running stock or ours older than the image, attached from now on".into(),
-        });
+        }));
         let record = |port: &str,
                       serial: &str,
                       before: &str,
                       after: Option<&str>,
                       result: verge_probe::batch::Settled,
                       reason: Option<&str>| {
-            Event::BatchRecord(Box::new(Record {
+            Event::Batch(BatchEvent::Record(Box::new(Record {
                 time: "2026-10-20T14:26:08Z".into(),
                 port: port.into(),
                 serial_before: Some(serial.into()),
@@ -561,7 +573,7 @@ fn pictures() {
                 result,
                 reason: reason.map(str::to_owned),
                 seconds: after.map(|_| 4.7),
-            }))
+            })))
         };
         manual.queued.push_back(record(
             "1-1",
@@ -580,15 +592,21 @@ fn pictures() {
             None,
         ));
         manual.queued.push_back(record("1-4", "QK7RM2VTX8D45", "stock V3.108", None, verge_probe::batch::Settled::Skipped, Some("needs the ISP jumper. Stock V3.108 has no jumper-free update. NXP added it in V3.122.")));
-        manual.queued.push_back(Event::BatchStarting("1-2".into()));
-        manual.queued.push_back(Event::Start {
-            step: Step::Write,
-            total: 235_520,
-        });
-        manual.queued.push_back(Event::Advance(131_072));
         manual
             .queued
-            .push_back(Event::BatchState(crate::worker::BatchState {
+            .push_back(Event::Batch(BatchEvent::Starting("1-2".into())));
+        manual
+            .queued
+            .push_back(Event::Progress(ProgressEvent::Start {
+                step: Step::Write,
+                total: 235_520,
+            }));
+        manual
+            .queued
+            .push_back(Event::Progress(ProgressEvent::Advance(131_072)));
+        manual
+            .queued
+            .push_back(Event::Batch(BatchEvent::State(crate::worker::BatchState {
                 tally: Tally {
                     updated: 1,
                     current: 1,
@@ -598,14 +616,14 @@ fn pictures() {
                 },
                 waiting: vec![("1-5".into(), Some("CJ3E7AE717".into()))],
                 paused: None,
-            }));
+            })));
     }
     shoot(&mut h, "14-batch-running");
-    backend.lock().unwrap().queued.push_back(Event::BatchState(crate::worker::BatchState {
+    backend.lock().unwrap().queued.push_back(Event::Batch(BatchEvent::State(crate::worker::BatchState {
         tally: verge_probe::batch::Tally { updated: 1, current: 1, skipped: 1, failed: 1, waiting: 1 },
         waiting: vec![("1-5".into(), Some("CJ3E7AE717".into()))],
         paused: Some("The unit at 1-2, a full MCU-Link, failed and is in ISP mode, maybe with a partial image. The batch waits until it is unplugged. In ISP mode the tool cannot tell its board, so flash it again with the batch's image, which is built for it: `verge isp flash --release v0.3.0`.".into()),
-    }));
+    })));
     shoot(&mut h, "15-batch-paused");
 
     for (scenario, name) in [
@@ -731,7 +749,7 @@ fn closing_during_a_batch_stops_it_taking_units_and_waits_for_it() {
         .lock()
         .unwrap()
         .queued
-        .push_back(Event::BatchEnded(Ok(Default::default())));
+        .push_back(Event::Batch(BatchEvent::Ended(Ok(Default::default()))));
     h.step();
     assert!(root_commands(&h).contains(&ViewportCommand::Close));
 }
@@ -748,13 +766,13 @@ fn a_paused_batch_says_why() {
         .lock()
         .unwrap()
         .queued
-        .push_back(Event::BatchState(crate::worker::BatchState {
+        .push_back(Event::Batch(BatchEvent::State(crate::worker::BatchState {
             paused: Some(
                 "An MCU-Link mini is in ISP mode at 1-2. The batch waits until it is unplugged."
                     .into(),
             ),
             ..Default::default()
-        }));
+        })));
     until(&mut h, "PAUSED");
     h.get_by_label_contains("An MCU-Link mini is in ISP mode at 1-2.");
 }
@@ -793,7 +811,79 @@ fn a_batch_needs_something_to_take() {
     h.get_by_label_contains("Tick at least one kind of unit");
 }
 
-/// Review: the worker's panic report is `Event::Finished`, which only a single update reads.
+/// A worker failure ends a batch as well as a single-unit update.
+#[test]
+fn a_worker_failure_during_discovery_is_reported() {
+    let (app, backend) = manual_app("ours", false);
+    {
+        let mut manual = backend.lock().unwrap();
+        manual.queued.clear();
+        manual
+            .queued
+            .push_back(Event::WorkerFailed(crate::worker::JobError {
+                message: "discovery worker failed".into(),
+                advice: None,
+                left_in_isp: false,
+            }));
+    }
+    let mut h = harness(app);
+    h.step();
+    h.get_by_label_contains("Could not list USB devices: discovery worker failed");
+    assert!(!h.state().busy());
+}
+
+#[test]
+fn a_worker_failure_during_installation_finishes_the_job() {
+    let (app, backend) = manual_app("ours", true);
+    let mut h = harness(app);
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "CONFIRM");
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::WorkerFailed(crate::worker::JobError {
+            message: "install worker failed".into(),
+            advice: None,
+            left_in_isp: true,
+        }));
+    until(&mut h, "FAILED");
+    assert!(!h.state().busy());
+    press(&mut h, "BACK");
+    h.get_by_label("WORKER STOPPED");
+}
+
+#[test]
+fn an_install_preserves_the_previous_batch_result() {
+    let (app, backend) = manual_app("ours", true);
+    let mut h = harness(app);
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "BATCH");
+    press(&mut h, "ARM BATCH");
+    press(&mut h, "CONFIRM");
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::Batch(BatchEvent::Ended(Ok(Default::default()))));
+    until(&mut h, "ENDED");
+    press(&mut h, "UNITS");
+    press(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "CONFIRM");
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::Install(InstallEvent::Finished(Ok(
+            Outcome::JumperStillFitted,
+        ))));
+    h.run_steps(3);
+    assert!(!h.state().busy());
+    press(&mut h, "BATCH");
+    h.get_by_label("ENDED");
+}
+
 #[test]
 fn a_worker_that_dies_during_a_batch_lets_the_window_close() {
     let (app, backend) = manual_app("ours", true);
@@ -808,11 +898,11 @@ fn a_worker_that_dies_during_a_batch_lets_the_window_close() {
         .lock()
         .unwrap()
         .queued
-        .push_back(Event::Finished(Err(crate::worker::JobError {
+        .push_back(Event::WorkerFailed(crate::worker::JobError {
             message: "the USB worker stopped unexpectedly: boom".into(),
             advice: None,
             left_in_isp: true,
-        })));
+        }));
     for _ in 0..5 {
         h.step();
     }
@@ -1025,7 +1115,7 @@ fn a_batch_adds_to_an_existing_record_file() {
     let mut ended = None;
     for _ in 0..2000 {
         match worker.try_recv() {
-            Some(Event::BatchEnded(result)) => {
+            Some(Event::Batch(BatchEvent::Ended(result))) => {
                 ended = Some(result);
                 break;
             }
@@ -1107,7 +1197,7 @@ fn a_batch_makes_its_record_files_directory() {
     let mut ended = None;
     for _ in 0..2000 {
         match worker.try_recv() {
-            Some(Event::BatchEnded(result)) => {
+            Some(Event::Batch(BatchEvent::Ended(result))) => {
                 ended = Some(result);
                 break;
             }
@@ -1255,7 +1345,7 @@ fn the_worker_refuses_an_undatable_batch_before_loading() {
     let mut ended = None;
     for _ in 0..2000 {
         match worker.try_recv() {
-            Some(Event::BatchEnded(result)) => {
+            Some(Event::Batch(BatchEvent::Ended(result))) => {
                 ended = Some(result);
                 break;
             }
