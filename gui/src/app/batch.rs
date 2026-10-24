@@ -1,6 +1,8 @@
 //! The batch view: an image and the units it takes, armed once, then every unit plugged in after
 //! that updated on its own, one at a time.
 
+use std::num::NonZeroUsize;
+
 use std::path::{Path as FsPath, PathBuf};
 
 use egui::{Color32, Margin, Stroke, Ui, vec2};
@@ -68,7 +70,7 @@ impl BatchForm {
     }
 
     /// The filter and the count, or why the form does not make one.
-    fn filter(&self) -> Result<(Filter, Option<usize>), String> {
+    fn filter(&self) -> Result<(Filter, Option<NonZeroUsize>), String> {
         let below = self.stock_below.trim();
         let stock = match (self.stock, below.is_empty()) {
             (false, _) => StockFilter::None,
@@ -88,14 +90,9 @@ impl BatchForm {
             return Err("Tick at least one kind of unit for the batch to take.".into());
         }
         let limit = if self.stop_after {
-            let count: usize = self
-                .count
-                .trim()
-                .parse()
-                .map_err(|_| "Write how many units to stop after, as a number.".to_owned())?;
-            if count == 0 {
-                return Err("Stopping after no units would take none.".into());
-            }
+            let count: NonZeroUsize = self.count.trim().parse().map_err(|_| {
+                "Write how many units to stop after, as a positive number.".to_owned()
+            })?;
             Some(count)
         } else {
             None

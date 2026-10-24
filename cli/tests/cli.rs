@@ -264,6 +264,16 @@ fn temp_record(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("verge-cli-{}-{name}.jsonl", std::process::id()))
 }
 
+#[test]
+fn a_zero_batch_limit_is_rejected_before_loading() {
+    tool("arrivals")
+        .args(["batch", "--yes", "--count", "0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value '0'"))
+        .stdout(predicate::str::is_empty());
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn a_failed_record_write_stops_the_batch() {

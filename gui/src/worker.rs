@@ -1,5 +1,7 @@
 //! USB work on a thread of its own: the window sends requests and drains events each frame.
 
+use std::num::NonZeroUsize;
+
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -31,7 +33,7 @@ pub enum Request {
         source: Source,
         filter: Filter,
         download: Download,
-        limit: Option<usize>,
+        limit: Option<NonZeroUsize>,
         record: PathBuf,
         stop: Cancel,
         cancel: Cancel,
@@ -400,7 +402,7 @@ fn run_batch<B: Bus + Sync, H: Http + Clone + Send + 'static>(
     source: &Source,
     filter: Filter,
     download: Download,
-    limit: Option<usize>,
+    limit: Option<NonZeroUsize>,
     record: &std::path::Path,
     stop: &Cancel,
     cancel: &Cancel,

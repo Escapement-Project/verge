@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 mod progress;
 
 use std::io::IsTerminal;
@@ -317,7 +318,7 @@ struct BatchArgs {
     board: BoardArg,
     /// Stop once this many units are updated.
     #[arg(long, value_name = "N")]
-    count: Option<usize>,
+    count: Option<NonZeroUsize>,
     /// The record file: one JSON line per unit. Defaults to verge-batch-<time>.jsonl here.
     #[arg(long, value_name = "FILE")]
     record: Option<PathBuf>,
