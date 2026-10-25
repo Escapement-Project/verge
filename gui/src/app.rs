@@ -1061,6 +1061,11 @@ impl VergeApp {
         ui.add_space(space::L);
 
         let action = self.action();
+        // A question asked before the worker stopped or the unit went away no longer stands, and
+        // confirming it would start an update nothing can run.
+        if matches!(action, Action::Blocked { .. }) {
+            self.confirming = None;
+        }
         if let Some(Confirming {
             unit,
             source,

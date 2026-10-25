@@ -855,6 +855,27 @@ fn a_worker_failure_during_installation_finishes_the_job() {
 }
 
 #[test]
+fn a_worker_failure_withdraws_an_open_install_question() {
+    let (app, backend) = manual_app("ours", true);
+    let mut h = harness(app);
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "UPDATE TO V0.3.0");
+    h.get_by_label("CONFIRM");
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::WorkerFailed(crate::worker::JobError {
+            message: "the USB worker stopped unexpectedly: boom".into(),
+            advice: None,
+            left_in_isp: false,
+        }));
+    until(&mut h, "WORKER STOPPED");
+    assert!(h.query_by_label("CONFIRM").is_none());
+    assert!(!h.state().busy());
+}
+
+#[test]
 fn an_install_preserves_the_previous_batch_result() {
     let (app, backend) = manual_app("ours", true);
     let mut h = harness(app);
