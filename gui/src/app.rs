@@ -1061,9 +1061,12 @@ impl VergeApp {
         ui.add_space(space::L);
 
         let action = self.action();
-        // A question asked before the worker stopped or the unit went away no longer stands, and
-        // confirming it would start an update nothing can run.
-        if matches!(action, Action::Blocked { .. }) {
+        // A question asked before the worker stopped, or about a unit no longer selected, no longer
+        // stands: confirming it would start an update nothing can run, or one on a unit that left.
+        let asked_about_another = self.confirming.as_ref().is_some_and(|question| {
+            self.selected.as_deref() != Some(question.unit.device.instance.as_str())
+        });
+        if asked_about_another || matches!(action, Action::Blocked { .. }) {
             self.confirming = None;
         }
         if let Some(Confirming {

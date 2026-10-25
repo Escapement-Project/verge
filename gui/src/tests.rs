@@ -876,6 +876,50 @@ fn a_worker_failure_withdraws_an_open_install_question() {
 }
 
 #[test]
+fn a_question_about_a_unit_that_left_is_withdrawn() {
+    let bus = SimBus::default();
+    bus.add_ours("v0.2.0");
+    bus.add_ours("v0.2.0");
+    let units: Vec<Unit> = verge_probe::detect(&bus).unwrap();
+    assert_eq!(units.len(), 2);
+    let backend: Shared = Arc::new(Mutex::new(Manual::default()));
+    {
+        let mut manual = backend.lock().unwrap();
+        manual.queued.push_back(Event::Units(Ok(units.clone())));
+        let http = SimHttp::new(repo());
+        http.publish_ours("v0.3.0");
+        let latest = GitHub::new(http, repo(), None).latest().unwrap();
+        manual
+            .queued
+            .push_back(Event::Release(Ok(Box::new(latest))));
+    }
+    let app = VergeApp::new(
+        Box::new(backend.clone()),
+        Log::default(),
+        Config {
+            repo: repo(),
+            simulated: None,
+            stock_dirs: vec![],
+            record_dir: std::env::temp_dir(),
+            cache: None,
+        },
+    );
+    let mut h = harness(app);
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "UPDATE TO V0.3.0");
+    h.get_by_label("CONFIRM");
+    // The asked-about unit is unplugged; the rescan finds the other, which becomes selected.
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::Units(Ok(vec![units[1].clone()])));
+    h.run_steps(3);
+    assert!(h.query_by_label("CONFIRM").is_none());
+    h.get_by_label("UPDATE TO V0.3.0");
+}
+
+#[test]
 fn an_install_preserves_the_previous_batch_result() {
     let (app, backend) = manual_app("ours", true);
     let mut h = harness(app);
