@@ -1065,3 +1065,15 @@ fn dio_refuses_a_board_without_the_pins() {
         .failure()
         .stderr(predicate::str::contains("is not an MCU-Link Pro"));
 }
+
+/// A RUST_LOG that names only another crate still shows why verge failed.
+#[test]
+fn the_final_error_survives_a_narrow_rust_log() {
+    Command::cargo_bin("verge")
+        .unwrap()
+        .env("RUST_LOG", "probe_rs::vendor::ti=debug")
+        .args(["inspect", "no-such-image.elf"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no-such-image.elf"));
+}

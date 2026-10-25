@@ -343,6 +343,9 @@ struct FlashArgs {
     yes: bool,
 }
 
+/// The log target of the error that ends a run.
+const EXIT_TARGET: &str = "verge::exit";
+
 fn init_tracing(verbose: u8) {
     let default = match verbose {
         // nusb logs a claim it could not make as an error of its own, which verge reports in its
@@ -353,7 +356,15 @@ fn init_tracing(verbose: u8) {
         1 => "warn,verge_probe=debug,verge=debug",
         _ => "debug",
     };
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
+    // The error that ends a run is printed whatever RUST_LOG selects: a script that narrows the
+    // log to one crate still needs to see why verge failed.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(default))
+        .add_directive(
+            format!("{EXIT_TARGET}=error")
+                .parse()
+                .expect("a constant directive"),
+        );
     let bars = IndicatifLayer::new();
     let log = tracing_subscriber::fmt::layer()
         .with_ansi(std::io::stderr().is_terminal())
@@ -405,7 +416,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            tracing::error!("{error:#}");
+            tracing::error!(target: EXIT_TARGET, "{error:#}");
             if cancel.is_cancelled() {
                 ExitCode::from(130)
             } else {
