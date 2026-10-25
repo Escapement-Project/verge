@@ -100,6 +100,7 @@ verge release               # the latest release, and how each unit compares
 verge inspect image.s19     # what an image puts into flash; touches no USB device
 verge cjtag --oscan1-only   # offer a host two-pin OScan1 alone, until the unit restarts
 verge dio --high all        # drive all four of a Pro's DIO pins high
+verge read --chip CC1312R --protocol cjtag b32 0 64   # target memory, as probe-rs read prints it
 ```
 
 `update` asks before downloading a release and shows the repository, tag and size. It asks again
@@ -120,6 +121,12 @@ or `all`. DIO0, DIO1 and DIO2 share a direction; DIO3 is independent.
 `--high 0` alone is rejected while DIO1 and DIO2 are inputs. The pins keep their
 state between debug sessions, so one can hold a target's boot mode through a reset, and they go
 back to inputs when the unit restarts. The Pro's LED6 (SIO) is lit while any pin is driven.
+
+`read` reads target memory through a probe over SWD, JTAG or two-pin cJTAG, and prints the table
+probe-rs's `read` prints: each line is an address and eight values, four for `b64`. Name the probe
+with `--serial` when more than one is attached, and set the clock in kHz with `--speed`. `--time`
+prints the attach and read times on stderr. Like probe-rs's `read`, it resumes any halted core when
+it finishes.
 
 `update` refuses to install a release the unit already runs, or one older than it. Pass
 `--force` to install it anyway.

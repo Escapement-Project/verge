@@ -1,5 +1,6 @@
 use std::num::NonZeroUsize;
 mod progress;
+mod read;
 
 use std::io::IsTerminal;
 use std::path::{Path as FsPath, PathBuf};
@@ -111,6 +112,12 @@ enum Command {
         /// A release tag. The latest release when left out.
         tag: Option<String>,
     },
+    /// Read target memory through a probe over SWD, JTAG or two-pin cJTAG, as probe-rs's read does.
+    ///
+    /// Prints probe-rs's hex table on stdout and nothing else: each line is its address and eight
+    /// values, four for b64. Two-pin works on a unit running ours; `verge cjtag --formats` picks
+    /// which formats it offers the target.
+    Read(read::ReadArgs),
     /// Read an image file and say what it puts into flash. Touches no USB device.
     Inspect {
         /// An ELF or S-record file.
@@ -480,6 +487,7 @@ fn run<B: Bus + Sync, H: Http>(
         }
         Some(Command::Release { tag }) => release(bus, github, tag.as_deref()),
         Some(Command::Inspect { file }) => inspect(file),
+        Some(Command::Read(args)) => read::read(args),
     }
 }
 
