@@ -3720,7 +3720,6 @@ dependencies = [
  "docsplay",
  "dunce",
  "flate2",
- "hidapi",
  "ihex",
  "itertools",
  "jep106",
