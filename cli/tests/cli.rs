@@ -1434,3 +1434,95 @@ fn the_final_error_survives_a_narrow_rust_log() {
         .failure()
         .stderr(predicate::str::contains("no-such-image.elf"));
 }
+
+fn csv_lines(path: &std::path::Path) -> Vec<Vec<u64>> {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .skip(1)
+        .map(|line| line.split(',').map(|v| v.parse().unwrap()).collect())
+        .collect()
+}
+
+/// A recording of a running capture holds every pair it streamed, in order, and leaves the
+/// capture running.
+#[test]
+fn energy_record_writes_every_pair_and_leaves_a_running_capture() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("run.csv");
+    let output = tool("ours-pro-energy")
+        .args(["energy", "record", "--csv", "--for", "1s", "--out"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("the capture keeps running."))
+        .get_output()
+        .stdout
+        .clone();
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert!(text.starts_with("sequence,time_ns,millivolts,nanoamps\n"));
+    let lines = csv_lines(&out);
+    assert!(lines.len() >= 1000, "{} pairs", lines.len());
+    assert!(
+        lines
+            .windows(2)
+            .all(|w| w[1][0] == w[0][0] + 1 && w[1][1] == w[0][1] + 1_000_000)
+    );
+    assert!(
+        String::from_utf8_lossy(&output).contains(&format!("{} pairs to", lines.len())),
+        "{}",
+        String::from_utf8_lossy(&output)
+    );
+}
+
+/// A recording that starts its own capture stops it.
+#[test]
+fn energy_record_stops_the_capture_it_started() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("own.sr");
+    tool("ours-pro")
+        .args([
+            "energy", "record", "--rate", "2000", "--for", "500ms", "--out",
+        ])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("the capture stopped."));
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
+    let mut metadata = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("metadata").unwrap(), &mut metadata).unwrap();
+    assert!(metadata.contains("samplerate=2 kHz\n"), "{metadata}");
+    assert!(metadata.contains("analog3=mA\n"), "{metadata}");
+}
+
+#[test]
+fn energy_record_works_while_a_debugger_holds_the_probe() {
+    let dir = tempfile::tempdir().unwrap();
+    tool("ours-pro-debugger")
+        .args(["energy", "record", "--for", "200ms", "--out"])
+        .arg(dir.path().join("held.sr"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pairs to"));
+}
+
+#[test]
+fn energy_record_needs_verge_aux() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("none.sr");
+    tool("ours-pro-aux-taken")
+        .args(["energy", "record", "--out"])
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "another program holds CJ3E7A91C2's Verge Aux, which a recording needs",
+        ));
+    assert!(!out.exists(), "a file was left behind");
+    tool("ours-plain")
+        .args(["energy", "record", "--out"])
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is not an MCU-Link Pro"));
+}

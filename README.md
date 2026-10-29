@@ -104,6 +104,7 @@ verge cjtag --oscan1-only   # offer a host two-pin OScan1 alone, until the unit 
 verge dio --high all        # drive all four of a Pro's DIO pins high
 verge power on              # switch on a Pro's target supply
 verge energy watch          # a Pro's target current and energy, live
+verge energy record --out run.sr --for 10s   # every pair of a capture, for PulseView
 verge read --chip CC1312R --protocol cjtag b32 0 64   # target memory, as probe-rs read prints it
 ```
 
@@ -156,6 +157,18 @@ The current graph plots the newest pair at each read, so it can miss short peaks
 plots each interval's mean from the total, which counts every pair. Q, Esc or Ctrl-C leaves, and
 `--for` leaves after a set time. Where the output is not a terminal, it prints a line for each read
 instead.
+
+`energy record --out FILE` saves every pair of a capture. It reads them through Verge Aux, so it
+works while a debugger holds the probe. Like `watch`, it starts a capture if none runs and stops only
+a capture it started. It records until Ctrl-C, or for as long as `--for` says. The file is a sigrok
+session, which PulseView opens. It has two analog channels: V in volts and mA in milliamps. A session
+file stores no units, so sigrok shows both as volts, and the channel names give the units. The
+probe measures nothing for a moment while it reads the target's supply or times a debugger's reads.
+There the last pair repeats and a logic channel, GAP, is high, so the time axis stays true. A pair
+taken as the current range switched carries the next pair's current, as in the probe's total, so the
+recording adds up to that total. `--csv` writes one line per pair instead: its sequence number, its
+time in ns since the capture started, millivolts and nanoamps. A Verge image older than Verge Aux
+cannot record.
 
 `read` reads target memory through a probe over SWD, JTAG or two-pin cJTAG, and prints the table
 probe-rs's `read` prints: each line is an address and eight values, four for `b64`. It picks among

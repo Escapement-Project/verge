@@ -1,5 +1,6 @@
 //! `verge power` and `verge energy`: an MCU-Link Pro's target supply and its energy measurement.
 
+mod record;
 mod watch;
 
 use std::time::Duration;
@@ -10,6 +11,7 @@ use tracing_indicatif::indicatif_println;
 use verge_probe::aux::Aux;
 use verge_probe::bus::BusError;
 use verge_probe::detect::{State, Unit, detect_named};
+use verge_probe::stream::EndReason;
 use verge_probe::{
     Bus, CalibrationRange, Cancel, CommandError, DapTransport, EnergyAccumulator,
     EnergyCalibration, EnergyCaptureSample, EnergyError, EnergyTotal, VergeControl, VergeInfo,
@@ -71,6 +73,28 @@ pub enum EnergyCommand {
         #[arg(long = "for", value_name = "DURATION", value_parser = humantime::parse_duration)]
         limit: Option<Duration>,
     },
+    /// Record every pair of a capture to a sigrok session file, which PulseView opens.
+    ///
+    /// Starts a capture if none runs, and stops only one it started. Needs Verge Aux, so a
+    /// debugger can hold the probe meanwhile. The file has the voltage in V and the current in mA
+    /// as analog channels, each pair's current as the probe's total counts it. Where the probe
+    /// measured nothing, for a moment as it reads the supply or times a debugger's reads, the last
+    /// pair repeats and the logic channel GAP is high. Ctrl-C ends the recording.
+    Record {
+        /// The file to write.
+        #[arg(long, value_name = "FILE")]
+        out: std::path::PathBuf,
+        /// Voltage and current pairs a second, for a capture this starts.
+        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+        rate: u32,
+        /// Stop after this long.
+        #[arg(long = "for", value_name = "DURATION", value_parser = humantime::parse_duration)]
+        limit: Option<Duration>,
+        /// Write CSV instead: one line per pair, its sequence number, its time in ns since the
+        /// capture started, millivolts and nanoamps.
+        #[arg(long)]
+        csv: bool,
+    },
 }
 
 /// A Pro over Verge Aux where it has one, so a debugger can hold CMSIS-DAP meanwhile, or over
@@ -123,14 +147,9 @@ fn pro_running_verge(unit: &Unit) -> bool {
     })
 }
 
-/// Runs `f` on the Pro `serial` names, or the one [`crate::pick_unit`] finds, refusing anything
-/// else in a sentence that says why.
-fn with_pro<B: Bus, T>(
-    bus: &B,
-    serial: Option<&str>,
-    feature: Feature,
-    f: impl FnOnce(&str, &mut Pro<'_>) -> Result<T>,
-) -> Result<T> {
+/// The Pro `serial` names, or the one [`crate::pick_unit`] finds, refusing anything else in a
+/// sentence that says why.
+fn find_pro<B: Bus>(bus: &B, serial: Option<&str>, feature: Feature) -> Result<Unit> {
     let what = feature.name();
     let units = detect_named(bus, serial).context("looking for MCU-Links")?;
     let unit = crate::pick_unit(&units, serial, pro_running_verge)?;
@@ -149,6 +168,18 @@ fn with_pro<B: Bus, T>(
     {
         bail!("{name} is not an MCU-Link Pro, so it has no {what}");
     }
+    Ok(unit.clone())
+}
+
+/// Runs `f` on the Pro [`find_pro`] finds.
+fn with_pro<B: Bus, T>(
+    bus: &B,
+    serial: Option<&str>,
+    feature: Feature,
+    f: impl FnOnce(&str, &mut Pro<'_>) -> Result<T>,
+) -> Result<T> {
+    let unit = find_pro(bus, serial, feature)?;
+    let name = unit.serial().unwrap_or("the unit");
     if unit.device.aux {
         match bus.open_aux(&unit.device) {
             Ok(link) => {
@@ -178,6 +209,15 @@ fn run<T>(
     f: impl FnOnce(&str, &mut Pro<'_>) -> Result<T>,
 ) -> Result<T> {
     let mut pro = VergeControl::new(transport);
+    check_offered(name, &mut pro, feature)?;
+    f(name, &mut pro)
+}
+
+fn check_offered<T: VergeTransport + ?Sized>(
+    name: &str,
+    pro: &mut VergeControl<'_, T>,
+    feature: Feature,
+) -> Result<()> {
     let info = pro
         .info()
         .with_context(|| format!("asking {name} what it runs"))?
@@ -185,11 +225,11 @@ fn run<T>(
     if !feature.offered(info) {
         bail!("{}", feature.missing(name, info));
     }
-    f(name, &mut pro)
+    Ok(())
 }
 
 /// Whether the firmware keeps a running total.
-fn keeps_totals(pro: &mut Pro<'_>) -> bool {
+fn keeps_totals<T: VergeTransport + ?Sized>(pro: &mut VergeControl<'_, T>) -> bool {
     pro.info()
         .ok()
         .flatten()
@@ -349,7 +389,67 @@ pub fn energy<B: Bus>(
             }
             Ok(())
         }),
+        EnergyCommand::Record {
+            out,
+            rate,
+            limit,
+            csv,
+        } => {
+            let options = record::Options {
+                out: out.clone(),
+                rate: *rate,
+                limit: *limit,
+                csv: *csv,
+            };
+            record(bus, serial, &options, cancel)
+        }
     }
+}
+
+fn record<B: Bus>(
+    bus: &B,
+    serial: Option<&str>,
+    options: &record::Options,
+    cancel: &Cancel,
+) -> Result<()> {
+    let unit = find_pro(bus, serial, Feature::Energy)?;
+    let name = unit.serial().unwrap_or("the unit");
+    if !unit.device.aux {
+        bail!(
+            "{name} runs a Verge build from before Verge Aux, which a recording needs: update it first"
+        );
+    }
+    let link = match bus.open_aux(&unit.device) {
+        Ok(link) => link,
+        Err(BusError::Busy { .. }) => {
+            bail!("another program holds {name}'s Verge Aux, which a recording needs")
+        }
+        Err(error) => return Err(error).with_context(|| format!("opening {name}'s Verge Aux")),
+    };
+    let mut aux = Aux::open(link).with_context(|| format!("opening {name}'s Verge Aux"))?;
+    let mut pro = VergeControl::new(&mut aux);
+    check_offered(name, &mut pro, Feature::Energy)?;
+    let recorded = record::record(bus, name, &mut pro, options, cancel)?;
+    let file = options.out.display();
+    let energy = si(recorded.total.nanojoules() as f64 * 1e-9, "J");
+    let why = match recorded.reason {
+        EndReason::Asked => "the capture keeps running",
+        EndReason::Stopped => "the capture stopped",
+        EndReason::Restarted => "a new start restarted the capture",
+        EndReason::Failed => "the capture failed: the ADC overran or its DMA failed",
+        EndReason::Other(_) => "the stream ended for a reason this tool does not know",
+    };
+    indicatif_println!(
+        "{name}: {} pairs to {file}, {energy}; {why}.",
+        recorded.pairs
+    );
+    if recorded.lost > 0 {
+        indicatif_println!(
+            "{} pairs were lost: the probe dropped messages this side did not read in time.",
+            recorded.lost
+        );
+    }
+    Ok(())
 }
 
 /// The total as a clause, as "1.71 mJ over 1000 pairs since the start".
