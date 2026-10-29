@@ -1066,6 +1066,233 @@ fn dio_refuses_a_board_without_the_pins() {
         .stderr(predicate::str::contains("is not an MCU-Link Pro"));
 }
 
+#[test]
+fn power_reads_the_supply_off_after_a_start() {
+    tool("ours-pro")
+        .arg("power")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("target supply is off."));
+}
+
+#[test]
+fn power_switches_the_supply() {
+    tool("ours-pro")
+        .args(["power", "on"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("target supply is on."));
+}
+
+#[test]
+fn power_refuses_a_board_without_a_supply() {
+    tool("ours-plain")
+        .args(["power", "on"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "is not an MCU-Link Pro, so it has no target supply",
+        ));
+}
+
+#[test]
+fn energy_start_reports_the_rate() {
+    tool("ours-pro")
+        .args(["energy", "start", "--rate", "2000"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("captures 2000 pairs a second."));
+}
+
+#[test]
+fn energy_start_refuses_a_rate_the_firmware_cannot_take() {
+    tool("ours-pro")
+        .args(["energy", "start", "--rate", "100001"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("100001 is not in 1..=100000"));
+}
+
+#[test]
+fn energy_latest_reads_a_running_capture() {
+    tool("ours-pro-energy")
+        .args(["energy", "latest"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "3.30 V, 5.00 mA (350 mA, low gain), pair 100",
+        ));
+}
+
+#[test]
+fn energy_latest_says_when_nothing_captures() {
+    tool("ours-pro")
+        .args(["energy", "latest"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "is not capturing: start a capture first.",
+        ));
+}
+
+#[test]
+fn energy_total_reads_the_running_total() {
+    tool("ours-pro-energy")
+        .args(["energy", "total"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("17.1 mJ over 100"))
+        .stdout(predicate::str::contains("pairs since the start."));
+}
+
+#[test]
+fn energy_stop_reports_the_total() {
+    tool("ours-pro-energy")
+        .args(["energy", "stop"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("stopped: 17.1 mJ over 100"));
+}
+
+#[test]
+fn energy_calibration_lists_both_ranges() {
+    tool("ours-pro")
+        .args(["energy", "calibration"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Low range: code 410 at 0 A, code 31200 at 960 µA, code 62100 at 1.93 mA.",
+        ))
+        .stdout(predicate::str::contains("High range: code 390 at 0 A"));
+}
+
+#[test]
+fn energy_watch_prints_a_line_a_read_and_leaves_a_running_capture_running() {
+    tool("ours-pro-energy")
+        .args(["energy", "watch", "--for", "1s", "--every", "250ms"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "   0.00 s  3.30 V  5.00 mA  (350 mA, low gain)  pair 10002  interval -",
+        ))
+        .stdout(predicate::str::contains("   1.00 s  3.30 V"))
+        // Each interval holds two or three of the target's 10 ms wakes, so its mean lands either
+        // side of the 1.71 mW the whole capture averages.
+        .stdout(predicate::str::is_match(r"interval 1\.[5-8]\d mW").unwrap())
+        .stdout(predicate::str::contains("The capture keeps running."));
+}
+
+#[test]
+fn energy_watch_stops_the_capture_it_started() {
+    tool("ours-pro")
+        .args(["energy", "watch", "--for", "200ms"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no complete pair yet"))
+        .stdout(predicate::str::contains("stopped: 0 J over"));
+}
+
+#[test]
+fn energy_watch_refuses_a_zero_interval() {
+    tool("ours-pro")
+        .args(["energy", "watch", "--every", "0s"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--every has to be longer than nothing",
+        ));
+}
+
+#[test]
+fn energy_watch_leaves_at_its_limit_between_reads() {
+    tool("ours-pro-energy")
+        .args(["energy", "watch", "--for", "300ms", "--every", "10s"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("   0.30 s  3.30 V"))
+        .stdout(predicate::str::contains("  10.00 s").not());
+}
+
+#[test]
+fn energy_watch_starts_a_capture_over_a_fault() {
+    tool("ours-pro-energy-failed")
+        .args(["energy", "watch", "--for", "200ms"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "the capture failed after 17.1 mJ over 10000 pairs, when the ADC overran or its DMA failed. A new capture replaces it.",
+        ))
+        .stdout(predicate::str::contains("   0.20 s  3.30 V"))
+        .stdout(predicate::str::contains("stopped: "))
+        .stdout(predicate::str::contains("pairs since the start."));
+}
+
+#[test]
+fn energy_latest_reports_a_fault() {
+    tool("ours-pro-energy-failed")
+        .args(["energy", "latest"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "capture failed: the ADC overran or its DMA failed. A new start clears the fault.",
+        ));
+}
+
+#[test]
+fn energy_stop_after_a_fault_reports_what_was_kept() {
+    tool("ours-pro-energy-failed")
+        .args(["energy", "stop"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "stopped: the capture failed after 17.1 mJ over 10000 pairs, when the ADC overran or its DMA failed.",
+        ));
+}
+
+#[test]
+fn energy_says_when_another_program_holds_the_probe() {
+    tool("busy")
+        .args(["energy", "total"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "could not ask CJ3E7A91C2 what it runs: another program has it open",
+        ));
+}
+
+#[test]
+fn energy_refuses_an_image_that_predates_it() {
+    tool("ours")
+        .args(["energy", "total"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "which predates its energy measurement: update it first",
+        ));
+}
+
+#[test]
+fn energy_refuses_a_board_without_it() {
+    tool("ours-plain")
+        .args(["energy", "start"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "is not an MCU-Link Pro, so it has no energy measurement",
+        ));
+}
+
+#[test]
+fn energy_refuses_stock() {
+    tool("pro")
+        .args(["energy", "latest"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "is stock V3.172, not running ours",
+        ));
+}
+
 /// A RUST_LOG that names only another crate still shows why verge failed.
 #[test]
 fn the_final_error_survives_a_narrow_rust_log() {

@@ -1,4 +1,5 @@
 use std::num::NonZeroUsize;
+mod energy;
 mod progress;
 mod read;
 
@@ -137,6 +138,20 @@ enum Command {
     /// debug sessions and go back to inputs when the unit restarts. LED6 (SIO) is lit while any
     /// of them is driven.
     Dio(DioArgs),
+    /// Read or switch the target supply of an MCU-Link Pro running ours.
+    ///
+    /// The supply feeds the target through J6, at 3.3 V or, with J5 fitted, 1.8 V, up to 400 mA.
+    /// It is off whenever the Pro starts. The state shown is the one the firmware set, not a
+    /// measured voltage.
+    Power(energy::PowerArgs),
+    /// Measure a target's voltage, current and energy through an MCU-Link Pro running ours.
+    ///
+    /// The probe measures the current that flows from J9 pin 1 to pin 3, whatever supplies it;
+    /// `verge power` switches the Pro's own supply. A capture runs in the probe from `start` to
+    /// `stop`, so a debugger can use the probe meanwhile. While a debugger has the probe open,
+    /// these commands cannot reach it.
+    #[command(subcommand)]
+    Energy(energy::EnergyCommand),
 }
 
 #[derive(Args)]
@@ -476,6 +491,8 @@ fn run<B: Bus + Sync, H: Http>(
         None | Some(Command::List) => list(bus, cli.verbose > 0),
         Some(Command::Cjtag(args)) => cjtag(bus, args),
         Some(Command::Dio(args)) => dio(bus, args),
+        Some(Command::Power(args)) => energy::power(bus, args),
+        Some(Command::Energy(command)) => energy::energy(bus, command, cancel),
         Some(Command::Update(args)) => update_unit(bus, github, args, cancel),
         Some(Command::Isp(IspCommand::Enter { serial, stock })) => {
             bootloader(bus, serial.as_deref(), *stock, cancel)
