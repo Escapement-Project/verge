@@ -98,15 +98,19 @@ impl Model {
         let sequence = reading.newest.map(|newest| match newest {
             Newest::Calibrated { sequence, .. } | Newest::Raw { sequence, .. } => sequence,
         });
-        // A sequence or a total that went back, in pairs or in energy, is a start since the last
-        // read, and not this watch's: measure it afresh, and leave it running.
-        let sequence_back = sequence
-            .zip(self.sequence)
-            .is_some_and(|(now, before)| now < before);
-        let total_back = reading.total.zip(self.previous).is_some_and(
-            |((nanojoules, pairs), (energy, before))| pairs < before || nanojoules < energy,
-        );
-        if sequence_back || total_back {
+        // A total that went back, in pairs or in energy, is a start since the last read, and not
+        // this watch's: measure it afresh, and leave it running. Without a total the sequence is
+        // all there is. With one it is not trusted alone: older firmware could answer the newest
+        // pair from a segment back.
+        let restarted = match reading.total {
+            Some((nanojoules, pairs)) => self
+                .previous
+                .is_some_and(|(energy, before)| pairs < before || nanojoules < energy),
+            None => sequence
+                .zip(self.sequence)
+                .is_some_and(|(now, before)| now < before),
+        };
+        if restarted {
             self.started_here = false;
             self.rate = None;
             self.baseline = None;
@@ -575,6 +579,27 @@ mod tests {
         assert!(model.started_here);
         model.update(without_total(0.2, 40));
         assert!(!model.started_here);
+    }
+
+    #[test]
+    fn a_sequence_that_steps_back_while_the_total_grows_is_the_same_capture() {
+        let mut model = Model::new("CJ3E7A91C2", Some(1000), Duration::from_secs(30));
+        model.update(reading(0.0, 20_000, 500_000, 5_000));
+        let back = Reading {
+            newest: Some(Newest::Calibrated {
+                millivolts: 3300,
+                nanoamps: 20_000,
+                range: 1,
+                sequence: 4_993,
+            }),
+            ..reading(0.1, 20_000, 506_600, 5_100)
+        };
+        model.update(back);
+        assert!(
+            model.started_here,
+            "a segment-short newest pair is not a start"
+        );
+        assert_eq!(model.rate, Some(1000.0));
     }
 
     #[test]
