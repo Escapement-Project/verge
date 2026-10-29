@@ -139,14 +139,15 @@ off whenever the Pro starts. The tool reports the state the firmware set, not a 
 `energy` measures the current that flows from J9 pin 1 to pin 3 of an MCU-Link Pro running Verge,
 and the voltage on the target's side. `energy start` starts a capture at `--rate` voltage and
 current pairs a second, 1,000 by default. The capture runs in the probe until `energy stop`, so a
-debugger can use the probe meanwhile. While a debugger has the probe open, verge cannot reach it,
-so read the capture once the debugger lets go. `energy latest` shows the newest pair, and
-`energy total` the energy since the start. The total counts only the time the probe converts: it
-leaves out the moments it holds conversions, as when it times a new debug connection at a fast
-clock. A stopped capture keeps its total until the next start or a restart.
+debugger can use the probe meanwhile. `power` and `energy` keep working while a debugger has the
+probe open: verge reaches them through Verge Aux, a second USB interface that debuggers leave alone.
+A Verge image older than that interface answers only once the debugger lets go. `energy latest`
+shows the newest pair, and `energy total` the energy since the start. The total counts only the time
+the probe converts: it leaves out the moments it holds conversions, as when it times a new debug
+connection at a fast clock. A stopped capture keeps its total until the next start or a restart.
 `energy calibration` lists the points each current range was calibrated at. A start can calibrate
-first, which disconnects J9 from the target for about 0.2 s. A target powered through J9 loses
-its supply for that time.
+first, which disconnects J9 from the target for about 0.2 s. A target powered through J9 loses its
+supply for that time.
 
 `energy watch` shows a capture live, and starts one if none runs. Over a capture that a fault
 stopped, it shows that capture's total and then starts a new one, which clears it. It stops only a
@@ -476,17 +477,20 @@ cargo run -p verge --features simulate -- --simulate arrivals batch --yes --coun
 
 The scenarios are `bench`, `ours`, `stock`, `stock-old`, `stock-hid`, `isp`, `isp-jumper`,
 `two-isp`, `ours-beside-isp`, `isp-ours`, `two-isp-ours`, `mini`, `isp-mini`, `busy`, `arrivals`,
-`pro`, `ours-pro`, `ours-pro-energy`, `ours-pro-energy-failed`, `ours-pro-held`, `ours-plain`,
-`pro-old`, `fails-writes`, `unnamed-board`, `swd-jumper`, `pro-swd-jumper` and `stock-swd-jumper`.
-In `arrivals`, five units are plugged in over the first eight seconds. In `pro`, the one unit is an
-MCU-Link Pro; in `pro-old`, a Pro on stock V3.108, which needs the jumper. In `ours-pro-energy`, a
-Pro running Verge has its target supply on and has captured for 10 s; its target sleeps at 20 µA and
-wakes at 5 mA for 10 ms in every 100 ms. In `ours-pro-energy-failed`, that capture has stopped with
-an acquisition fault. In `fails-writes`, the bootloader refuses every write. In `unnamed-board`, the
-unit's product string names no board. In `swd-jumper` and `pro-swd-jumper`, a standalone MCU-Link
-and a Pro run Verge with the SWD jumper fitted; in `stock-swd-jumper`, a standalone MCU-Link runs
-stock with it. A simulated unit boots only the simulator's own images. A real image flashed there,
-such as stock from your LinkServer install, leaves the unit silent.
+`pro`, `ours-pro`, `ours-pro-debugger`, `ours-pro-aux-taken`, `ours-pro-energy`,
+`ours-pro-energy-failed`, `ours-pro-held`, `ours-plain`, `pro-old`, `fails-writes`, `unnamed-board`,
+`swd-jumper`, `pro-swd-jumper` and `stock-swd-jumper`. In `arrivals`, five units are plugged in over
+the first eight seconds. In `pro`, the one unit is an MCU-Link Pro; in `pro-old`, a Pro on stock
+V3.108, which needs the jumper. In `ours-pro-energy`, a Pro running Verge has its target supply on
+and has captured for 10 s; its target sleeps at 20 µA and wakes at 5 mA for 10 ms in every 100 ms.
+In `ours-pro-energy-failed`, that capture has stopped with an acquisition fault. In
+`ours-pro-debugger`, another program holds a Pro's CMSIS-DAP interface, as a debugger would; in
+`ours-pro-aux-taken`, another program holds its Verge Aux. In `fails-writes`, the bootloader refuses
+every write. In `unnamed-board`, the unit's product string names no board. In `swd-jumper` and
+`pro-swd-jumper`, a standalone MCU-Link and a Pro run Verge with the SWD jumper fitted; in
+`stock-swd-jumper`, a standalone MCU-Link runs stock with it. A simulated unit boots only the
+simulator's own images. A real image flashed there, such as stock from your LinkServer install,
+leaves the unit silent.
 
 GUI tests run headlessly through `egui_kittest` against the same simulator. A separate test
 renders each state to PNG and requires a GPU:

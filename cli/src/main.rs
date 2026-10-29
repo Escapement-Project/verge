@@ -1138,6 +1138,11 @@ fn cjtag<B: Bus>(bus: &B, args: &CjtagArgs, serial: Option<&str>) -> Result<()> 
     let units = detect_named(bus, serial).context("looking for MCU-Links")?;
     let unit = pick_unit(&units, serial, runs_ours)?;
     let serial = unit.serial().unwrap_or("the unit");
+    if let State::Held { .. } = unit.state {
+        bail!(
+            "another program holds {serial}'s CMSIS-DAP interface, and the two-pin formats are set only through it"
+        );
+    }
     let State::Probe {
         firmware: Firmware::Ours(ours),
         ..
@@ -1196,6 +1201,11 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
     let units = detect_named(bus, serial).context("looking for MCU-Links")?;
     let unit = pick_unit(&units, serial, pro_running_ours)?;
     let serial = unit.serial().unwrap_or("the unit");
+    if let State::Held { .. } = unit.state {
+        bail!(
+            "another program holds {serial}'s CMSIS-DAP interface, and the tool reaches the DIO pins only through it"
+        );
+    }
     let State::Probe {
         firmware: Firmware::Ours(ours),
         ..

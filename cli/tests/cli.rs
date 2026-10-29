@@ -1260,6 +1260,63 @@ fn energy_says_when_another_program_holds_the_probe() {
         ));
 }
 
+/// Every supply and energy command reaches a Pro over Verge Aux while a debugger holds CMSIS-DAP,
+/// and says what it says over CMSIS-DAP.
+#[test]
+fn power_and_energy_work_while_a_debugger_holds_the_probe() {
+    for args in [
+        &["power"][..],
+        &["power", "on"],
+        &["energy", "start", "--rate", "2000"],
+        &["energy", "latest"],
+        &["energy", "total"],
+        &["energy", "stop"],
+        &["energy", "calibration"],
+        &["energy", "watch", "--for", "200ms"],
+    ] {
+        let free = tool("ours-pro").args(args).assert().success();
+        let held = tool("ours-pro-debugger").args(args).assert().success();
+        assert_eq!(
+            String::from_utf8_lossy(&held.get_output().stdout),
+            String::from_utf8_lossy(&free.get_output().stdout),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn list_names_what_a_held_pro_runs() {
+    tool("ours-pro-debugger")
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Verge, build 26ea505, its CMSIS-DAP held by another program",
+        ))
+        .stdout(predicate::str::contains("board: MCU-Link Pro"));
+}
+
+#[test]
+fn dio_says_a_debugger_holds_the_way_to_it() {
+    tool("ours-pro-debugger")
+        .arg("dio")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "holds CJ3E7A91C2's CMSIS-DAP interface, and the tool reaches the DIO pins only through it",
+        ));
+}
+
+/// Another program on Verge Aux leaves CMSIS-DAP, which the tool falls back to.
+#[test]
+fn energy_falls_back_to_cmsis_dap_when_verge_aux_is_taken() {
+    tool("ours-pro-aux-taken")
+        .args(["energy", "start", "--rate", "2000"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("captures 2000 pairs a second."));
+}
+
 #[test]
 fn energy_refuses_an_image_that_predates_it() {
     tool("ours")

@@ -202,7 +202,8 @@ fn identity(unit: &Unit) -> (&'static str, Glyph, Option<Color32>) {
         } => ("STOCK", glyph::STOCK, Some(color::TEXT_2)),
         State::SwdJumper {
             firmware: Jumpered::Ours,
-        } => ("OURS", glyph::OURS, Some(color::OURS)),
+        }
+        | State::Held { .. } => ("OURS", glyph::OURS, Some(color::OURS)),
         State::SwdJumper {
             firmware: Jumpered::Stock(_),
         } => ("STOCK", glyph::STOCK, Some(color::TEXT_2)),
@@ -218,7 +219,8 @@ fn version_of(unit: &Unit) -> Option<String> {
         State::Probe {
             firmware: Firmware::Ours(ours),
             ..
-        } => Some(ours.firmware.clone()),
+        }
+        | State::Held { ours } => Some(ours.firmware.clone()),
         State::Probe {
             firmware: Firmware::Stock { version },
             ..
@@ -1177,6 +1179,7 @@ impl VergeApp {
                 State::Unreadable { reason, .. } => {
                     format!("COULD NOT ASK: {}", reason.to_uppercase())
                 }
+                State::Held { .. } => "ANOTHER PROGRAM HOLDS ITS CMSIS-DAP".to_owned(),
                 State::Probe { .. } => match offer(unit, &self.units).best() {
                     Some(Path::OursJumperFree | Path::StockJumperFree) => {
                         "UPDATES WITHOUT THE JUMPER"

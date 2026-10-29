@@ -7,13 +7,13 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use tracing_indicatif::indicatif_println;
-use verge_probe::detect::{State, detect_named};
 use verge_probe::aux::Aux;
 use verge_probe::bus::BusError;
+use verge_probe::detect::{State, Unit, detect_named};
 use verge_probe::{
     Bus, CalibrationRange, Cancel, CommandError, DapTransport, EnergyAccumulator,
-    EnergyCalibration, EnergyCaptureSample, EnergyError, EnergyTotal, Firmware, VergeControl,
-    VergeInfo, VergeTransport, dap,
+    EnergyCalibration, EnergyCaptureSample, EnergyError, EnergyTotal, VergeControl, VergeInfo,
+    VergeTransport, dap,
 };
 
 #[derive(Args)]
@@ -116,6 +116,13 @@ impl Feature {
     }
 }
 
+/// A Pro running Verge, whether its CMSIS-DAP is free or a debugger holds it.
+fn pro_running_verge(unit: &Unit) -> bool {
+    unit.verge().is_some_and(|ours| {
+        ours.board.map(verge_probe::BoardKind::number) == Some(dap::Ours::BOARD_MCU_LINK_PRO)
+    })
+}
+
 /// Runs `f` on the Pro `serial` names, or the one [`crate::pick_unit`] finds, refusing anything
 /// else in a sentence that says why.
 fn with_pro<B: Bus, T>(
@@ -126,16 +133,12 @@ fn with_pro<B: Bus, T>(
 ) -> Result<T> {
     let what = feature.name();
     let units = detect_named(bus, serial).context("looking for MCU-Links")?;
-    let unit = crate::pick_unit(&units, serial, crate::pro_running_ours)?;
+    let unit = crate::pick_unit(&units, serial, pro_running_verge)?;
     let name = unit.serial().unwrap_or("the unit");
     if let State::Unreadable { reason, .. } = &unit.state {
         bail!("the tool could not ask {name} what it runs: {reason}");
     }
-    let State::Probe {
-        firmware: Firmware::Ours(ours),
-        ..
-    } = &unit.state
-    else {
+    let Some(ours) = unit.verge() else {
         bail!(
             "{name} is {}, not running Verge, so the tool cannot reach its {what}",
             unit.state
@@ -149,11 +152,14 @@ fn with_pro<B: Bus, T>(
     if unit.device.aux {
         match bus.open_aux(&unit.device) {
             Ok(link) => {
-                let mut aux = Aux::open(link).with_context(|| format!("opening {name}'s Verge Aux"))?;
+                let mut aux =
+                    Aux::open(link).with_context(|| format!("opening {name}'s Verge Aux"))?;
                 return run(name, &mut aux, feature, f);
             }
             Err(BusError::Busy { .. }) => {
-                tracing::info!("another program holds {name}'s Verge Aux, so the tool uses CMSIS-DAP");
+                tracing::info!(
+                    "another program holds {name}'s Verge Aux, so the tool uses CMSIS-DAP"
+                );
             }
             Err(error) => return Err(error).with_context(|| format!("opening {name}'s Verge Aux")),
         }
