@@ -4,6 +4,8 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -62,7 +64,8 @@ pub fn record<B: Bus, L: AuxLink>(
         Ok(_) => true,
         Err(error) => return Err(error).with_context(|| format!("reading {name}'s capture")),
     };
-    let mut sink = Sink::create(&options.out, options.csv)?;
+    // The probe answers before the file is touched, so a refused start leaves an earlier
+    // recording there as it was.
     if running {
         pro.stream_energy_capture()
             .with_context(|| format!("streaming {name}'s capture"))?;
@@ -77,34 +80,52 @@ pub fn record<B: Bus, L: AuxLink>(
         });
     }
     let started = !running;
-    let streamed = stream(bus, name, pro, &mut sink, started, options.limit, cancel);
-    let finished = sink
+    let sink = match Sink::create(&options.out, options.csv) {
+        Ok(sink) => sink,
+        Err(error) => {
+            leave(name, pro, started);
+            return Err(error);
+        }
+    };
+    let writer = Writer::spawn(sink);
+    let streamed = stream(bus, name, pro, &writer, started, options.limit, cancel);
+    let written = writer
         .finish()
-        .with_context(|| format!("finishing {}", options.out.display()));
-    match (streamed, finished) {
+        .with_context(|| format!("writing {}", options.out.display()));
+    match (streamed, written) {
         (Ok(recorded), Ok(())) => Ok(recorded),
-        (Err(error), _) | (Ok(_), Err(error)) => {
-            // Leave the probe as this found it: a capture started here stops, and a stream of a
-            // capture that ran before ends.
-            let left = if started {
-                pro.stop_energy_capture()
-            } else {
-                pro.end_energy_stream()
-            };
-            if let Err(left) = left {
-                tracing::warn!("could not leave {name} as it was: {left}");
-            }
+        // The writer's own error says why the stream could not hand it pairs.
+        (_, Err(error)) | (Err(error), Ok(())) => {
+            leave(name, pro, started);
             Err(error)
         }
     }
 }
 
-/// Reads the stream into `sink` until it ends, asking it to end at the limit or Ctrl-C.
+/// Leaves the probe as a recording found it: a capture the recording started stops, and the
+/// stream of a capture that ran before ends.
+fn leave<L: AuxLink>(name: &str, pro: &mut VergeControl<'_, Aux<L>>, started: bool) {
+    let left = if started {
+        pro.stop_energy_capture()
+    } else {
+        pro.end_energy_stream()
+    };
+    if let Err(left) = left {
+        tracing::warn!("could not leave {name} as it was: {left}");
+    }
+}
+
+/// Pairs between the one expected next and `first`, as the sequence counts them.
+fn skipped(next: u32, first: u32) -> u64 {
+    u64::try_from(first.wrapping_sub(next).cast_signed()).unwrap_or(0)
+}
+
+/// Reads the stream into `writer` until it ends, asking it to end at the limit or Ctrl-C.
 fn stream<B: Bus, L: AuxLink>(
     bus: &B,
     name: &str,
     pro: &mut VergeControl<'_, Aux<L>>,
-    sink: &mut Sink,
+    writer: &Writer,
     started: bool,
     limit: Option<Duration>,
     cancel: &Cancel,
@@ -142,7 +163,7 @@ fn stream<B: Bus, L: AuxLink>(
                 if converter.is_some() {
                     bail!("{name} began a second stream before ending the first");
                 }
-                sink.begin(header.rate)?;
+                writer.send(Output::Begin(header.rate))?;
                 next_sequence = Some(header.first_sequence);
                 converter = Some(Converter::new(&header));
             }
@@ -152,18 +173,23 @@ fn stream<B: Bus, L: AuxLink>(
                     continue;
                 };
                 if let Some(next) = next_sequence {
-                    lost += u64::from(pairs.first_sequence.wrapping_sub(next));
+                    lost += skipped(next, pairs.first_sequence);
                 }
                 next_sequence = Some(pairs.first_sequence.wrapping_add(pairs.pairs.len() as u32));
                 converter.add_message(&pairs);
-                sink.samples(&converter.take_samples())?;
+                writer.send(Output::Pairs(converter.take_samples()))?;
             }
             Message::End(end) => {
                 let Some(mut converter) = converter else {
                     continue;
                 };
+                // The probe keeps room for the end when it drops pairs, so pairs lost just before
+                // it show only in its last sequence.
+                if let Some(next) = next_sequence {
+                    lost += skipped(next, end.last_sequence.wrapping_add(1));
+                }
                 converter.end();
-                sink.samples(&converter.take_samples())?;
+                writer.send(Output::Pairs(converter.take_samples()))?;
                 let total = converter.total();
                 return Ok(Recorded {
                     pairs: total.pairs,
@@ -175,6 +201,50 @@ fn stream<B: Bus, L: AuxLink>(
             // This firmware reports no edges yet.
             Message::Edges(_) => {}
         }
+    }
+}
+
+/// What the read loop hands the writer.
+enum Output {
+    Begin(u32),
+    Pairs(Vec<Sample>),
+}
+
+/// The file, written on a thread of its own. Writing a sigrok chunk takes long enough that the
+/// probe's 16 messages would fill meanwhile and pairs be lost.
+struct Writer {
+    send: mpsc::Sender<Output>,
+    thread: thread::JoinHandle<Result<()>>,
+}
+
+impl Writer {
+    fn spawn(mut sink: Sink) -> Writer {
+        let (send, receive) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            for output in receive {
+                match output {
+                    Output::Begin(rate) => sink.begin(rate)?,
+                    Output::Pairs(samples) => sink.samples(&samples)?,
+                }
+            }
+            sink.finish()
+        });
+        Writer { send, thread }
+    }
+
+    /// Fails once the writer has stopped on an error, which [`Writer::finish`] returns.
+    fn send(&self, output: Output) -> Result<()> {
+        self.send
+            .send(output)
+            .map_err(|_| anyhow!("the file stopped taking pairs"))
+    }
+
+    /// Waits for everything sent to be written, and the file finished.
+    fn finish(self) -> Result<()> {
+        drop(self.send);
+        self.thread
+            .join()
+            .map_err(|_| anyhow!("the file's writer panicked"))?
     }
 }
 
@@ -305,9 +375,11 @@ impl Sigrok {
         for (index, values) in [(2, &self.volts), (3, &self.milliamps)] {
             self.zip
                 .start_file(format!("analog-1-{index}-{chunk}"), options())?;
-            for value in values {
-                self.zip.write_all(&value.to_le_bytes())?;
-            }
+            let bytes: Vec<u8> = values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect();
+            self.zip.write_all(&bytes)?;
         }
         self.volts.clear();
         self.milliamps.clear();
@@ -512,19 +584,19 @@ mod tests {
         let mut aux = Aux::open(Playback(messages.into_iter().collect())).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lost.csv");
-        let mut sink = Sink::create(&path, true).unwrap();
+        let writer = Writer::spawn(Sink::create(&path, true).unwrap());
         let bus = verge_probe::sim::SimBus::default();
         let recorded = stream(
             &bus,
             "the unit",
             &mut VergeControl::new(&mut aux),
-            &mut sink,
+            &writer,
             false,
             None,
             &Cancel::new(),
         )
         .unwrap();
-        sink.finish().unwrap();
+        writer.finish().unwrap();
         assert_eq!((recorded.pairs, recorded.lost), (5, 2));
         assert_eq!(recorded.reason, EndReason::Stopped);
         let sequences: Vec<String> = std::fs::read_to_string(&path)
@@ -534,6 +606,111 @@ mod tests {
             .map(|line| line.split(',').next().unwrap().to_owned())
             .collect();
         assert_eq!(sequences, ["1", "2", "3", "6", "7"]);
+    }
+
+    /// The probe keeps room for the end when it drops pairs, so its last sequence counts pairs
+    /// lost just before it.
+    #[test]
+    fn pairs_lost_before_the_end_are_counted() {
+        let mut end = vec![0xA2, 2];
+        end.extend_from_slice(&10u32.to_le_bytes());
+        let messages = [
+            Some(vec![0x90, 0, 0]),
+            None,
+            Some(header()),
+            Some(pairs(1, 3)),
+            Some(end),
+        ];
+        let mut aux = Aux::open(Playback(messages.into_iter().collect())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let writer = Writer::spawn(Sink::create(&dir.path().join("tail.csv"), true).unwrap());
+        let recorded = stream(
+            &verge_probe::sim::SimBus::default(),
+            "the unit",
+            &mut VergeControl::new(&mut aux),
+            &writer,
+            false,
+            None,
+            &Cancel::new(),
+        )
+        .unwrap();
+        writer.finish().unwrap();
+        assert_eq!((recorded.pairs, recorded.lost), (3, 7));
+    }
+
+    /// A probe that turns the start down, as one whose calibration failed would.
+    struct RefuseStart(verge_probe::sim::SimAux);
+
+    impl AuxLink for RefuseStart {
+        fn write(&mut self, request: &[u8]) -> Result<(), verge_probe::dap::LinkError> {
+            let mut request = request.to_vec();
+            if request.starts_with(&[0x90, 5]) {
+                request[2..6].fill(0);
+            }
+            self.0.write(&request)
+        }
+
+        fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, verge_probe::dap::LinkError> {
+            self.0.read(timeout)
+        }
+    }
+
+    fn pro_link() -> (verge_probe::sim::SimBus, verge_probe::UsbDevice) {
+        let bus = verge_probe::sim::SimBus::scenario("ours-pro").unwrap();
+        let device = verge_probe::detect(&bus).unwrap().remove(0).device;
+        (bus, device)
+    }
+
+    fn options(out: &Path, csv: bool) -> Options {
+        Options {
+            out: out.to_owned(),
+            rate: 1000,
+            limit: Some(Duration::from_millis(300)),
+            csv,
+        }
+    }
+
+    #[test]
+    fn a_refused_start_leaves_an_earlier_recording_alone() {
+        let (bus, device) = pro_link();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("run.sr");
+        std::fs::write(&out, b"an earlier recording").unwrap();
+        let mut aux = Aux::open(RefuseStart(bus.open_aux(&device).unwrap())).unwrap();
+        let mut pro = VergeControl::new(&mut aux);
+        let refused = record(
+            &bus,
+            "the unit",
+            &mut pro,
+            &options(&out, false),
+            &Cancel::new(),
+        );
+        assert!(refused.is_err());
+        assert_eq!(std::fs::read(&out).unwrap(), b"an earlier recording");
+    }
+
+    /// A file that stops taking pairs ends the recording with its own error, and the capture the
+    /// recording started stops.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_full_disk_ends_the_recording_and_its_capture() {
+        let (bus, device) = pro_link();
+        let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+        let mut pro = VergeControl::new(&mut aux);
+        let options = Options {
+            limit: Some(Duration::from_secs(2)),
+            ..options(Path::new("/dev/full"), true)
+        };
+        let error = record(&bus, "the unit", &mut pro, &options, &Cancel::new())
+            .err()
+            .expect("the disk is full");
+        assert!(format!("{error:#}").contains("No space left"), "{error:#}");
+        let log: Vec<String> = bus
+            .log()
+            .into_iter()
+            .filter_map(|line| line.split_once("AUX ").map(|(_, hex)| hex.to_owned()))
+            .collect();
+        assert_eq!(log.last().map(String::as_str), Some("9002"), "{log:?}");
     }
 
     #[test]
