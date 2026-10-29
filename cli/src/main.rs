@@ -48,11 +48,17 @@ Examples:
   verge isp flash --file build/mculink_cjtag.elf
                            flash a unit you put into ISP mode with the jumper";
 
-/// Update the firmware on an MCU-Link: NXP's stock firmware, or ours from mculink-verge.
+/// Use what Verge firmware adds to an MCU-Link, and update its firmware.
 ///
-/// The tool finds every attached MCU-Link, says what it runs, and picks the best way to update
-/// it. A unit running ours, or stock V3.122 or later, restarts into its bootloader when asked,
-/// so it needs no jumper. Anything else needs the ISP jumper, fitted before it is plugged in.
+/// On a unit running Verge, the tool shows or limits the two-pin cJTAG formats the unit offers, and
+/// on an MCU-Link Pro drives the DIO pins, switches the target supply and measures energy. It reads
+/// target memory through any MCU-Link.
+///
+/// It also updates firmware: Verge, which it calls ours, or NXP's stock. It finds every attached
+/// MCU-Link, says what it
+/// runs, and picks the best way to update it. A unit running ours, or stock V3.122 or later,
+/// restarts into its bootloader when asked, so it needs no jumper. Anything else needs the ISP
+/// jumper, fitted before it is plugged in.
 #[derive(Parser)]
 #[command(name = "verge", version, after_help = EXAMPLES)]
 struct Cli {

@@ -1,10 +1,12 @@
 # verge
 
-A CLI and GUI for updating MCU-Link firmware, built on `verge-probe`. It works with NXP's stock
-CMSIS-DAP firmware and with Verge, the firmware in `mculink-verge`. The tools label Verge as `ours`.
+A CLI and GUI for MCU-Links running Verge, the firmware in `mculink-verge`. The CLI uses what Verge
+adds: it shows or limits the two-pin cJTAG formats a unit offers, and on an MCU-Link Pro it drives
+the DIO pins, switches the target supply and measures energy. Both tools also update firmware, Verge
+or NXP's stock CMSIS-DAP firmware. They label Verge as `ours`, and both are built on `verge-probe`.
 
-It lists attached MCU-Links with their firmware versions and board types, then selects an update
-path for each:
+To update, the tool lists attached MCU-Links with their firmware versions and board types, then
+selects an update path for each:
 
 - A unit running Verge restarts into its bootloader on request, without a jumper.
 - A unit running stock V3.122 or later supports the same request that NXP's LinkServer uses.
