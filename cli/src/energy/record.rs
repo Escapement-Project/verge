@@ -146,10 +146,11 @@ fn stream<B: Bus, L: AuxLink>(
                 next_sequence = Some(header.first_sequence);
                 converter = Some(Converter::new(&header));
             }
+            // Pairs and an end before the header are a stream this one replaced.
             Message::Pairs(pairs) => {
-                let converter = converter
-                    .as_mut()
-                    .with_context(|| format!("{name} sent pairs before the stream's header"))?;
+                let Some(converter) = converter.as_mut() else {
+                    continue;
+                };
                 if let Some(next) = next_sequence {
                     lost += u64::from(pairs.first_sequence.wrapping_sub(next));
                 }
@@ -159,7 +160,7 @@ fn stream<B: Bus, L: AuxLink>(
             }
             Message::End(end) => {
                 let Some(mut converter) = converter else {
-                    bail!("{name} ended a stream it never began");
+                    continue;
                 };
                 converter.end();
                 sink.samples(&converter.take_samples())?;
@@ -489,13 +490,18 @@ mod tests {
         message
     }
 
-    /// Pairs the sequence skips are counted as lost, and the file still gets the rest.
+    /// Pairs the sequence skips are counted as lost, and the file still gets the rest. What comes
+    /// before the header belongs to a stream this one replaced.
     #[test]
     fn a_skipped_sequence_counts_as_lost() {
         let mut end = vec![0xA2, 2];
         end.extend_from_slice(&7u32.to_le_bytes());
+        let mut replaced = vec![0xA2, 1];
+        replaced.extend_from_slice(&40u32.to_le_bytes());
         let messages = [
             None,
+            Some(pairs(30, 2)),
+            Some(replaced),
             Some(header()),
             Some(pairs(1, 3)),
             Some(pairs(6, 2)),
