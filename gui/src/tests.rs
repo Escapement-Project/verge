@@ -179,7 +179,7 @@ fn an_update_is_confirmed_runs_and_reports_the_unit_back() {
     press(&mut h, "CONFIRM");
     assert!(h.state().busy());
     until(&mut h, "DONE");
-    h.get_by_label_contains("runs ours, build v0.3.0");
+    h.get_by_label_contains("runs Verge, build v0.3.0");
     assert!(!h.state().busy());
     press(&mut h, "BACK");
     // The rescan after the update finds the unit by its port and selects it again.
@@ -579,14 +579,14 @@ fn pictures() {
             "1-1",
             "QK7RM2VTX8D41",
             "stock V3.172",
-            Some("ours, build v0.3.0"),
+            Some("Verge, build v0.3.0"),
             verge_probe::batch::Settled::Updated,
             None,
         ));
         manual.queued.push_back(record(
             "1-3",
             "CJ3E7AC4F5",
-            "ours, build v0.3.0",
+            "Verge, build v0.3.0",
             None,
             verge_probe::batch::Settled::Current,
             None,

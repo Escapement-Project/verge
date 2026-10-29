@@ -28,7 +28,7 @@ fn list_is_the_default() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "CJ3E7A91C2     ours, build 14d05d4",
+            "CJ3E7A91C2     Verge, build 14d05d4",
         ))
         .stdout(predicate::str::contains("QK7RM2VTX8D41  stock V3.172"))
         .stdout(predicate::str::contains("update: jumper-free (stock)"));
@@ -40,7 +40,7 @@ fn update_installs_the_latest_release() {
         .args(["update", "--yes"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("now runs ours, build v0.3.0"));
+        .stdout(predicate::str::contains("now runs Verge, build v0.3.0"));
 }
 
 #[test]
@@ -248,7 +248,7 @@ fn a_release_is_downloaded_only_when_agreed() {
         .assert()
         .success()
         .stderr(predicate::str::contains("Download release").not())
-        .stdout(predicate::str::contains("now runs ours, build v0.3.0"));
+        .stdout(predicate::str::contains("now runs Verge, build v0.3.0"));
 }
 
 #[test]
@@ -491,11 +491,11 @@ fn bootloader_sends_a_pro_into_isp_mode_only_for_stock() {
 #[test]
 fn list_names_each_units_board() {
     for (scenario, board) in [
-        ("bench", "board: a full MCU-Link"),
-        ("pro", "board: an MCU-Link Pro"),
+        ("bench", "board: MCU-Link"),
+        ("pro", "board: MCU-Link Pro"),
         ("isp", "board: cannot be told in ISP mode"),
         ("unnamed-board", "board: not reported"),
-        ("mini", "board: an MCU-Link mini"),
+        ("mini", "board: MCU-Link mini"),
     ] {
         tool(scenario)
             .assert()
@@ -791,7 +791,7 @@ fn ours_with_its_swd_jumper_asks_about_its_board_and_stock_is_sent_to_take_it_of
         .arg("list")
         .assert()
         .success()
-        .stdout(predicate::str::contains("ours, SWD jumper fitted"));
+        .stdout(predicate::str::contains("Verge, SWD jumper fitted"));
     // On Windows the tool offers ours only the ISP jumper, and says so before any board question.
     let refusal = if cfg!(windows) {
         "cannot be updated without the jumper"
@@ -816,7 +816,7 @@ fn isp_reset_starts_the_image_the_unit_holds() {
         .args(["isp", "reset"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("at 1-1 runs ours, build v0.3.0"));
+        .stdout(predicate::str::contains("at 1-1 runs Verge, build v0.3.0"));
 }
 
 #[test]
@@ -854,7 +854,7 @@ fn isp_reset_takes_a_port_among_two_bootloaders() {
         .args(["isp", "reset", "--port", "1-2"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("at 1-2 runs ours"));
+        .stdout(predicate::str::contains("at 1-2 runs Verge"));
 }
 
 #[test]
@@ -866,7 +866,7 @@ fn isp_flash_takes_a_port_among_two_bootloaders() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "at 1-2 now runs ours, build v0.3.0",
+            "at 1-2 now runs Verge, build v0.3.0",
         ));
     std::fs::remove_file(&image).unwrap();
 }

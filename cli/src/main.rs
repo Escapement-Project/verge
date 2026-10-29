@@ -596,10 +596,9 @@ fn list<B: Bus>(bus: &B, verbose: bool, serial: Option<&str>) -> Result<()> {
         .filter(|unit| serial.is_none_or(|serial| unit.serial() == Some(serial)))
     {
         indicatif_println!("{}", describe_unit(unit));
-        let board = match (&unit.state, unit.hardware()) {
-            (State::Bootloader, _) => "cannot be told in ISP mode".to_owned(),
-            (_, Hardware::Unknown) => "not reported".to_owned(),
-            (_, board) => board.to_string(),
+        let board = match unit.state {
+            State::Bootloader => "cannot be told in ISP mode".to_owned(),
+            _ => unit.hardware().name(),
         };
         indicatif_println!("{:<10}board: {board}", "");
         if verbose && let State::Probe { identity, firmware } = &unit.state {
