@@ -195,7 +195,7 @@ fn identity(unit: &Unit) -> (&'static str, Glyph, Option<Color32>) {
         State::Probe {
             firmware: Firmware::Ours(_),
             ..
-        } => ("OURS", glyph::OURS, Some(color::OURS)),
+        } => ("VERGE", glyph::OURS, Some(color::OURS)),
         State::Probe {
             firmware: Firmware::Stock { .. },
             ..
@@ -203,7 +203,7 @@ fn identity(unit: &Unit) -> (&'static str, Glyph, Option<Color32>) {
         State::SwdJumper {
             firmware: Jumpered::Ours,
         }
-        | State::Held { .. } => ("OURS", glyph::OURS, Some(color::OURS)),
+        | State::Held { .. } => ("VERGE", glyph::OURS, Some(color::OURS)),
         State::SwdJumper {
             firmware: Jumpered::Stock(_),
         } => ("STOCK", glyph::STOCK, Some(color::TEXT_2)),

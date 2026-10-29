@@ -183,7 +183,7 @@ fn an_update_is_confirmed_runs_and_reports_the_unit_back() {
     assert!(!h.state().busy());
     press(&mut h, "BACK");
     // The rescan after the update finds the unit by its port and selects it again.
-    until(&mut h, "OURS v0.3.0 · 1-1");
+    until(&mut h, "VERGE v0.3.0 · 1-1");
 }
 
 /// The second of two units, updated, comes back as a new enumeration with a new serial; the
