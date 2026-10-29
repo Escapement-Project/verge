@@ -3,7 +3,7 @@
 A CLI and GUI for MCU-Links running Verge, the firmware in `mculink-verge`. The CLI uses what Verge
 adds: it shows or limits the two-pin cJTAG formats a unit offers, and on an MCU-Link Pro it drives
 the DIO pins, switches the target supply and measures energy. Both tools also update firmware, Verge
-or NXP's stock CMSIS-DAP firmware. They label Verge as `ours`, and both are built on `verge-probe`.
+or NXP's stock CMSIS-DAP firmware. Both are built on `verge-probe`.
 
 To update, the tool lists attached MCU-Links with their firmware versions and board types, then
 selects an update path for each:
@@ -215,20 +215,20 @@ verge batch
 # Only stock older than V3.172
 verge batch --take stock --stock-below 3.172
 # A build of your own, onto any unit, stopping after 20
-verge batch --file mculink_cjtag.elf --ours-any --count 20
+verge batch --file mculink_cjtag.elf --verge-any --count 20
 # Units that arrive in ISP mode, with the jumper fitted
 verge batch --take isp --yes
 ```
 
 The image can be a release, stock or a file, as for `update`. It is loaded and its release
 signature verified once, before the batch is armed. Ctrl-C during loading stops before any unit
-is updated. `--take` selects unit types: `stock`, `ours` and `isp`; the default is `stock,ours`.
+is updated. `--take` selects unit types: `stock`, `verge` and `isp`; the default is `stock,verge`.
 A unit running Verge is eligible if its build is older than the image or has no version.
-`--ours-any` accepts every build. A unit already running the image counts as current and is left
+`--verge-any` accepts every build. A unit already running the image counts as current and is left
 unchanged.
 
 Stock and local files have no release version for comparison. With either source, a batch that
-selects older Verge builds requires `--ours-any`. Otherwise, exclude Verge units with an option
+selects older Verge builds requires `--verge-any`. Otherwise, exclude Verge units with an option
 such as `--take stock`. The tool checks this before looking for the image.
 
 The batch accepts units connected after it is armed. `--include-attached` also includes units
@@ -406,7 +406,7 @@ interface. These udev rules allow it for the logged-in user:
 
 ```
 # /etc/udev/rules.d/69-mculink-update.rules
-# An MCU-Link running a CMSIS-DAP firmware, stock or ours
+# An MCU-Link running a CMSIS-DAP firmware, stock or Verge
 SUBSYSTEM=="usb", ATTRS{idVendor}=="1fc9", ATTRS{idProduct}=="0143", TAG+="uaccess"
 # The LPC55S69 ROM bootloader, ISP mode
 KERNEL=="hidraw*", ATTRS{idVendor}=="1fc9", ATTRS{idProduct}=="0021", TAG+="uaccess"

@@ -351,11 +351,11 @@ fn a_batch_asks_once_and_says_what_it_takes() {
 #[test]
 fn ours_any_takes_ours_as_stock_below_takes_stock() {
     tool("arrivals")
-        .args(["batch", "--take", "isp", "--ours-any"])
+        .args(["batch", "--take", "isp", "--verge-any"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "every full MCU-Link running ours or in ISP mode, attached from now on?",
+            "every full MCU-Link running Verge or in ISP mode, attached from now on?",
         ));
 }
 
@@ -586,7 +586,7 @@ fn inspect_says_which_boards_an_image_declares() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "declares no boards: as an image of ours, it goes on the full MCU-Link only",
+            "declares no boards: as a Verge image, it goes on the full MCU-Link only",
         ));
 }
 
@@ -605,9 +605,9 @@ fn a_batch_that_cannot_date_ours_does_not_arm() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "the image carries no version of ours",
+            "the image carries no Verge version",
         ))
-        .stderr(predicate::str::contains("Pass --ours-any"));
+        .stderr(predicate::str::contains("Pass --verge-any"));
     assert!(!record.exists());
     // Without ours it arms, and asks.
     tool("arrivals")
@@ -646,12 +646,12 @@ fn a_batch_for_the_pro_needs_an_image_built_for_it() {
     assert!(!record.exists());
     let image = sim_image("batch-pro", Some(0b10));
     tool("arrivals")
-        .args(["batch", "--board", "mcu-link-pro", "--ours-any", "--file"])
+        .args(["batch", "--board", "mcu-link-pro", "--verge-any", "--file"])
         .arg(&image)
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "onto every MCU-Link Pro running stock or ours, attached from now on?",
+            "onto every MCU-Link Pro running stock or Verge, attached from now on?",
         ))
         .stderr(predicate::str::contains("Pass --yes"));
     std::fs::remove_file(&image).unwrap();
@@ -732,7 +732,7 @@ fn bootloader_on_a_pro_says_how_to_put_ours_on_it() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "To put an image of ours built for it on it, run `verge update --file IMAGE` instead, which checks that the image declares this board before anything is flashed",
+            "To put a Verge image built for it on it, run `verge update --file IMAGE` instead, which checks that the image declares this board before anything is flashed",
         ));
 }
 
@@ -744,7 +744,7 @@ fn a_batch_that_cannot_date_ours_is_refused_before_loading() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "the image carries no version of ours",
+            "the image carries no Verge version",
         ))
         .stderr(predicate::str::contains("no MCU-LINK_CMSIS-DAP_V*.s19").not());
 }
@@ -964,7 +964,7 @@ fn cjtag_refuses_stock() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "is stock V3.172, not running ours",
+            "is stock V3.172, not running Verge",
         ));
 }
 
@@ -1033,7 +1033,7 @@ fn dio_refuses_stock() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "is stock V3.172, not running ours",
+            "is stock V3.172, not running Verge",
         ));
 }
 
@@ -1289,7 +1289,7 @@ fn energy_refuses_stock() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "is stock V3.172, not running ours",
+            "is stock V3.172, not running Verge",
         ));
 }
 

@@ -244,9 +244,9 @@ fn look_up_again<H: Http>(github: &GitHub<H>, forward: &Forward<'_>) {
 pub fn arm_error(error: &ArmError) -> String {
     let advice = match error {
         ArmError::OursUndated => {
-            " Tick \"of any build\" to take every unit running ours, or untick Ours."
+            " Tick \"of any build\" to take every unit running Verge, or untick Verge."
         }
-        ArmError::NotForBoard { .. } => " Pick an image of ours built for it, or STOCK.",
+        ArmError::NotForBoard { .. } => " Pick a Verge image built for it, or STOCK.",
         ArmError::Image(_) => "",
     };
     format!("{}{advice}", crate::app::sentence(&error.to_string()))

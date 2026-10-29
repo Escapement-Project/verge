@@ -95,7 +95,7 @@ impl Feature {
         }
     }
 
-    /// Why a unit running ours does not offer it.
+    /// Why a unit running Verge does not offer it.
     fn missing(self, name: &str, info: &VergeInfo) -> String {
         match self {
             // Firmware that reports extended capabilities (format 6) offers energy capture on
@@ -133,7 +133,7 @@ fn with_pro<B: Bus, T>(
     } = &unit.state
     else {
         bail!(
-            "{name} is {}, not running ours, so the tool cannot reach its {what}",
+            "{name} is {}, not running Verge, so the tool cannot reach its {what}",
             unit.state
         );
     };
@@ -150,7 +150,7 @@ fn with_pro<B: Bus, T>(
     let info = pro
         .info()
         .with_context(|| format!("asking {name} what it runs"))?
-        .with_context(|| format!("{name} no longer answers as ours"))?;
+        .with_context(|| format!("{name} no longer answers as Verge"))?;
     if !feature.offered(info) {
         bail!("{}", feature.missing(name, info));
     }

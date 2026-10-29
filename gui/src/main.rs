@@ -29,7 +29,7 @@ use crate::worker::Worker;
 #[derive(Parser)]
 #[command(name = "verge-gui", version)]
 struct Args {
-    /// The GitHub repository releases of ours come from.
+    /// The GitHub repository Verge releases come from.
     #[arg(long, value_name = "OWNER/NAME", env = "VERGE_REPO", hide_env_values = true, default_value = DEFAULT_REPO)]
     repo: Repo,
 

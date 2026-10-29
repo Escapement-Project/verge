@@ -42,7 +42,7 @@ use crate::progress::Bars;
 const EXAMPLES: &str = "\
 Examples:
   verge                    what is attached, and how each unit can be updated
-  verge update             install the latest release of ours on the only unit
+  verge update             install the latest Verge release on the only unit
   verge --serial CJ3E7A91C2 update --release v0.3.0
   verge update --stock     put NXP's firmware back, from your LinkServer install
   verge isp flash --file build/mculink_cjtag.elf
@@ -50,10 +50,10 @@ Examples:
 
 /// Control the Verge firmware, or update it.
 ///
-/// verge updates NXP's stock firmware as well as Verge, which it calls ours. It finds every
-/// attached MCU-Link, says what it runs, and picks the best way to update it. A unit running ours,
-/// or stock V3.122 or later, restarts into its bootloader when asked, so it needs no jumper.
-/// Anything else needs the ISP jumper, fitted before it is plugged in.
+/// verge updates NXP's stock firmware as well as Verge. It finds every attached MCU-Link, says
+/// what it runs, and picks the best way to update it. A unit running Verge, or stock V3.122 or
+/// later, restarts into its bootloader when asked, so it needs no jumper. Anything else needs the
+/// ISP jumper, fitted before it is plugged in.
 #[derive(Parser)]
 #[command(name = "verge", version, after_help = EXAMPLES)]
 struct Cli {
@@ -69,7 +69,7 @@ struct Cli {
     #[arg(long, global = true)]
     serial: Option<String>,
 
-    /// The GitHub repository releases of ours come from.
+    /// The GitHub repository Verge releases come from.
     #[arg(
         long,
         global = true,
@@ -101,7 +101,7 @@ enum Command {
     List,
     /// Install a firmware on a unit, the best way its state allows.
     ///
-    /// The image is the latest release of ours unless you pick another. A unit already in ISP
+    /// The image is the latest Verge release unless you pick another. A unit already in ISP
     /// mode is flashed as it is.
     Update(UpdateArgs),
     /// Update every unit of a chosen kind as it is plugged in, one at a time, until stopped.
@@ -114,7 +114,7 @@ enum Command {
     /// Work with a unit's ROM bootloader, ISP mode: enter it, flash, reset out of it, ask it.
     #[command(subcommand)]
     Isp(IspCommand),
-    /// Show a release of ours and how each attached unit compares to it.
+    /// Show a Verge release and how each attached unit compares to it.
     Release {
         /// A release tag. The latest release when left out.
         tag: Option<String>,
@@ -122,7 +122,7 @@ enum Command {
     /// Read target memory through a probe over SWD, JTAG or two-pin cJTAG, as probe-rs's read does.
     ///
     /// Prints probe-rs's hex table on stdout and nothing else: each line is its address and eight
-    /// values, four for b64. Two-pin works on a unit running ours; `verge cjtag --formats` picks
+    /// values, four for b64. Two-pin works on a unit running Verge; `verge cjtag --formats` picks
     /// which formats it offers the target.
     Read(read::ReadArgs),
     /// Read an image file and say what it puts into flash. Touches no USB device.
@@ -130,13 +130,13 @@ enum Command {
         /// An ELF or S-record file.
         file: PathBuf,
     },
-    /// Show or limit the two-pin (cJTAG) scan formats a unit running ours offers a host.
+    /// Show or limit the two-pin (cJTAG) scan formats a unit running Verge offers a host.
     ///
     /// A host frames the format it prefers of those both the unit and the target have. --oscan1-only leaves it
     /// OScan1, which is what to look at on an analyser, and --formats picks a set, so that a host
     /// can be held to one format to test or compare it. A limit lasts until the unit restarts.
     Cjtag(CjtagArgs),
-    /// Drive and read the four DIO pins on an MCU-Link Pro's J19 header, on a unit running ours.
+    /// Drive and read the four DIO pins on an MCU-Link Pro's J19 header, on a unit running Verge.
     ///
     /// With no options it reads them. --high and --low make pins outputs at that level, and
     /// --input makes them inputs again. DIO0, DIO1 and DIO2 change direction together, and DIO3
@@ -144,13 +144,13 @@ enum Command {
     /// debug sessions and go back to inputs when the unit restarts. LED6 (SIO) is lit while any
     /// of them is driven.
     Dio(DioArgs),
-    /// Read or switch the target supply of an MCU-Link Pro running ours.
+    /// Read or switch the target supply of an MCU-Link Pro running Verge.
     ///
     /// The supply feeds the target through J6, at 3.3 V or, with J5 fitted, 1.8 V, up to 400 mA.
     /// It is off whenever the Pro starts. The state shown is the one the firmware set, not a
     /// measured voltage.
     Power(energy::PowerArgs),
-    /// Measure a target's voltage, current and energy through an MCU-Link Pro running ours.
+    /// Measure a target's voltage, current and energy through an MCU-Link Pro running Verge.
     ///
     /// The probe measures the current that flows from J9 pin 1 to pin 3, whatever supplies it;
     /// `verge power` switches the Pro's own supply. A capture runs in the probe from `start` to
@@ -233,8 +233,8 @@ fn parse_scan_format(text: &str) -> Result<u32, String> {
 enum IspCommand {
     /// Restart a unit into its ROM bootloader without the jumper, and leave it there.
     ///
-    /// In ISP mode a unit cannot say which board it is, so `verge isp flash` cannot check that an
-    /// image of ours is built for it. A unit known to be another board than the full MCU-Link is
+    /// In ISP mode a unit cannot say which board it is, so `verge isp flash` cannot check that a
+    /// Verge image is built for it. A unit known to be another board than the full MCU-Link is
     /// restarted only with --stock.
     Enter {
         /// You mean to flash NXP's stock image next, which goes on any board.
@@ -269,10 +269,10 @@ struct PortArg {
 #[derive(Args)]
 #[group(multiple = false)]
 struct Source {
-    /// Ours from a GitHub release: the latest, or the one tagged TAG. The default.
+    /// Verge from a GitHub release: the latest, or the one tagged TAG. The default.
     #[arg(long, value_name = "TAG", num_args = 0..=1, default_missing_value = "latest")]
     release: Option<String>,
-    /// An ELF or S-record file, such as a build of ours.
+    /// An ELF or S-record file, such as a Verge build.
     #[arg(long, value_name = "FILE")]
     file: Option<PathBuf>,
     /// NXP's stock image from your own LinkServer install: the newest found, or the newest in
@@ -298,8 +298,8 @@ struct UpdateArgs {
 enum Take {
     /// Units running NXP's stock firmware.
     Stock,
-    /// Units running ours.
-    Ours,
+    /// Units running Verge.
+    Verge,
     /// Units that arrive in ISP mode, as after fitting the jumper.
     Isp,
 }
@@ -308,7 +308,7 @@ enum Take {
 enum BoardArg {
     /// The full MCU-Link.
     McuLink,
-    /// The MCU-Link Pro. An image of ours has to declare it.
+    /// The MCU-Link Pro. A Verge image has to declare it.
     McuLinkPro,
 }
 
@@ -317,15 +317,15 @@ struct BatchArgs {
     #[command(flatten)]
     source: Source,
     /// Which units to take.
-    #[arg(long, value_enum, num_args = 1.., default_values_t = [Take::Stock, Take::Ours])]
+    #[arg(long, value_enum, num_args = 1.., default_values_t = [Take::Stock, Take::Verge])]
     take: Vec<Take>,
     /// Take only stock older than this version, such as 3.172. Implies --take stock.
     #[arg(long, value_name = "VERSION", value_parser = parse_stock_version)]
     stock_below: Option<StockVersion>,
-    /// Take ours of any build. Without it, only builds older than the image, or carrying no
-    /// version, are taken. Implies --take ours.
+    /// Take Verge of any build. Without it, only builds older than the image, or carrying no
+    /// version, are taken. Implies --take verge.
     #[arg(long)]
-    ours_any: bool,
+    verge_any: bool,
     /// Take units attached already, not only those plugged in from now on.
     #[arg(long)]
     include_attached: bool,
@@ -676,7 +676,7 @@ fn load_error<H: Http>(error: LoadError, github: &GitHub<H>) -> anyhow::Error {
             anyhow::anyhow!("{error} with --stock")
         }
         LoadError::Release(error) => anyhow::Error::new(error)
-            .context(format!("looking up releases of ours in {}", github.repo())),
+            .context(format!("looking up Verge releases in {}", github.repo())),
         error => error.into(),
     }
 }
@@ -728,7 +728,7 @@ fn ask(question: &str) -> Result<()> {
     Ok(())
 }
 
-/// The boards an image of ours is built for, as a sentence. `None` for stock's own image, which
+/// The boards a Verge image is built for, as a sentence. `None` for stock's own image, which
 /// goes on any board.
 fn built_for(image: &Image, stock: bool) -> Result<Option<String>> {
     if stock {
@@ -812,13 +812,13 @@ fn update_unit<B: Bus, H: Http>(
     if let Some(unknown) = unknown {
         if args.yes {
             bail!(
-                "{unknown} The tool asks before putting ours on such a unit, and --yes does not answer that: run it without --yes, at a terminal"
+                "{unknown} The tool asks before putting Verge on such a unit, and --yes does not answer that: run it without --yes, at a terminal"
             );
         }
         // Before anything is downloaded for a question nobody could answer.
         if !std::io::stdin().is_terminal() {
             bail!(
-                "{unknown} Only an answer at a terminal says yes to putting ours on such a unit; --yes does not"
+                "{unknown} Only an answer at a terminal says yes to putting Verge on such a unit; --yes does not"
             );
         }
     }
@@ -1010,9 +1010,9 @@ fn batch<B: Bus + Sync, H: Http>(
     } else {
         StockFilter::None
     };
-    let ours = if args.ours_any {
+    let ours = if args.verge_any {
         OursFilter::Any
-    } else if args.take.contains(&Take::Ours) {
+    } else if args.take.contains(&Take::Verge) {
         OursFilter::Older
     } else {
         OursFilter::None
@@ -1125,10 +1125,10 @@ fn batch<B: Bus + Sync, H: Http>(
 fn arm_refusal(error: &ArmError) -> anyhow::Error {
     match error {
         ArmError::OursUndated => anyhow::anyhow!(
-            "{error}. Pass --ours-any to take every unit running ours, or leave ours out, as with --take stock"
+            "{error}. Pass --verge-any to take every unit running Verge, or leave Verge out, as with --take stock"
         ),
         ArmError::NotForBoard { .. } => anyhow::anyhow!(
-            "{error}. Pick an image of ours built for it, or NXP's stock image with --stock"
+            "{error}. Pick a Verge image built for it, or NXP's stock image with --stock"
         ),
         ArmError::Image(_) => anyhow::anyhow!("{error}"),
     }
@@ -1144,7 +1144,7 @@ fn cjtag<B: Bus>(bus: &B, args: &CjtagArgs, serial: Option<&str>) -> Result<()> 
     } = &unit.state
     else {
         bail!(
-            "{serial} is {}, not running ours, so it has no two-pin formats to show or limit",
+            "{serial} is {}, not running Verge, so it has no two-pin formats to show or limit",
             unit.state
         );
     };
@@ -1202,7 +1202,7 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
     } = &unit.state
     else {
         bail!(
-            "{serial} is {}, not running ours, so the tool cannot reach its DIO pins",
+            "{serial} is {}, not running Verge, so the tool cannot reach its DIO pins",
             unit.state
         );
     };
@@ -1276,7 +1276,7 @@ fn bootloader<B: Bus>(bus: &B, serial: Option<&str>, stock: bool, cancel: &Cance
     })?;
     if let Err(refused) = update::check_entry(unit, stock) {
         bail!(
-            "{refused}. To put NXP's stock image on it, run `verge isp enter --stock`, then `verge isp flash --stock`. To put an image of ours built for it on it, run `verge update --file IMAGE` instead, which checks that the image declares this board before anything is flashed"
+            "{refused}. To put NXP's stock image on it, run `verge isp enter --stock`, then `verge isp flash --stock`. To put a Verge image built for it on it, run `verge update --file IMAGE` instead, which checks that the image declares this board before anything is flashed"
         );
     }
     let mut bars = Bars::default();
@@ -1361,7 +1361,7 @@ fn release<B: Bus, H: Http>(
         None => github.latest(),
         Some(tag) => github.tagged(tag),
     }
-    .with_context(|| format!("looking up releases of ours in {}", github.repo()))?;
+    .with_context(|| format!("looking up Verge releases in {}", github.repo()))?;
     indicatif_println!(
         "{}  {}",
         release.tag,
@@ -1401,7 +1401,7 @@ fn release<B: Bus, H: Http>(
                 State::Unreadable {
                     guess: Guess::Ours, ..
                 },
-            ) => "probably runs ours; the tool could not ask which build".to_owned(),
+            ) => "probably runs Verge; the tool could not ask which build".to_owned(),
             (None, state) => state.to_string(),
         };
         let location = unit.device.location.as_deref().unwrap_or("?");
@@ -1442,7 +1442,7 @@ fn inspect(file: &FsPath) -> Result<()> {
             declaration.boards
         ),
         Ok(None) => indicatif_println!(
-            "  declares no boards: as an image of ours, it goes on the full MCU-Link only"
+            "  declares no boards: as a Verge image, it goes on the full MCU-Link only"
         ),
         Err(_) => {}
     }

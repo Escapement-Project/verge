@@ -555,7 +555,7 @@ fn pictures() {
         let mut manual = backend.lock().unwrap();
         manual.queued.push_back(Event::Batch(BatchEvent::Armed{
             name: "release v0.3.0 (mculink-verge-v0.3.0.s19)".into(),
-            filter: "every full MCU-Link running stock or ours older than the image, attached from now on".into(),
+            filter: "every full MCU-Link running stock or Verge older than the image, attached from now on".into(),
         }));
         let record = |port: &str,
                       serial: &str,
@@ -677,7 +677,7 @@ fn a_batch_updates_units_as_they_arrive_and_records_each() {
     press(&mut h, "ARM BATCH");
     h.get_by_label_contains(DOWNLOAD);
     h.get_by_label_contains(
-        " KiB), and flash it onto every full MCU-Link running stock or ours older than the image, attached from now on?",
+        " KiB), and flash it onto every full MCU-Link running stock or Verge older than the image, attached from now on?",
     );
     assert!(
         h.query_by_label_contains("cannot tell an MCU-Link")
@@ -792,7 +792,7 @@ fn a_batch_that_takes_units_in_isp_mode_says_it_may_not_be_flashing_an_mculink()
         "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode. {DOWNLOAD}"
     ));
     h.get_by_label_contains(
-        "and flash it onto every full MCU-Link running stock or ours older than the image or in ISP mode",
+        "and flash it onto every full MCU-Link running stock or Verge older than the image or in ISP mode",
     );
 }
 
@@ -804,7 +804,7 @@ fn a_batch_needs_something_to_take() {
     press(&mut h, "BATCH");
     h.get_by_label("Stock").click();
     h.step();
-    h.get_by_label("Ours").click();
+    h.get_by_label("Verge").click();
     h.step();
     h.step();
     h.get_by_label("CANNOT ARM");
@@ -1296,7 +1296,7 @@ fn a_batch_that_cannot_date_ours_cannot_arm() {
     press(&mut h, "BATCH");
     press(&mut h, "STOCK");
     until(&mut h, "CANNOT ARM");
-    h.get_by_label_contains("The image carries no version of ours");
+    h.get_by_label_contains("The image carries no Verge version");
     h.get_by_label_contains("Tick \"of any build\"");
     press(&mut h, "of any build, not only those older than the image");
     until(&mut h, "ARM BATCH");
@@ -1423,7 +1423,7 @@ fn the_worker_refuses_an_undatable_batch_before_loading() {
     let Some(Err(error)) = ended else {
         panic!("{ended:?}");
     };
-    assert!(error.contains("carries no version of ours"), "{error}");
+    assert!(error.contains("carries no Verge version"), "{error}");
     assert!(!made);
 }
 

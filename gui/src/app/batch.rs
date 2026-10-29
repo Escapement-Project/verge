@@ -291,7 +291,7 @@ impl VergeApp {
                 });
             });
             ui.horizontal(|ui| {
-                ui.checkbox(&mut form.ours, text(Role::Body, "Ours").color(color::TEXT));
+                ui.checkbox(&mut form.ours, text(Role::Body, "Verge").color(color::TEXT));
                 ui.add_enabled_ui(form.ours, |ui| {
                     ui.checkbox(
                         &mut form.ours_any,
