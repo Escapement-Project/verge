@@ -1508,6 +1508,61 @@ fn energy_record_writes_every_pair_and_leaves_a_running_capture() {
     );
 }
 
+/// The simulated target holds DIO3 high for its 10 ms awake every 100 ms. A CSV recording of it
+/// puts each edge on a line of its own, in time order among the pairs, and each pair gives the
+/// level it saw.
+#[test]
+fn energy_record_lines_up_dio_edges_with_the_pairs() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("dio.csv");
+    let output = tool("ours-pro-energy")
+        .args([
+            "energy", "record", "--csv", "--dio", "3", "--for", "1s", "--out",
+        ])
+        .arg(&out)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8_lossy(&output);
+    let text = std::fs::read_to_string(&out).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(
+        lines.next(),
+        Some("sequence,time_ns,millivolts,nanoamps,dio3")
+    );
+    let rows: Vec<Vec<&str>> = lines.map(|line| line.split(',').collect()).collect();
+    let times: Vec<u64> = rows.iter().map(|row| row[1].parse().unwrap()).collect();
+    assert!(times.is_sorted(), "lines out of time order");
+    let edges: Vec<(u64, &str)> = rows
+        .iter()
+        .filter(|row| row[0].is_empty())
+        .map(|row| (row[1].parse().unwrap(), row[4]))
+        .collect();
+    assert!(edges.len() >= 18, "{} edges", edges.len());
+    for (time, level) in &edges {
+        let into = time % 100_000_000;
+        assert!(
+            (into == 0 && *level == "1") || (into == 10_000_000 && *level == "0"),
+            "an edge at {time} to {level}"
+        );
+    }
+    // A pair reads the level the edges before it left.
+    let mut level = None;
+    for row in &rows {
+        if row[0].is_empty() {
+            level = Some(row[4]);
+        } else if let Some(level) = level {
+            assert_eq!(row[4], level, "{row:?}");
+        }
+    }
+    assert!(
+        stdout.contains(&format!("{} edges on DIO3.", edges.len())),
+        "{stdout}"
+    );
+}
+
 /// A recording that starts its own capture stops it.
 #[test]
 fn energy_record_stops_the_capture_it_started() {

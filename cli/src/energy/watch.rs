@@ -391,13 +391,13 @@ pub fn watch<B: Bus>(
     let streams = pro.transport().streams();
     let started_at = if running {
         if streams {
-            pro.stream_energy_capture()
+            pro.stream_energy_capture(0)
                 .with_context(|| format!("streaming {name}'s capture"))?;
         }
         None
     } else {
         let start = if streams {
-            pro.start_energy_stream(options.rate)
+            pro.start_energy_stream(options.rate, 0)
         } else {
             pro.start_energy_capture(options.rate)
         };
@@ -590,7 +590,7 @@ impl Stream {
                 // Another host's start, which may come before any total shows it.
                 if end.reason == EndReason::Restarted {
                     model.disown();
-                    pro.stream_energy_capture()
+                    pro.stream_energy_capture(0)
                         .context("streaming the restarted capture")?;
                 }
             }
@@ -875,7 +875,7 @@ mod tests {
         let (bus, device) = pro_with_a_capture();
         let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
         let mut pro: Pro<'_> = verge_probe::VergeControl::new(&mut aux);
-        pro.stream_energy_capture().unwrap();
+        pro.stream_energy_capture(0).unwrap();
         let mut model = Model::new("CJ3E7A91C2", None, Duration::from_secs(30));
         let options = Options {
             rate: 1000,

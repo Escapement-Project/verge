@@ -1,6 +1,7 @@
 //! `verge energy record`: every pair of a capture, from the Pro's stream on Verge Aux, to a sigrok
-//! session or a CSV file.
+//! session or a CSV file, with the edges of the DIO pins it asks for.
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -11,7 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use tracing_indicatif::indicatif_println;
 use verge_probe::aux::{Aux, AuxLink};
-use verge_probe::stream::{Converter, EndReason, Message, Sample, Total};
+use verge_probe::stream::{Converter, Edge, EndReason, Message, Sample, Total};
 use verge_probe::{Bus, Cancel, CommandError, EnergyCaptureSample, EnergyError, VergeControl};
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
@@ -21,6 +22,8 @@ pub struct Options {
     pub rate: u32,
     pub limit: Option<Duration>,
     pub csv: bool,
+    /// The DIO pins whose edges to record, bit `k` for DIO`k`.
+    pub dio: u8,
 }
 
 /// How long a read waits before the limit and Ctrl-C are checked again.
@@ -34,6 +37,10 @@ pub struct Recorded {
     /// Pairs the sequence skipped: messages the probe dropped because nobody read them in time.
     pub lost: u64,
     pub reason: EndReason,
+    /// The DIO pins the probe reported, their edges, and how often it lost some.
+    pub dio: u8,
+    pub edges: u64,
+    pub edges_lost: u64,
 }
 
 /// Records the capture that runs, or starts one at `options.rate`, until the limit, Ctrl-C or the
@@ -67,9 +74,9 @@ pub fn record<B: Bus, L: AuxLink>(
     // The probe answers before the file is touched, so a refused start leaves an earlier
     // recording there as it was.
     if running {
-        pro.stream_energy_capture()
+        pro.stream_energy_capture(options.dio)
             .with_context(|| format!("streaming {name}'s capture"))?;
-    } else if let Err(start) = pro.start_energy_stream(options.rate) {
+    } else if let Err(start) = pro.start_energy_stream(options.rate, options.dio) {
         // The reply can be lost after the probe started, so stop what this may have started.
         let start = anyhow!(start).context(format!("starting {name}'s capture"));
         return Err(match pro.stop_energy_capture() {
@@ -135,6 +142,9 @@ fn stream<B: Bus, L: AuxLink>(
     let mut next_sequence = None;
     let mut lost = 0u64;
     let mut asked_at = None;
+    // A pairs message's samples wait for the next one: every edge up to them has come by then.
+    let mut held: Vec<Sample> = Vec::new();
+    let (mut dio, mut edges, mut edges_lost) = (0u8, 0u64, 0u64);
     loop {
         if asked_at.is_none()
             && (cancel.is_cancelled() || deadline.is_some_and(|deadline| bus.now() >= deadline))
@@ -163,7 +173,12 @@ fn stream<B: Bus, L: AuxLink>(
                 if converter.is_some() {
                     bail!("{name} began a second stream before ending the first");
                 }
-                writer.send(Output::Begin(header.rate))?;
+                writer.send(Output::Begin {
+                    rate: header.rate,
+                    pins: header.dio_mask,
+                    levels: header.dio_levels,
+                })?;
+                dio = header.dio_mask;
                 next_sequence = Some(header.first_sequence);
                 converter = Some(Converter::new(&header));
             }
@@ -177,7 +192,10 @@ fn stream<B: Bus, L: AuxLink>(
                 }
                 next_sequence = Some(pairs.first_sequence.wrapping_add(pairs.pairs.len() as u32));
                 converter.add_message(&pairs);
-                writer.send(Output::Pairs(converter.take_samples()))?;
+                writer.send(Output::Pairs(std::mem::replace(
+                    &mut held,
+                    converter.take_samples(),
+                )))?;
             }
             Message::End(end) => {
                 let Some(mut converter) = converter else {
@@ -189,25 +207,36 @@ fn stream<B: Bus, L: AuxLink>(
                     lost += skipped(next, end.last_sequence.wrapping_add(1));
                 }
                 converter.end();
-                writer.send(Output::Pairs(converter.take_samples()))?;
+                held.extend(converter.take_samples());
+                writer.send(Output::Pairs(held))?;
                 let total = converter.total();
                 return Ok(Recorded {
                     pairs: total.pairs,
                     total,
                     lost,
                     reason: end.reason,
+                    dio,
+                    edges,
+                    edges_lost,
                 });
             }
-            // This firmware reports no edges yet.
-            Message::Edges(_) => {}
+            Message::Edges(message) => {
+                if converter.is_none() {
+                    continue;
+                }
+                edges += message.edges.len() as u64;
+                edges_lost += u64::from(message.lost());
+                writer.send(Output::Edges(message.edges))?;
+            }
         }
     }
 }
 
-/// What the read loop hands the writer.
+/// What the read loop hands the writer. Every edge up to a batch of pairs comes before it.
 enum Output {
-    Begin(u32),
+    Begin { rate: u32, pins: u8, levels: u8 },
     Pairs(Vec<Sample>),
+    Edges(Vec<Edge>),
 }
 
 /// The file, written on a thread of its own. Writing a sigrok chunk takes long enough that the
@@ -223,8 +252,9 @@ impl Writer {
         let thread = thread::spawn(move || {
             for output in receive {
                 match output {
-                    Output::Begin(rate) => sink.begin(rate)?,
+                    Output::Begin { rate, pins, levels } => sink.begin(rate, pins, levels)?,
                     Output::Pairs(samples) => sink.samples(&samples)?,
+                    Output::Edges(edges) => sink.edges(edges),
                 }
             }
             sink.finish()
@@ -248,9 +278,49 @@ impl Writer {
     }
 }
 
+/// The levels of the DIO pins a stream reports, as its edges move them.
+#[derive(Default)]
+struct Dio {
+    pins: u8,
+    levels: u8,
+    edges: VecDeque<Edge>,
+}
+
+impl Dio {
+    /// The levels at `time_ns`, taking the edges up to it. A pin that moved and came back since
+    /// the last call reads the other way, so a pulse between two samples shows in one.
+    fn at(&mut self, time_ns: u64) -> u8 {
+        let before = self.levels;
+        let mut moved = 0;
+        while let Some(edge) = self.next_until(time_ns) {
+            moved |= self.levels ^ edge.levels;
+            self.levels = edge.levels;
+        }
+        let back = moved & !(before ^ self.levels);
+        (self.levels ^ back) & self.pins
+    }
+
+    /// The next edge, if it comes by `time_ns`.
+    fn next_until(&mut self, time_ns: u64) -> Option<Edge> {
+        self.edges.pop_front_if(|edge| edge.time_ns <= time_ns)
+    }
+
+    /// The pins, lowest first.
+    fn names(&self) -> impl Iterator<Item = u8> + '_ {
+        (0..4).filter(|pin| self.pins >> pin & 1 != 0)
+    }
+
+    /// One CSV field per pin: its level in `levels`.
+    fn fields(&self, levels: u8) -> String {
+        self.names()
+            .map(|pin| format!(",{}", levels >> pin & 1))
+            .collect()
+    }
+}
+
 /// Where the pairs go.
 pub enum Sink {
-    Csv(BufWriter<File>),
+    Csv(Box<Csv>),
     Sigrok(Box<Sigrok>),
 }
 
@@ -259,30 +329,48 @@ impl Sink {
         let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
         let file = BufWriter::new(file);
         Ok(if csv {
-            Sink::Csv(file)
+            Sink::Csv(Box::new(Csv {
+                file,
+                dio: Dio::default(),
+            }))
         } else {
             Sink::Sigrok(Box::new(Sigrok::new(file)?))
         })
     }
 
-    /// The stream began at `rate` pairs a second.
-    fn begin(&mut self, rate: u32) -> Result<()> {
+    /// The stream began at `rate` pairs a second, reporting the edges of `pins`, at `levels`.
+    fn begin(&mut self, rate: u32, pins: u8, levels: u8) -> Result<()> {
+        let dio = Dio {
+            pins,
+            levels: levels & pins,
+            edges: VecDeque::new(),
+        };
         match self {
-            Sink::Csv(file) => writeln!(file, "sequence,time_ns,millivolts,nanoamps")?,
-            Sink::Sigrok(sigrok) => sigrok.rate = rate,
+            Sink::Csv(csv) => {
+                let columns: String = dio.names().map(|pin| format!(",dio{pin}")).collect();
+                writeln!(csv.file, "sequence,time_ns,millivolts,nanoamps{columns}")?;
+                csv.dio = dio;
+            }
+            Sink::Sigrok(sigrok) => {
+                sigrok.rate = rate;
+                sigrok.dio = dio;
+            }
         }
         Ok(())
     }
 
+    fn edges(&mut self, edges: Vec<Edge>) {
+        match self {
+            Sink::Csv(csv) => csv.dio.edges.extend(edges),
+            Sink::Sigrok(sigrok) => sigrok.dio.edges.extend(edges),
+        }
+    }
+
     fn samples(&mut self, samples: &[Sample]) -> Result<()> {
         match self {
-            Sink::Csv(file) => {
-                for s in samples {
-                    writeln!(
-                        file,
-                        "{},{},{},{}",
-                        s.sequence, s.time_ns, s.millivolts, s.nanoamps
-                    )?;
+            Sink::Csv(csv) => {
+                for sample in samples {
+                    csv.sample(sample)?;
                 }
             }
             Sink::Sigrok(sigrok) => {
@@ -296,19 +384,58 @@ impl Sink {
 
     fn finish(self) -> Result<()> {
         match self {
-            Sink::Csv(mut file) => file.flush()?,
+            Sink::Csv(csv) => csv.finish()?,
             Sink::Sigrok(sigrok) => sigrok.finish()?,
         }
         Ok(())
     }
 }
 
+/// One line per pair, and one per edge between them, in time order: an edge's line has no
+/// sequence, millivolts or nanoamps, and gives the levels after it.
+pub struct Csv {
+    file: BufWriter<File>,
+    dio: Dio,
+}
+
+impl Csv {
+    fn edge(&mut self, edge: Edge) -> Result<()> {
+        let fields = self.dio.fields(edge.levels);
+        writeln!(self.file, ",{},,{fields}", edge.time_ns)?;
+        Ok(())
+    }
+
+    fn sample(&mut self, sample: &Sample) -> Result<()> {
+        while let Some(edge) = self.dio.next_until(sample.time_ns) {
+            self.dio.levels = edge.levels;
+            self.edge(edge)?;
+        }
+        let fields = self.dio.fields(self.dio.levels);
+        writeln!(
+            self.file,
+            "{},{},{},{}{fields}",
+            sample.sequence, sample.time_ns, sample.millivolts, sample.nanoamps
+        )?;
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<()> {
+        while let Some(edge) = self.dio.edges.pop_front() {
+            self.edge(edge)?;
+        }
+        self.file.flush()?;
+        Ok(())
+    }
+}
+
 /// A sigrok session file (srzip, format 2), as libsigrok's own srzip output writes it: the
-/// voltage in V and the current in mA as analog channels, and a logic channel GAP that is high
-/// where the probe measured nothing, across which the last pair is repeated.
+/// voltage in V and the current in mA as analog channels; a logic channel GAP that is high where
+/// the probe measured nothing, across which the last pair is repeated; and a logic channel for each
+/// DIO pin reported, its level at each sample, with a pulse between two samples stretched to one.
 pub struct Sigrok {
     zip: ZipWriter<BufWriter<File>>,
     rate: u32,
+    dio: Dio,
     last: Option<Sample>,
     volts: Vec<f32>,
     milliamps: Vec<f32>,
@@ -319,8 +446,6 @@ pub struct Sigrok {
 /// Samples a chunk file holds: 4 MiB of each analog channel.
 const CHUNK: usize = 1 << 20;
 const GAP: u8 = 1;
-/// The channels' indices: logic first, then analog, as libsigrok numbers them.
-const CHANNELS: [(&str, &str); 3] = [("probe1", "GAP"), ("analog2", "V"), ("analog3", "mA")];
 
 impl Sigrok {
     fn new(file: BufWriter<File>) -> Result<Sigrok> {
@@ -330,6 +455,7 @@ impl Sigrok {
         Ok(Sigrok {
             zip,
             rate: 0,
+            dio: Dio::default(),
             last: None,
             volts: Vec::new(),
             milliamps: Vec::new(),
@@ -338,10 +464,20 @@ impl Sigrok {
         })
     }
 
-    fn put(&mut self, sample: &Sample, logic: u8) -> Result<()> {
+    /// `sample` at `time_ns`: itself, or the last pair repeated across a gap.
+    fn put(&mut self, sample: &Sample, gap: bool, time_ns: u64) -> Result<()> {
         self.volts.push(sample.millivolts as f32 / 1e3);
         self.milliamps.push(sample.nanoamps as f32 / 1e6);
-        self.logic.push(logic);
+        // GAP is bit 0, then the pins in order.
+        let levels = self.dio.at(time_ns);
+        let dio = self
+            .dio
+            .names()
+            .enumerate()
+            .fold(0, |logic, (channel, pin)| {
+                logic | (levels >> pin & 1) << (channel + 1)
+            });
+        self.logic.push(if gap { GAP } else { 0 } | dio);
         if self.logic.len() == CHUNK {
             self.flush()?;
         }
@@ -355,11 +491,12 @@ impl Sigrok {
             let rate = u128::from(self.rate.max(1));
             let elapsed = u128::from(sample.time_ns.saturating_sub(last.time_ns));
             let periods = (elapsed * rate + 500_000_000) / 1_000_000_000;
-            for _ in 1..periods {
-                self.put(&last, GAP)?;
+            for period in 1..periods {
+                let time_ns = last.time_ns + (period * 1_000_000_000 / rate) as u64;
+                self.put(&last, true, time_ns)?;
             }
         }
-        self.put(sample, 0)?;
+        self.put(sample, false, sample.time_ns)?;
         self.last = Some(*sample);
         Ok(())
     }
@@ -372,7 +509,9 @@ impl Sigrok {
         let chunk = self.chunks;
         self.zip.start_file(format!("logic-1-{chunk}"), options())?;
         self.zip.write_all(&self.logic)?;
-        for (index, values) in [(2, &self.volts), (3, &self.milliamps)] {
+        // Analog channels number on from the logic ones, as libsigrok numbers them.
+        let logic = self.logic_channels();
+        for (index, values) in [(logic + 1, &self.volts), (logic + 2, &self.milliamps)] {
             self.zip
                 .start_file(format!("analog-1-{index}-{chunk}"), options())?;
             let bytes: Vec<u8> = values
@@ -387,16 +526,27 @@ impl Sigrok {
         Ok(())
     }
 
+    /// GAP and the pins.
+    fn logic_channels(&self) -> usize {
+        1 + self.dio.names().count()
+    }
+
     fn finish(mut self) -> Result<()> {
         self.flush()?;
         // libsigrok reads the keys in order: the totals make the channels the names then rename.
+        let logic = self.logic_channels();
         let mut metadata = format!(
-            "[global]\nsigrok version=0.5.2\n\n[device 1]\ncapturefile=logic-1\ntotal probes=1\n\
+            "[global]\nsigrok version=0.5.2\n\n[device 1]\ncapturefile=logic-1\ntotal probes={logic}\n\
              samplerate={}\ntotal analog=2\n",
             samplerate(self.rate)
         );
-        for (key, name) in CHANNELS {
-            metadata.push_str(&format!("{key}={name}\n"));
+        let names = std::iter::once("GAP".to_owned())
+            .chain(self.dio.names().map(|pin| format!("DIO{pin}")));
+        for (index, name) in names.enumerate() {
+            metadata.push_str(&format!("probe{}={name}\n", index + 1));
+        }
+        for (index, name) in [(logic + 1, "V"), (logic + 2, "mA")] {
+            metadata.push_str(&format!("analog{index}={name}\n"));
         }
         metadata.push_str("unitsize=1\n");
         self.zip.start_file("metadata", options())?;
@@ -457,7 +607,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gap.sr");
         let mut sink = Sink::create(&path, false).unwrap();
-        sink.begin(1000).unwrap();
+        sink.begin(1000, 0, 0).unwrap();
         sink.samples(&[
             sample(1, 0, 3300, 20_000),
             sample(2, 1, 3300, 5_000_000),
@@ -483,13 +633,86 @@ mod tests {
         assert!(metadata.contains("samplerate=1 kHz\n"), "{metadata}");
     }
 
+    fn edge(time_ns: u64, levels: u8) -> Edge {
+        Edge { time_ns, levels }
+    }
+
+    /// Each pin reported is a logic channel after GAP, its level at each sample, the analog
+    /// channels numbered on after them. A pulse between two samples shows in the second; a gap's
+    /// repeated samples take the levels at their own times.
+    #[test]
+    fn dio_pins_are_logic_channels_at_each_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dio.sr");
+        let mut sink = Sink::create(&path, false).unwrap();
+        sink.begin(1000, 0x09, 0x0F).unwrap();
+        sink.edges(vec![
+            // DIO0 falls just after the sample at 1 ms.
+            edge(1_000_100, 0x08),
+            // DIO3 pulses low and back between 2 and 3 ms, so reads low at 3.
+            edge(2_000_300, 0x00),
+            edge(2_000_400, 0x08),
+            // DIO0 rises in the gap, at 3.5 ms.
+            edge(3_500_000, 0x09),
+        ]);
+        sink.samples(&[
+            sample(1, 0, 3300, 1),
+            sample(2, 1, 3300, 1),
+            sample(3, 2, 3300, 1),
+            sample(4, 3, 3300, 1),
+            sample(5, 6, 3300, 1),
+        ])
+        .unwrap();
+        sink.finish().unwrap();
+
+        let mut zip = zip::ZipArchive::new(File::open(&path).unwrap()).unwrap();
+        // Bit 0 GAP, bit 1 DIO0, bit 2 DIO3.
+        assert_eq!(read(&mut zip, "logic-1-1"), [6, 6, 4, 0, 7, 7, 6]);
+        assert_eq!(floats(&read(&mut zip, "analog-1-4-1")).len(), 7);
+        assert_eq!(floats(&read(&mut zip, "analog-1-5-1")).len(), 7);
+        let metadata = String::from_utf8(read(&mut zip, "metadata")).unwrap();
+        assert!(
+            metadata.contains(
+                "total probes=3\nsamplerate=1 kHz\ntotal analog=2\nprobe1=GAP\nprobe2=DIO0\n\
+                 probe3=DIO3\nanalog4=V\nanalog5=mA\nunitsize=1\n"
+            ),
+            "{metadata}"
+        );
+    }
+
+    /// CSV puts each edge on a line of its own, among the pairs by time, and each pair's levels
+    /// after it; edges after the last pair come last.
+    #[test]
+    fn csv_lines_up_edges_and_pairs_by_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dio.csv");
+        let mut sink = Sink::create(&path, true).unwrap();
+        sink.begin(1000, 0x0A, 0x02).unwrap();
+        sink.edges(vec![edge(1_000_000, 0x0A), edge(1_500_000, 0x08)]);
+        sink.samples(&[sample(1, 0, 3300, 7), sample(2, 1, 3300, 8)])
+            .unwrap();
+        sink.edges(vec![edge(2_200_000, 0x00)]);
+        sink.samples(&[sample(3, 2, 3300, 9)]).unwrap();
+        sink.finish().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "sequence,time_ns,millivolts,nanoamps,dio1,dio3\n\
+             1,0,3300,7,1,0\n\
+             ,1000000,,,1,1\n\
+             2,1000000,3300,8,1,1\n\
+             ,1500000,,,0,1\n\
+             3,2000000,3300,9,0,1\n\
+             ,2200000,,,0,0\n"
+        );
+    }
+
     /// Past a chunk's worth, the samples go on in the next chunk file of each channel.
     #[test]
     fn a_long_recording_is_written_in_chunks() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("long.sr");
         let mut sink = Sink::create(&path, false).unwrap();
-        sink.begin(100_000).unwrap();
+        sink.begin(100_000, 0, 0).unwrap();
         let samples: Vec<Sample> = (0..CHUNK as u32 + 3)
             .map(|n| Sample {
                 sequence: n,
@@ -608,6 +831,84 @@ mod tests {
         assert_eq!(sequences, ["1", "2", "3", "6", "7"]);
     }
 
+    fn header_with_dio(pins: u8, levels: u8) -> Vec<u8> {
+        let mut header = header();
+        header[64] = pins;
+        header[65] = levels;
+        header[66] = 11;
+        header
+    }
+
+    fn edges(lost: bool, edges: &[(u64, u8)]) -> Vec<u8> {
+        verge_probe::stream::Edges::new(
+            u8::from(lost),
+            edges
+                .iter()
+                .map(|&(time_ns, levels)| edge(time_ns, levels))
+                .collect(),
+        )
+        .to_bytes()
+    }
+
+    /// A pairs message's samples wait for the next message, so an edge inside them that comes
+    /// after them still lands among them; edges count, and so do messages that lost some.
+    #[test]
+    fn edges_after_their_pairs_land_among_them() {
+        let mut end = vec![0xA2, 2];
+        end.extend_from_slice(&5u32.to_le_bytes());
+        let messages = [
+            Some(vec![0x90, 0, 0]),
+            None,
+            Some(header_with_dio(0x01, 0x00)),
+            Some(pairs(1, 3)),
+            Some(edges(false, &[(1_500_000, 0x01)])),
+            Some(pairs(4, 2)),
+            Some(edges(true, &[(3_200_000, 0x00), (4_000_000, 0x01)])),
+            Some(end),
+        ];
+        let mut aux = Aux::open(Playback(messages.into_iter().collect())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("held.csv");
+        let writer = Writer::spawn(Sink::create(&path, true).unwrap());
+        let recorded = stream(
+            &verge_probe::sim::SimBus::default(),
+            "the unit",
+            &mut VergeControl::new(&mut aux),
+            &writer,
+            false,
+            None,
+            &Cancel::new(),
+        )
+        .unwrap();
+        writer.finish().unwrap();
+        assert_eq!(
+            (recorded.dio, recorded.edges, recorded.edges_lost),
+            (0x01, 3, 1)
+        );
+        let lines: Vec<String> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let fields: Vec<&str> = line.split(',').collect();
+                format!("{}@{}={}", fields[0], fields[1], fields[4])
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "sequence@time_ns=dio0",
+                "1@0=0",
+                "2@1000000=0",
+                "@1500000=1",
+                "3@2000000=1",
+                "4@3000000=1",
+                "@3200000=0",
+                "@4000000=1",
+                "5@4000000=1",
+            ]
+        );
+    }
+
     /// The probe keeps room for the end when it drops pairs, so its last sequence counts pairs
     /// lost just before it.
     #[test]
@@ -667,6 +968,7 @@ mod tests {
             rate: 1000,
             limit: Some(Duration::from_millis(300)),
             csv,
+            dio: 0,
         }
     }
 

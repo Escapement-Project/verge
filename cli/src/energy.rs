@@ -80,7 +80,8 @@ pub enum EnergyCommand {
     /// debugger can hold the probe meanwhile. The file has the voltage in V and the current in mA
     /// as analog channels, each pair's current as the probe's total counts it. Where the probe
     /// measured nothing, for a moment as it reads the supply or times a debugger's reads, the last
-    /// pair repeats and the logic channel GAP is high. Ctrl-C ends the recording.
+    /// pair repeats and the logic channel GAP is high. Each DIO pin --dio names is a logic channel
+    /// too. Ctrl-C ends the recording.
     Record {
         /// The file to write.
         #[arg(long, value_name = "FILE")]
@@ -92,9 +93,16 @@ pub enum EnergyCommand {
         #[arg(long = "for", value_name = "DURATION", value_parser = humantime::parse_duration)]
         limit: Option<Duration>,
         /// Write CSV instead: one line per pair, its sequence number, its time in ns since the
-        /// capture started, millivolts and nanoamps.
+        /// capture started, millivolts and nanoamps, then the level of each DIO pin recorded. Each
+        /// edge of those pins is a line of its own, in time order, with only its time and the
+        /// levels after it.
         #[arg(long)]
         csv: bool,
+        /// Record the edges of these DIO pins too: 0 to 3, as `--dio 0,3`, or `dio0` to `dio3`,
+        /// or `all`. A sigrok session shows each as a logic channel at the pair rate, a pulse
+        /// shorter than a pair stretched to one; CSV gives each edge's time.
+        #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = crate::parse_dio_pins)]
+        dio: Vec<u8>,
     },
 }
 
@@ -422,12 +430,14 @@ pub fn energy<B: Bus>(
             rate,
             limit,
             csv,
+            dio,
         } => {
             let options = record::Options {
                 out: out.clone(),
                 rate: *rate,
                 limit: *limit,
                 csv: *csv,
+                dio: dio.iter().fold(0, |mask, pin| mask | pin),
             };
             record(bus, serial, &options, cancel)
         }
@@ -475,6 +485,27 @@ fn record<B: Bus>(
         indicatif_println!(
             "{} pairs were lost: the probe dropped messages this side did not read in time.",
             recorded.lost
+        );
+    }
+    let unreported = options.dio & !recorded.dio;
+    if unreported != 0 {
+        indicatif_println!(
+            "{name} reported no edges on {}: J15 turns the DIO pins off, and SPI takes them.",
+            crate::dio_names(unreported)
+        );
+    }
+    if recorded.dio != 0 {
+        indicatif_println!(
+            "{} edges on {}.",
+            recorded.edges,
+            crate::dio_names(recorded.dio)
+        );
+    }
+    if recorded.edges_lost > 0 {
+        indicatif_println!(
+            "Edges were lost {} times: the pins changed faster than the probe takes them, SPI had \
+             them, or this side did not read in time. The levels before each loss are not known.",
+            recorded.edges_lost
         );
     }
     Ok(())
