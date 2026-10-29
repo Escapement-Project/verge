@@ -296,7 +296,7 @@ fn fault(error: &CommandError<EnergyError>) -> bool {
 pub fn watch<B: Bus>(
     bus: &B,
     name: &str,
-    pro: &mut Pro<'_, '_>,
+    pro: &mut Pro<'_>,
     options: &Options,
     cancel: &Cancel,
 ) -> Result<Ended> {
@@ -384,7 +384,7 @@ pub fn watch<B: Bus>(
     Ok(Ended { running, total })
 }
 
-fn read(pro: &mut Pro<'_, '_>, at: f64, totals: bool) -> Result<Reading> {
+fn read(pro: &mut Pro<'_>, at: f64, totals: bool) -> Result<Reading> {
     let newest = match pro
         .latest_energy_sample()
         .context("reading the newest pair")?
@@ -425,7 +425,7 @@ fn read(pro: &mut Pro<'_, '_>, at: f64, totals: bool) -> Result<Reading> {
 /// output is a terminal, as a line a read where it is not.
 fn run<B: Bus>(
     bus: &B,
-    pro: &mut Pro<'_, '_>,
+    pro: &mut Pro<'_>,
     model: &mut Model,
     options: &Options,
     totals: bool,

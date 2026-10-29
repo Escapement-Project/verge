@@ -8,10 +8,12 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use tracing_indicatif::indicatif_println;
 use verge_probe::detect::{State, detect_named};
+use verge_probe::aux::Aux;
+use verge_probe::bus::BusError;
 use verge_probe::{
     Bus, CalibrationRange, Cancel, CommandError, DapTransport, EnergyAccumulator,
     EnergyCalibration, EnergyCaptureSample, EnergyError, EnergyTotal, Firmware, VergeControl,
-    VergeInfo, dap,
+    VergeInfo, VergeTransport, dap,
 };
 
 #[derive(Args)]
@@ -71,7 +73,9 @@ pub enum EnergyCommand {
     },
 }
 
-type Pro<'a, 'l> = VergeControl<'a, DapTransport<'l>>;
+/// A Pro over Verge Aux where it has one, so a debugger can hold CMSIS-DAP meanwhile, or over
+/// CMSIS-DAP.
+type Pro<'a> = VergeControl<'a, dyn VergeTransport + 'a>;
 
 /// What a Pro offers that these commands reach.
 #[derive(Clone, Copy)]
@@ -118,7 +122,7 @@ fn with_pro<B: Bus, T>(
     bus: &B,
     serial: Option<&str>,
     feature: Feature,
-    f: impl FnOnce(&str, &mut Pro<'_, '_>) -> Result<T>,
+    f: impl FnOnce(&str, &mut Pro<'_>) -> Result<T>,
 ) -> Result<T> {
     let what = feature.name();
     let units = detect_named(bus, serial).context("looking for MCU-Links")?;
@@ -142,11 +146,32 @@ fn with_pro<B: Bus, T>(
     {
         bail!("{name} is not an MCU-Link Pro, so it has no {what}");
     }
+    if unit.device.aux {
+        match bus.open_aux(&unit.device) {
+            Ok(link) => {
+                let mut aux = Aux::open(link).with_context(|| format!("opening {name}'s Verge Aux"))?;
+                return run(name, &mut aux, feature, f);
+            }
+            Err(BusError::Busy { .. }) => {
+                tracing::info!("another program holds {name}'s Verge Aux, so the tool uses CMSIS-DAP");
+            }
+            Err(error) => return Err(error).with_context(|| format!("opening {name}'s Verge Aux")),
+        }
+    }
     let mut link = bus
         .open_dap(&unit.device)
         .with_context(|| format!("opening {name}"))?;
     let mut transport = DapTransport(&mut link);
-    let mut pro = VergeControl::new(&mut transport);
+    run(name, &mut transport, feature, f)
+}
+
+fn run<T>(
+    name: &str,
+    transport: &mut dyn VergeTransport,
+    feature: Feature,
+    f: impl FnOnce(&str, &mut Pro<'_>) -> Result<T>,
+) -> Result<T> {
+    let mut pro = VergeControl::new(transport);
     let info = pro
         .info()
         .with_context(|| format!("asking {name} what it runs"))?
@@ -158,7 +183,7 @@ fn with_pro<B: Bus, T>(
 }
 
 /// Whether the firmware keeps a running total.
-fn keeps_totals(pro: &mut Pro<'_, '_>) -> bool {
+fn keeps_totals(pro: &mut Pro<'_>) -> bool {
     pro.info()
         .ok()
         .flatten()
