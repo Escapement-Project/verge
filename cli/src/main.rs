@@ -591,20 +591,38 @@ fn list<B: Bus>(bus: &B, verbose: bool, serial: Option<&str>) -> Result<()> {
         }
         return Ok(());
     }
-    for unit in units
+    let shown: Vec<&Unit> = units
         .iter()
         .filter(|unit| serial.is_none_or(|serial| unit.serial() == Some(serial)))
-    {
-        indicatif_println!("{}", describe_unit(unit));
+        .collect();
+    // One grid: each label under the serials, each value under the states.
+    let location = |unit: &Unit| unit.device.location.clone().unwrap_or_else(|| "?".into());
+    let named = |unit: &Unit| unit.serial().unwrap_or("-").to_owned();
+    let indent = shown
+        .iter()
+        .map(|unit| location(unit).len())
+        .fold(8, usize::max);
+    let label = shown
+        .iter()
+        .map(|unit| named(unit).len())
+        .fold(14, usize::max);
+    for unit in shown {
+        indicatif_println!(
+            "{:<indent$} {:<label$} {}",
+            location(unit),
+            named(unit),
+            unit.state
+        );
+        let row = |name: &str, value: &str| {
+            indicatif_println!("{:indent$} {name:<label$} {value}", "");
+        };
         let board = match unit.state {
             State::Bootloader => "cannot be told in ISP mode".to_owned(),
             _ => unit.hardware().name(),
         };
-        indicatif_println!("{:<10}board: {board}", "");
+        row("board", &board);
         if verbose && let State::Probe { identity, firmware } = &unit.state {
-            let field = |name: &str, value: Option<&str>| {
-                indicatif_println!("{:<10}{name:<13} {}", "", value.unwrap_or("-"));
-            };
+            let field = |name: &str, value: Option<&str>| row(name, value.unwrap_or("-"));
             field("vendor", identity.vendor.as_deref());
             field("product", identity.product.as_deref());
             field("protocol", identity.protocol.as_deref());
@@ -623,16 +641,16 @@ fn list<B: Bus>(bus: &B, verbose: bool, serial: Option<&str>) -> Result<()> {
         }
         let offer = offer(unit, &units);
         match offer.paths.as_slice() {
-            [] => indicatif_println!("{:<10}cannot be updated as it is", ""),
+            [] => row("update", "not possible as it is"),
             [best, rest @ ..] => {
-                indicatif_println!("{:<10}update: {best}. {}", "", best.describe());
+                row("update", &format!("{best}. {}", best.describe()));
                 for other in rest {
-                    indicatif_println!("{:<10}or: {other}", "");
+                    row("or", &other.to_string());
                 }
             }
         }
         for note in &offer.notes {
-            indicatif_println!("{:<10}{note}", "");
+            row("note", note);
         }
     }
     Ok(())

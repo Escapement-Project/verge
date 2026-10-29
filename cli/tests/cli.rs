@@ -31,7 +31,37 @@ fn list_is_the_default() {
             "CJ3E7A91C2     Verge, build 14d05d4",
         ))
         .stdout(predicate::str::contains("QK7RM2VTX8D41  stock V3.172"))
-        .stdout(predicate::str::contains("update: jumper-free (stock)"));
+        .stdout(predicate::str::is_match(r"\n +update +jumper-free \(stock\)").unwrap());
+}
+
+/// Every label sits under the serials and every value under the states, whatever the line.
+#[test]
+fn list_lines_up_labels_and_values() {
+    let output = tool("bench").args(["list", "-v"]).assert().success();
+    let text = String::from_utf8_lossy(&output.get_output().stdout).into_owned();
+    let lines: Vec<&str> = text.lines().collect();
+    let head = lines[0];
+    let serial = head.find("CJ3E7A91C2").unwrap();
+    let state = head.find("Verge, build").unwrap();
+    for line in &lines {
+        let (before, after) = line.split_at(state);
+        assert!(
+            before.ends_with(' ') && !after.starts_with(' '),
+            "value off the state column: {line:?}"
+        );
+        if !line.starts_with(' ') {
+            continue;
+        }
+        assert!(
+            line[..serial].trim().is_empty() && !line[serial..].starts_with(' '),
+            "label off the serial column: {line:?}"
+        );
+    }
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim_start().starts_with("capabilities"))
+    );
 }
 
 #[test]
@@ -491,16 +521,16 @@ fn bootloader_sends_a_pro_into_isp_mode_only_for_stock() {
 #[test]
 fn list_names_each_units_board() {
     for (scenario, board) in [
-        ("bench", "board: MCU-Link"),
-        ("pro", "board: MCU-Link Pro"),
-        ("isp", "board: cannot be told in ISP mode"),
-        ("unnamed-board", "board: not reported"),
-        ("mini", "board: MCU-Link mini"),
+        ("bench", "MCU-Link"),
+        ("pro", "MCU-Link Pro"),
+        ("isp", "cannot be told in ISP mode"),
+        ("unnamed-board", "not reported"),
+        ("mini", "MCU-Link mini"),
     ] {
         tool(scenario)
             .assert()
             .success()
-            .stdout(predicate::str::contains(board));
+            .stdout(predicate::str::is_match(format!(r"\n +board +{board}\n")).unwrap());
     }
 }
 
@@ -1296,7 +1326,7 @@ fn list_names_what_a_held_pro_runs() {
         .stdout(predicate::str::contains(
             "Verge, build 26ea505, its CMSIS-DAP held by another program",
         ))
-        .stdout(predicate::str::contains("board: MCU-Link Pro"));
+        .stdout(predicate::str::is_match(r"\n +board +MCU-Link Pro\n").unwrap());
 }
 
 #[test]
