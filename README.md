@@ -1,9 +1,7 @@
 # verge
 
-A CLI and GUI for MCU-Links running Verge, the firmware in `mculink-verge`. The CLI uses what Verge
-adds: it shows or limits the two-pin cJTAG formats a unit offers, and on an MCU-Link Pro it drives
-the DIO pins, switches the target supply and measures energy. Both tools also update firmware, Verge
-or NXP's stock CMSIS-DAP firmware. Both are built on `verge-probe`.
+A CLI and GUI to control the Verge firmware on MCU-Links, or update it. Verge is the firmware in
+`mculink-verge`, and both tools are built on `verge-probe`.
 
 To update, the tool lists attached MCU-Links with their firmware versions and board types, then
 selects an update path for each:
