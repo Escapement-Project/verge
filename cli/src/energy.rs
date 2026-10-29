@@ -8,10 +8,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use tracing_indicatif::indicatif_println;
-use verge_probe::aux::Aux;
+use verge_probe::aux::{Aux, AuxLink};
 use verge_probe::bus::BusError;
 use verge_probe::detect::{State, Unit, detect_named};
-use verge_probe::stream::EndReason;
+use verge_probe::stream::{EndReason, Message};
 use verge_probe::{
     Bus, CalibrationRange, Cancel, CommandError, DapTransport, EnergyAccumulator,
     EnergyCalibration, EnergyCaptureSample, EnergyError, EnergyTotal, VergeControl, VergeInfo,
@@ -56,8 +56,9 @@ pub enum EnergyCommand {
     ///
     /// Starts a capture if none runs, and stops only one it started. Over a capture a fault
     /// stopped, it shows that capture's total and starts a new one. Q, Esc or Ctrl-C leaves.
-    /// Where the output is not a terminal it prints a line a read instead. The current graph
-    /// plots the newest pair at each read, so it can miss short peaks; the power graph plots each
+    /// Where the output is not a terminal it prints a line a read instead. Through Verge Aux the
+    /// current graph shows every pair, as the lowest and highest in each column; without it, the
+    /// newest pair at each read, so it can miss short peaks. The power graph plots each
     /// interval's mean from the total, which counts every pair.
     Watch {
         /// Voltage and current pairs a second, for a capture this starts.
@@ -99,7 +100,34 @@ pub enum EnergyCommand {
 
 /// A Pro over Verge Aux where it has one, so a debugger can hold CMSIS-DAP meanwhile, or over
 /// CMSIS-DAP.
-type Pro<'a> = VergeControl<'a, dyn VergeTransport + 'a>;
+type Pro<'a> = VergeControl<'a, dyn ProLink + 'a>;
+
+/// The way to a Pro, and its energy stream where it has one: only Verge Aux does.
+trait ProLink: VergeTransport {
+    fn streams(&self) -> bool;
+    /// The next stream message, waiting up to `timeout`; `None` if none came.
+    fn message(&mut self, timeout: Duration) -> Result<Option<Message>>;
+}
+
+impl<L: AuxLink> ProLink for Aux<L> {
+    fn streams(&self) -> bool {
+        true
+    }
+
+    fn message(&mut self, timeout: Duration) -> Result<Option<Message>> {
+        Ok(Aux::message(self, timeout)?)
+    }
+}
+
+impl ProLink for DapTransport<'_> {
+    fn streams(&self) -> bool {
+        false
+    }
+
+    fn message(&mut self, _: Duration) -> Result<Option<Message>> {
+        Ok(None)
+    }
+}
 
 /// What a Pro offers that these commands reach.
 #[derive(Clone, Copy)]
@@ -204,7 +232,7 @@ fn with_pro<B: Bus, T>(
 
 fn run<T>(
     name: &str,
-    transport: &mut dyn VergeTransport,
+    transport: &mut dyn ProLink,
     feature: Feature,
     f: impl FnOnce(&str, &mut Pro<'_>) -> Result<T>,
 ) -> Result<T> {

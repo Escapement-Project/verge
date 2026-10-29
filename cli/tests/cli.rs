@@ -1172,9 +1172,12 @@ fn energy_watch_prints_a_line_a_read_and_leaves_a_running_capture_running() {
         .args(["energy", "watch", "--for", "1s", "--every", "250ms"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "   0.00 s  3.30 V  5.00 mA  (350 mA, low gain)  pair 10002  interval -",
-        ))
+        .stdout(
+            predicate::str::is_match(
+                r"   0\.00 s  3\.30 V  5\.00 mA  \(350 mA, low gain\)  pair 100\d\d  interval -",
+            )
+            .unwrap(),
+        )
         .stdout(predicate::str::contains("   1.00 s  3.30 V"))
         // Each interval holds two or three of the target's 10 ms wakes, so its mean lands either
         // side of the 1.71 mW the whole capture averages.

@@ -14,12 +14,16 @@ use ratatui::symbols::Marker;
 use ratatui::text::Line;
 use ratatui::widgets::{Axis, Block, Chart, Dataset, GraphType, Paragraph};
 use tracing_indicatif::indicatif_println;
+use verge_probe::stream::{Converter, EndReason, Message, Sample};
 use verge_probe::{Bus, Cancel, CommandError, EnergyCaptureSample, EnergyError, EnergyTotal};
 
 use super::{Pro, range_name, si};
 
 /// A wait is cut into slices this long, so that a key press or Ctrl-C is seen promptly.
 const SLICE: Duration = Duration::from_millis(20);
+/// The streamed current is kept as the lowest and highest pair in each of this many slices of the
+/// window, more than a terminal has columns.
+const SLICES: f64 = 1024.0;
 
 pub struct Options {
     pub rate: u32,
@@ -69,6 +73,9 @@ pub(crate) struct Model {
     last: Option<Reading>,
     /// Amps of the newest pair at each read.
     current: VecDeque<(f64, f64)>,
+    /// Every streamed pair's amps, as the lowest and highest in each slice of the window: the
+    /// slice's index, counted from the watch's start, then low and high. Empty without a stream.
+    envelope: VecDeque<(i64, f64, f64)>,
     /// Watts over each interval between reads, from the totals.
     power: VecDeque<(f64, f64)>,
     window: f64,
@@ -85,8 +92,29 @@ impl Model {
             sequence: None,
             last: None,
             current: VecDeque::new(),
+            envelope: VecDeque::new(),
             power: VecDeque::new(),
             window: window.as_secs_f64(),
+        }
+    }
+
+    fn slice_width(&self) -> f64 {
+        self.window / SLICES
+    }
+
+    /// Streamed pairs, whose capture clock reads `offset` seconds behind the watch's.
+    fn add_pairs(&mut self, samples: &[Sample], offset: f64) {
+        let width = self.slice_width();
+        for sample in samples {
+            let index = ((offset + sample.time_ns as f64 * 1e-9) / width).floor() as i64;
+            let amps = f64::from(sample.nanoamps) * 1e-9;
+            match self.envelope.back_mut() {
+                Some((slice, low, high)) if *slice == index => {
+                    *low = low.min(amps);
+                    *high = high.max(amps);
+                }
+                _ => self.envelope.push_back((index, amps, amps)),
+            }
         }
     }
 
@@ -138,6 +166,14 @@ impl Model {
             while series.front().is_some_and(|(at, _)| *at < oldest) {
                 series.pop_front();
             }
+        }
+        let width = self.slice_width();
+        while self
+            .envelope
+            .front()
+            .is_some_and(|(index, _, _)| (*index + 1) as f64 * width < oldest)
+        {
+            self.envelope.pop_front();
         }
         self.last = Some(reading);
     }
@@ -219,21 +255,40 @@ pub(crate) fn render(frame: &mut Frame, model: &Model) {
         .block(Block::bordered().title(format!(" {} energy ", model.name))),
         header,
     );
-    let graph = |title, series, unit, color| Graph {
+    let graph = |title, points, unit, color| Graph {
         title,
-        series,
+        points,
         unit,
         color,
     };
-    let current_graph = graph(
-        " Current: the newest pair at each read ",
-        &model.current,
-        "A",
-        Color::Cyan,
-    );
+    // A line through each slice's low and high fills every column from its lowest pair to its
+    // highest, whatever the terminal's width.
+    let width = model.slice_width();
+    let current_graph = if model.envelope.is_empty() {
+        graph(
+            " Current: the newest pair at each read ",
+            model.current.iter().copied().collect(),
+            "A",
+            Color::Cyan,
+        )
+    } else {
+        graph(
+            " Current: every pair, the lowest and highest in each column ",
+            model
+                .envelope
+                .iter()
+                .flat_map(|&(index, low, high)| {
+                    let at = (index as f64 + 0.5) * width;
+                    [(at, low), (at, high)]
+                })
+                .collect(),
+            "A",
+            Color::Cyan,
+        )
+    };
     let power_graph = graph(
         " Power: each interval's mean, counting every pair ",
-        &model.power,
+        model.power.iter().copied().collect(),
         "W",
         Color::Yellow,
     );
@@ -242,18 +297,18 @@ pub(crate) fn render(frame: &mut Frame, model: &Model) {
     }
 }
 
-struct Graph<'a> {
+struct Graph {
     title: &'static str,
-    series: &'a VecDeque<(f64, f64)>,
+    points: Vec<(f64, f64)>,
     unit: &'static str,
     color: Color,
 }
 
 /// One series over the model's window, ending at its last read.
-fn chart(frame: &mut Frame, area: Rect, graph: &Graph<'_>, model: &Model) {
+fn chart(frame: &mut Frame, area: Rect, graph: &Graph, model: &Model) {
     let (title, unit, color, window) = (graph.title, graph.unit, graph.color, model.window);
     let now = model.last.map_or(0.0, |reading| reading.at);
-    let points: Vec<(f64, f64)> = graph.series.iter().copied().collect();
+    let points = &graph.points;
     let low = points.iter().map(|(_, y)| *y).fold(0.0, f64::min);
     let high = points.iter().map(|(_, y)| *y).fold(0.0, f64::max);
     let top = if high > low { high * 1.1 } else { low + 1e-9 };
@@ -269,7 +324,7 @@ fn chart(frame: &mut Frame, area: Rect, graph: &Graph<'_>, model: &Model) {
         .marker(Marker::Braille)
         .graph_type(GraphType::Line)
         .style(Style::new().fg(color))
-        .data(&points);
+        .data(points);
     frame.render_widget(
         Chart::new(vec![dataset])
             .block(Block::bordered().title(title))
@@ -328,10 +383,20 @@ pub fn watch<B: Bus>(
     if cancel.is_cancelled() {
         bail!("left before the watch began");
     }
+    let streams = pro.transport().streams();
     let started_at = if running {
+        if streams {
+            pro.stream_energy_capture()
+                .with_context(|| format!("streaming {name}'s capture"))?;
+        }
         None
     } else {
-        match pro.start_energy_capture(options.rate) {
+        let start = if streams {
+            pro.start_energy_stream(options.rate)
+        } else {
+            pro.start_energy_capture(options.rate)
+        };
+        match start {
             Ok(start) => Some(start.actual_rate_pairs_per_second),
             // The reply can be lost after the probe started, so stop what this may have started.
             Err(start) => {
@@ -348,11 +413,15 @@ pub fn watch<B: Bus>(
     };
     let mut model = Model::new(name, started_at, options.window);
     let shown = run(bus, pro, &mut model, options, totals, cancel);
+    // The stream ends with the capture this started; one of a capture found running is ended
+    // here, which leaves the capture running.
     let stopped = if model.started_here {
         match pro.stop_energy_capture() {
             Err(ref error) if fault(error) => Ok(()),
             stop => stop,
         }
+    } else if streams {
+        pro.end_energy_stream()
     } else {
         Ok(())
     };
@@ -442,6 +511,7 @@ fn run<B: Bus>(
     };
     let start = bus.now();
     let deadline = options.limit.map(|limit| start + limit);
+    let mut stream = Stream::default();
     let shown = (|| -> Result<()> {
         loop {
             let at = bus.now().saturating_sub(start).as_secs_f64();
@@ -457,7 +527,11 @@ fn run<B: Bus>(
             }
             let next = bus.now() + options.every;
             let until = deadline.map_or(next, |deadline| next.min(deadline));
-            if wait(bus, until, screen.is_some(), cancel)? {
+            let mut follow = |pro: &mut Pro<'_>, message| {
+                let at = bus.now().saturating_sub(start).as_secs_f64();
+                stream.follow(pro, model, message, at)
+            };
+            if wait(bus, pro, &mut follow, until, screen.is_some(), cancel)? {
                 return Ok(());
             }
         }
@@ -468,10 +542,66 @@ fn run<B: Bus>(
     shown
 }
 
-/// Waits until `until` on the bus's clock, a slice at a time. True when the user asked to leave:
-/// with Ctrl-C, which sets `cancel`, or, on the terminal UI, whose raw mode turns Ctrl-C into a
-/// key, with Q, Esc or Ctrl-C.
-fn wait<B: Bus>(bus: &B, until: Duration, keys: bool, cancel: &Cancel) -> Result<bool> {
+/// The capture's stream, where the Pro has one: what converting its pairs takes, and where its
+/// clock sits on the watch's.
+#[derive(Default)]
+struct Stream {
+    converter: Option<Converter>,
+    rate: u32,
+    /// Seconds from the capture's clock to the watch's, set by the stream's first pairs.
+    offset: Option<f64>,
+}
+
+impl Stream {
+    /// One message, `at` seconds into the watch.
+    fn follow(
+        &mut self,
+        pro: &mut Pro<'_>,
+        model: &mut Model,
+        message: Message,
+        at: f64,
+    ) -> Result<()> {
+        match message {
+            Message::Header(header) => {
+                self.converter = Some(Converter::new(&header));
+                self.rate = header.rate;
+                self.offset = None;
+            }
+            Message::Pairs(pairs) => {
+                let Some(converter) = &mut self.converter else {
+                    return Ok(());
+                };
+                converter.add_message(&pairs);
+                // The newest pair is at most a message's 10 ms old as it arrives.
+                let newest = pairs.time_of(pairs.pairs.len().saturating_sub(1), self.rate);
+                let offset = *self.offset.get_or_insert(at - newest as f64 * 1e-9);
+                model.add_pairs(&converter.take_samples(), offset);
+            }
+            Message::End(end) => {
+                self.converter = None;
+                // Another host's start: follow the capture it started.
+                if end.reason == EndReason::Restarted {
+                    pro.stream_energy_capture()
+                        .context("streaming the restarted capture")?;
+                }
+            }
+            Message::Edges(_) => {}
+        }
+        Ok(())
+    }
+}
+
+/// Waits until `until` on the bus's clock, a slice at a time, taking the stream's messages as they
+/// come. True when the user asked to leave: with Ctrl-C, which sets `cancel`, or, on the terminal
+/// UI, whose raw mode turns Ctrl-C into a key, with Q, Esc or Ctrl-C.
+fn wait<B: Bus>(
+    bus: &B,
+    pro: &mut Pro<'_>,
+    follow: &mut impl FnMut(&mut Pro<'_>, Message) -> Result<()>,
+    until: Duration,
+    keys: bool,
+    cancel: &Cancel,
+) -> Result<bool> {
     loop {
         if cancel.is_cancelled() || (keys && left_by_key()?) {
             return Ok(true);
@@ -479,7 +609,14 @@ fn wait<B: Bus>(bus: &B, until: Duration, keys: bool, cancel: &Cancel) -> Result
         let Some(left) = until.checked_sub(bus.now()).filter(|left| !left.is_zero()) else {
             return Ok(false);
         };
-        bus.sleep(SLICE.min(left));
+        let slice = SLICE.min(left);
+        let before = bus.now();
+        match pro.transport().message(slice)? {
+            Some(message) => follow(pro, message)?,
+            // Over CMSIS-DAP, or a stream that has ended, nothing waits.
+            None if bus.now() == before => bus.sleep(slice),
+            None => {}
+        }
     }
 }
 
@@ -642,6 +779,143 @@ mod tests {
         assert!(model.current.is_empty());
     }
 
+    fn screen(model: &Model) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, model)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(100)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A 1 ms wake between two reads 100 ms apart still shows, as its column's highest pair.
+    #[test]
+    fn a_stream_draws_every_pair_as_each_columns_low_and_high() {
+        let mut model = Model::new("CJ3E7A91C2", Some(1000), Duration::from_secs(1));
+        let samples: Vec<Sample> = (0..1000u32)
+            .map(|n| Sample {
+                sequence: n + 1,
+                time_ns: u64::from(n) * 1_000_000,
+                millivolts: 3300,
+                nanoamps: if n == 437 { 5_000_000 } else { 20_000 },
+            })
+            .collect();
+        model.add_pairs(&samples, 0.0);
+        model.update(reading(1.0, 20_000, 66_000, 1000));
+        let highest = model
+            .envelope
+            .iter()
+            .map(|&(_, _, high)| high)
+            .fold(0.0, f64::max);
+        let lowest = model
+            .envelope
+            .iter()
+            .map(|&(_, low, _)| low)
+            .fold(1.0, f64::min);
+        assert_eq!((lowest, highest), (20e-6, 5e-3));
+        let screen = screen(&model);
+        assert!(
+            screen.contains("Current: every pair, the lowest and highest in each column"),
+            "{screen}"
+        );
+        assert!(screen.contains("5.50 mA"), "{screen}");
+    }
+
+    fn pro_with_a_capture() -> (verge_probe::sim::SimBus, verge_probe::UsbDevice) {
+        let bus = verge_probe::sim::SimBus::scenario("ours-pro-energy").unwrap();
+        let device = verge_probe::detect(&bus).unwrap().remove(0).device;
+        (bus, device)
+    }
+
+    fn aux_log(bus: &verge_probe::sim::SimBus) -> Vec<String> {
+        bus.log()
+            .into_iter()
+            .filter_map(|line| line.split_once("AUX ").map(|(_, hex)| hex.to_owned()))
+            .collect()
+    }
+
+    /// Over Verge Aux a watch follows a capture it found running with mode 6, and leaves it
+    /// running with mode 7, so no stream is left for nobody.
+    #[test]
+    fn leaving_a_capture_found_running_ends_its_stream() {
+        let (bus, device) = pro_with_a_capture();
+        let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+        let mut pro: Pro<'_> = verge_probe::VergeControl::new(&mut aux);
+        let options = Options {
+            rate: 1000,
+            every: Duration::from_millis(100),
+            window: Duration::from_secs(30),
+            limit: Some(Duration::from_millis(300)),
+        };
+        let ended = watch(&bus, "CJ3E7A91C2", &mut pro, &options, &Cancel::new()).unwrap();
+        assert!(ended.running);
+        let log = aux_log(&bus);
+        let followed = log.iter().position(|hex| hex == "900600").unwrap();
+        let left = log.iter().position(|hex| hex == "9007").unwrap();
+        assert!(followed < left, "{log:?}");
+    }
+
+    /// The waits between reads take the stream: the target's 10 ms wakes at 5 mA show between its
+    /// 20 µA sleeps, on the watch's clock.
+    #[test]
+    fn a_watch_over_verge_aux_plots_every_pair() {
+        let (bus, device) = pro_with_a_capture();
+        let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+        let mut pro: Pro<'_> = verge_probe::VergeControl::new(&mut aux);
+        pro.stream_energy_capture().unwrap();
+        let mut model = Model::new("CJ3E7A91C2", None, Duration::from_secs(30));
+        let options = Options {
+            rate: 1000,
+            every: Duration::from_millis(100),
+            window: Duration::from_secs(30),
+            limit: Some(Duration::from_millis(500)),
+        };
+        run(&bus, &mut pro, &mut model, &options, true, &Cancel::new()).unwrap();
+        let highest = model
+            .envelope
+            .iter()
+            .map(|&(_, _, high)| high)
+            .fold(0.0, f64::max);
+        let lowest = model
+            .envelope
+            .iter()
+            .map(|&(_, low, _)| low)
+            .fold(1.0, f64::min);
+        assert!(
+            (highest - 5e-3).abs() < 1e-5 && (lowest - 20e-6).abs() < 1e-6,
+            "{lowest} {highest}"
+        );
+        let width = model.slice_width();
+        let (first, last) = (
+            model.envelope.front().unwrap().0,
+            model.envelope.back().unwrap().0,
+        );
+        assert!(
+            (-0.05..0.05).contains(&(first as f64 * width))
+                && (0.45..0.55).contains(&(last as f64 * width)),
+            "slices from {} s to {} s",
+            first as f64 * width,
+            last as f64 * width
+        );
+    }
+
+    /// Another host's start ends the stream with reason 3, and the watch follows the new capture.
+    #[test]
+    fn a_restart_by_another_host_is_followed() {
+        let (bus, device) = pro_with_a_capture();
+        let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+        let mut pro: Pro<'_> = verge_probe::VergeControl::new(&mut aux);
+        let mut model = Model::new("CJ3E7A91C2", None, Duration::from_secs(30));
+        let mut stream = Stream::default();
+        let restarted = verge_probe::stream::parse(&[0xA2, 3, 9, 0, 0, 0]).unwrap();
+        stream.follow(&mut pro, &mut model, restarted, 1.0).unwrap();
+        assert_eq!(aux_log(&bus).last().map(String::as_str), Some("900600"));
+    }
+
     #[test]
     fn the_screen_shows_the_pair_the_total_and_both_graphs() {
         let mut model = Model::new("CJ3E7A91C2", Some(1000), Duration::from_secs(30));
@@ -654,16 +928,7 @@ mod tests {
                 100 * u64::from(n),
             ));
         }
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        terminal.draw(|frame| render(frame, &model)).unwrap();
-        let screen = terminal
-            .backend()
-            .buffer()
-            .content()
-            .chunks(100)
-            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let screen = screen(&model);
         assert!(screen.contains("CJ3E7A91C2 energy"), "{screen}");
         assert!(
             screen.contains("3.30 V  20.0 µA  (350 mA, high gain)  pair 1900"),

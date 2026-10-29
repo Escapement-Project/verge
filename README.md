@@ -153,10 +153,11 @@ supply for that time.
 `energy watch` shows a capture live, and starts one if none runs. Over a capture that a fault
 stopped, it shows that capture's total and then starts a new one, which clears it. It stops only a
 capture it started. The screen shows the newest pair, the total and the mean power, over two graphs.
-The current graph plots the newest pair at each read, so it can miss short peaks. The power graph
-plots each interval's mean from the total, which counts every pair. Q, Esc or Ctrl-C leaves, and
-`--for` leaves after a set time. Where the output is not a terminal, it prints a line for each read
-instead.
+Through Verge Aux, the current graph shows every pair, as the lowest and highest in each column. A
+Verge image older than Verge Aux gives only the newest pair at each read, so the graph can miss
+short peaks. The power graph plots each interval's mean from the total, which counts every pair. Q,
+Esc or Ctrl-C leaves, and `--for` leaves after a set time. Where the output is not a terminal, it
+prints a line for each read instead.
 
 `energy record --out FILE` saves every pair of a capture. It reads them through Verge Aux, so it
 works while a debugger holds the probe. Like `watch`, it starts a capture if none runs and stops only
