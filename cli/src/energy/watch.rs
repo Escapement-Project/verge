@@ -98,6 +98,14 @@ impl Model {
         }
     }
 
+    /// Another host's start: the capture is that host's, measured afresh, and left running.
+    fn disown(&mut self) {
+        self.started_here = false;
+        self.rate = None;
+        self.baseline = None;
+        self.previous = None;
+    }
+
     fn slice_width(&self) -> f64 {
         self.window / SLICES
     }
@@ -139,10 +147,7 @@ impl Model {
                 .is_some_and(|(now, before)| now < before),
         };
         if restarted {
-            self.started_here = false;
-            self.rate = None;
-            self.baseline = None;
-            self.previous = None;
+            self.disown();
         }
         if sequence.is_some() {
             self.sequence = sequence;
@@ -578,9 +583,13 @@ impl Stream {
                 model.add_pairs(&converter.take_samples(), offset);
             }
             Message::End(end) => {
-                self.converter = None;
-                // Another host's start: follow the capture it started.
+                // An end before this watch's header is a stream this one replaced.
+                if self.converter.take().is_none() {
+                    return Ok(());
+                }
+                // Another host's start, which may come before any total shows it.
                 if end.reason == EndReason::Restarted {
+                    model.disown();
                     pro.stream_energy_capture()
                         .context("streaming the restarted capture")?;
                 }
@@ -855,7 +864,7 @@ mod tests {
         assert!(ended.running);
         let log = aux_log(&bus);
         let followed = log.iter().position(|hex| hex == "900600").unwrap();
-        let left = log.iter().position(|hex| hex == "9007").unwrap();
+        let left = log.iter().rposition(|hex| hex == "9007").unwrap();
         assert!(followed < left, "{log:?}");
     }
 
@@ -903,17 +912,75 @@ mod tests {
         );
     }
 
-    /// Another host's start ends the stream with reason 3, and the watch follows the new capture.
+    /// Another host restarts the capture a watch started, before the watch has a total to see it
+    /// by: the end of the stream says so, and the watch follows that host's capture and leaves it
+    /// running.
     #[test]
-    fn a_restart_by_another_host_is_followed() {
+    fn a_capture_another_host_restarted_is_left_running() {
+        struct RestartAfter {
+            inner: verge_probe::sim::SimAux,
+            bus: verge_probe::sim::SimBus,
+            device: verge_probe::UsbDevice,
+            at: Duration,
+        }
+
+        impl verge_probe::aux::AuxLink for RestartAfter {
+            fn write(&mut self, request: &[u8]) -> Result<(), verge_probe::dap::LinkError> {
+                self.inner.write(request)
+            }
+
+            fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, verge_probe::dap::LinkError> {
+                if self.bus.now() >= self.at {
+                    self.at = Duration::MAX;
+                    let mut link = self.bus.open_dap(&self.device).unwrap();
+                    let mut start = vec![0x90, 0];
+                    start.extend_from_slice(&100_000u32.to_le_bytes());
+                    verge_probe::dap::DapLink::exchange(&mut link, &start).unwrap();
+                }
+                self.inner.read(timeout)
+            }
+        }
+
+        let bus = verge_probe::sim::SimBus::scenario("ours-pro").unwrap();
+        let device = verge_probe::detect(&bus).unwrap().remove(0).device;
+        let link = RestartAfter {
+            inner: bus.open_aux(&device).unwrap(),
+            bus: bus.clone(),
+            device: device.clone(),
+            at: bus.now() + Duration::from_millis(50),
+        };
+        let mut aux = verge_probe::aux::Aux::open(link).unwrap();
+        let mut pro: Pro<'_> = verge_probe::VergeControl::new(&mut aux);
+        let options = Options {
+            rate: 1000,
+            every: Duration::from_millis(100),
+            window: Duration::from_secs(30),
+            limit: Some(Duration::from_millis(300)),
+        };
+        let ended = watch(&bus, "CJ3E7A91C2", &mut pro, &options, &Cancel::new()).unwrap();
+        let log = aux_log(&bus);
+        assert!(ended.running, "{log:?}");
+        assert!(
+            log.iter().any(|hex| hex == "900600"),
+            "not followed: {log:?}"
+        );
+        assert!(!log.iter().any(|hex| hex == "9002"), "{log:?}");
+    }
+
+    /// An end before the watch's own header belongs to a stream the watch replaced, so the
+    /// capture stays the watch's and nothing is followed.
+    #[test]
+    fn an_end_before_the_header_changes_nothing() {
         let (bus, device) = pro_with_a_capture();
         let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
         let mut pro: Pro<'_> = verge_probe::VergeControl::new(&mut aux);
-        let mut model = Model::new("CJ3E7A91C2", None, Duration::from_secs(30));
-        let mut stream = Stream::default();
+        let mut model = Model::new("CJ3E7A91C2", Some(1000), Duration::from_secs(30));
         let restarted = verge_probe::stream::parse(&[0xA2, 3, 9, 0, 0, 0]).unwrap();
-        stream.follow(&mut pro, &mut model, restarted, 1.0).unwrap();
-        assert_eq!(aux_log(&bus).last().map(String::as_str), Some("900600"));
+        Stream::default()
+            .follow(&mut pro, &mut model, restarted, 1.0)
+            .unwrap();
+        assert!(model.started_here);
+        assert!(!aux_log(&bus).iter().any(|hex| hex == "900600"));
     }
 
     #[test]

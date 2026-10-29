@@ -444,7 +444,7 @@ mod tests {
     }
 
     /// Plays back stream messages, as a probe whose stream ends by itself would send them. `None`
-    /// is a read that times out, as the one that ends the drain on opening.
+    /// is a read that times out, as the one that ends the drain on opening. Writes go nowhere.
     struct Playback(std::collections::VecDeque<Option<Vec<u8>>>);
 
     impl AuxLink for Playback {
@@ -498,7 +498,9 @@ mod tests {
         end.extend_from_slice(&7u32.to_le_bytes());
         let mut replaced = vec![0xA2, 1];
         replaced.extend_from_slice(&40u32.to_le_bytes());
+        // Opening asks for mode 7, then drains until a read times out.
         let messages = [
+            Some(vec![0x90, 0, 0]),
             None,
             Some(pairs(30, 2)),
             Some(replaced),
