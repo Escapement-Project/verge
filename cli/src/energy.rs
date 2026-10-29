@@ -95,7 +95,8 @@ pub enum EnergyCommand {
         /// Write CSV instead: one line per pair, its sequence number, its time in ns since the
         /// capture started, millivolts and nanoamps, then the level of each DIO pin recorded. Each
         /// edge of those pins is a line of its own, in time order, with only its time and the
-        /// levels after it.
+        /// levels after it. A pair's time is its voltage's; its current was read half a pair
+        /// later.
         #[arg(long)]
         csv: bool,
         /// Record the edges of these DIO pins too: 0 to 3, as `--dio 0,3`, or `dio0` to `dio3`,
