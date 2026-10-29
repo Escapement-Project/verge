@@ -77,3 +77,35 @@ fn a_batch_that_downloads_asks_once() {
     assert!(!rest.contains("without being asked again"), "{rest}");
     std::fs::remove_file(&record).unwrap();
 }
+
+/// Several units that fit, at a terminal: the tool lists them and acts on the one picked.
+#[test]
+fn a_terminal_picks_among_the_units_that_fit() {
+    let mut p = tool("bench", &["update"]);
+    p.exp_string("Which MCU-Link?").unwrap();
+    // dialoguer hides the cursor before it draws the list, so wait for the last item instead.
+    p.exp_string("QK7RM2VTX8D41  stock V3.172").unwrap();
+    // Down to the second unit, the stock one, and take it.
+    p.send("\u{1b}[B").unwrap();
+    p.send("\r").unwrap();
+    p.flush().unwrap();
+    p.exp_string(DOWNLOAD).unwrap();
+    answer(&mut p, "y");
+    p.exp_string("Flash release v0.3.0 (mculink-verge-v0.3.0.s19) onto QK7RM2VTX8D41")
+        .unwrap();
+    answer(&mut p, "n");
+    p.exp_string("nothing was flashed").unwrap();
+    p.exp_eof().unwrap();
+}
+
+/// A Pro command lists only the Pros, so a lone Pro beside a plain board is taken unasked.
+#[test]
+fn a_terminal_is_not_asked_when_one_unit_fits() {
+    let mut p = tool("ours-pro-and-plain", &["power"]);
+    let rest = p.exp_eof().unwrap();
+    assert!(
+        rest.contains("CJ3E7A91C2's target supply is off."),
+        "{rest}"
+    );
+    assert!(!rest.contains("Which MCU-Link?"), "{rest}");
+}

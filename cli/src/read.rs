@@ -7,12 +7,10 @@ use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use verge_probe::probe_rs::MemoryInterface;
 use verge_probe::probe_rs::probe::WireProtocol;
+use verge_probe::probe_rs::probe::list::Lister;
 
 #[derive(Args)]
 pub struct ReadArgs {
-    /// The probe, when more than one is attached.
-    #[arg(long)]
-    serial: Option<String>,
     /// The target chip, as probe-rs names it.
     #[arg(long)]
     chip: String,
@@ -33,6 +31,38 @@ pub struct ReadArgs {
     address: u64,
     /// How many values to read.
     words: usize,
+}
+
+/// At a terminal with several probes attached, the serial of the one the user picks. It asks
+/// probe-rs, which lists every probe it can drive, not only MCU-Links.
+fn pick_probe() -> Result<Option<String>> {
+    if !crate::interactive() {
+        return Ok(None);
+    }
+    let probes = Lister::new().list_all();
+    if probes.len() < 2 {
+        return Ok(None);
+    }
+    let items: Vec<String> = probes
+        .iter()
+        .map(|probe| {
+            let serial = probe.serial_number.as_deref().unwrap_or("-");
+            format!("{serial:<14} {}", probe.identifier)
+        })
+        .collect();
+    let index = dialoguer::Select::new()
+        .with_prompt("Which probe?")
+        .items(&items)
+        .default(0)
+        .interact()?;
+    let probe = &probes[index];
+    let serial = probe.serial_number.clone().with_context(|| {
+        format!(
+            "{} reports no serial, so it cannot be picked: unplug the other probes",
+            probe.identifier
+        )
+    })?;
+    Ok(Some(serial))
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -60,10 +90,14 @@ enum Width {
     B64,
 }
 
-pub fn read(args: &ReadArgs) -> Result<()> {
+pub fn read(args: &ReadArgs, serial: Option<&str>) -> Result<()> {
+    let picked = match serial {
+        Some(_) => None,
+        None => pick_probe()?,
+    };
     let started = Instant::now();
     let mut session = verge_probe::attach(
-        args.serial.as_deref(),
+        serial.or(picked.as_deref()),
         &args.chip,
         args.protocol.into(),
         args.speed,

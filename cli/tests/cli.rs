@@ -1293,6 +1293,79 @@ fn energy_refuses_stock() {
         ));
 }
 
+#[test]
+fn serial_goes_before_the_command_or_after_it() {
+    for args in [
+        ["--serial", "CJ3E7AB3E4", "cjtag"],
+        ["cjtag", "--serial", "CJ3E7AB3E4"],
+    ] {
+        tool("ours-pro-and-plain")
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("CJ3E7AB3E4 offers two-pin"));
+    }
+}
+
+#[test]
+fn a_pro_command_takes_the_only_pro_beside_a_plain_board() {
+    tool("ours-pro-and-plain")
+        .args(["power"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "CJ3E7A91C2's target supply is off.",
+        ));
+}
+
+#[test]
+fn several_units_that_fit_need_a_serial_off_a_terminal() {
+    tool("ours-pro-and-plain")
+        .arg("cjtag")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "2 MCU-Links are attached (CJ3E7A91C2, CJ3E7AB3E4); pick one by serial",
+        ));
+}
+
+#[test]
+fn list_shows_only_the_unit_serial_names() {
+    tool("bench")
+        .args(["--serial", "QK7RM2VTX8D41", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("QK7RM2VTX8D41  stock V3.172"))
+        .stdout(predicate::str::contains("CJ3E7A91C2").not());
+    tool("bench")
+        .args(["--serial", "NOSUCHUNIT", "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no attached MCU-Link has serial NOSUCHUNIT",
+        ));
+}
+
+#[test]
+fn serial_is_refused_where_it_picks_nothing() {
+    for (args, why) in [
+        (
+            &["batch", "--yes"][..],
+            "`batch` takes every unit of a kind",
+        ),
+        (&["inspect", "image.s19"][..], "`inspect` reads a file"),
+        (&["isp", "reset"][..], "--port picks it instead"),
+    ] {
+        tool("bench")
+            .arg("--serial")
+            .arg("CJ3E7A91C2")
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(why));
+    }
+}
+
 /// A RUST_LOG that names only another crate still shows why verge failed.
 #[test]
 fn the_final_error_survives_a_narrow_rust_log() {

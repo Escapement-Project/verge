@@ -89,7 +89,7 @@ mculink-verge's README under "Releases".
 ```
 verge                       # list what is attached, and how each unit can be updated
 verge update                # install the latest Verge release on the only unit
-verge update --serial CJ3E7A91C2 --release v0.3.0
+verge --serial CJ3E7A91C2 update --release v0.3.0
 verge update --stock        # put NXP's firmware back
 verge isp enter             # send a unit into ISP mode without the jumper, for `verge isp flash`
 verge isp flash --file mculink_cjtag.elf
@@ -104,6 +104,12 @@ verge power on              # switch on a Pro's target supply
 verge energy watch          # a Pro's target current and energy, live
 verge read --chip CC1312R --protocol cjtag b32 0 64   # target memory, as probe-rs read prints it
 ```
+
+A command acts on one unit. `--serial` names it, before or after the command. Without it, the tool
+takes the only attached unit the command can act on. When several could be meant, it asks at a
+terminal and lists them; elsewhere it stops and asks for `--serial`. A Pro command such as `energy`
+looks only at Pros running Verge, so a plain board beside a Pro needs no serial. `list` and
+`release` show only the unit `--serial` names.
 
 `update` asks before downloading a release and shows the repository, tag and size. It asks again
 before flashing. Pass `--yes` to skip both prompts. Without `--yes`, a download requires an
@@ -149,8 +155,8 @@ plots each interval's mean from the total, which counts every pair. Q, Esc or Ct
 instead.
 
 `read` reads target memory through a probe over SWD, JTAG or two-pin cJTAG, and prints the table
-probe-rs's `read` prints: each line is an address and eight values, four for `b64`. Name the probe
-with `--serial` when more than one is attached, and set the clock in kHz with `--speed`. `--time`
+probe-rs's `read` prints: each line is an address and eight values, four for `b64`. It picks among
+every probe probe-rs can drive, not only MCU-Links. Set the clock in kHz with `--speed`. `--time`
 prints the attach and read times on stderr. Like probe-rs's `read`, it resumes any halted core when
 it finishes.
 

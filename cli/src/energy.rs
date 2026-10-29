@@ -11,20 +11,11 @@ use verge_probe::detect::{State, detect_named};
 use verge_probe::{
     Bus, CalibrationRange, Cancel, CommandError, DapTransport, EnergyAccumulator,
     EnergyCalibration, EnergyCaptureSample, EnergyError, EnergyTotal, Firmware, VergeControl,
-    VergeInfo, dap, update,
+    VergeInfo, dap,
 };
 
 #[derive(Args)]
-pub struct UnitArg {
-    /// The unit, when more than one is attached.
-    #[arg(long)]
-    serial: Option<String>,
-}
-
-#[derive(Args)]
 pub struct PowerArgs {
-    #[command(flatten)]
-    unit: UnitArg,
     /// Turn the supply on or off. Left out, the tool reads it.
     #[arg(value_enum)]
     state: Option<Switch>,
@@ -44,33 +35,19 @@ pub enum EnergyCommand {
     /// A start clears the total. It can calibrate first, which disconnects J9 from the target for
     /// about 0.2 s: a target powered through J9 loses its supply for that time.
     Start {
-        #[command(flatten)]
-        unit: UnitArg,
         /// Voltage and current pairs a second, 1 to 100,000.
         #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..=100_000))]
         rate: u32,
     },
     /// Show the newest voltage and current pair.
-    Latest {
-        #[command(flatten)]
-        unit: UnitArg,
-    },
+    Latest,
     /// Show the energy since the last start. A stopped capture keeps its total until the next
     /// start or a restart.
-    Total {
-        #[command(flatten)]
-        unit: UnitArg,
-    },
+    Total,
     /// Stop the capture and show its total.
-    Stop {
-        #[command(flatten)]
-        unit: UnitArg,
-    },
+    Stop,
     /// Show the points each current range was calibrated at.
-    Calibration {
-        #[command(flatten)]
-        unit: UnitArg,
-    },
+    Calibration,
     /// Show the capture live: the newest pair, the total, and graphs of current and power.
     ///
     /// Starts a capture if none runs, and stops only one it started. Over a capture a fault
@@ -79,8 +56,6 @@ pub enum EnergyCommand {
     /// plots the newest pair at each read, so it can miss short peaks; the power graph plots each
     /// interval's mean from the total, which counts every pair.
     Watch {
-        #[command(flatten)]
-        unit: UnitArg,
         /// Voltage and current pairs a second, for a capture this starts.
         #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..=100_000))]
         rate: u32,
@@ -137,18 +112,17 @@ impl Feature {
     }
 }
 
-/// Runs `f` on the Pro `unit` names, or the only unit, refusing anything else in a sentence that
-/// says why.
+/// Runs `f` on the Pro `serial` names, or the one [`crate::pick_unit`] finds, refusing anything
+/// else in a sentence that says why.
 fn with_pro<B: Bus, T>(
     bus: &B,
-    unit: &UnitArg,
+    serial: Option<&str>,
     feature: Feature,
     f: impl FnOnce(&str, &mut Pro<'_, '_>) -> Result<T>,
 ) -> Result<T> {
     let what = feature.name();
-    let serial = unit.serial.as_deref();
     let units = detect_named(bus, serial).context("looking for MCU-Links")?;
-    let unit = update::select(&units, serial)?;
+    let unit = crate::pick_unit(&units, serial, crate::pro_running_ours)?;
     let name = unit.serial().unwrap_or("the unit");
     if let State::Unreadable { reason, .. } = &unit.state {
         bail!("the tool could not ask {name} what it runs: {reason}");
@@ -191,8 +165,8 @@ fn keeps_totals(pro: &mut Pro<'_, '_>) -> bool {
         .is_some_and(VergeInfo::supports_energy_accumulator)
 }
 
-pub fn power<B: Bus>(bus: &B, args: &PowerArgs) -> Result<()> {
-    with_pro(bus, &args.unit, Feature::Supply, |name, pro| {
+pub fn power<B: Bus>(bus: &B, args: &PowerArgs, serial: Option<&str>) -> Result<()> {
+    with_pro(bus, serial, Feature::Supply, |name, pro| {
         let on = match args.state {
             None => pro.read_target_power(),
             Some(state) => pro.set_target_power(matches!(state, Switch::On)),
@@ -206,10 +180,15 @@ pub fn power<B: Bus>(bus: &B, args: &PowerArgs) -> Result<()> {
     })
 }
 
-pub fn energy<B: Bus>(bus: &B, command: &EnergyCommand, cancel: &Cancel) -> Result<()> {
+pub fn energy<B: Bus>(
+    bus: &B,
+    command: &EnergyCommand,
+    serial: Option<&str>,
+    cancel: &Cancel,
+) -> Result<()> {
     let energy = Feature::Energy;
     match command {
-        EnergyCommand::Start { unit, rate } => with_pro(bus, unit, energy, |name, pro| {
+        EnergyCommand::Start { rate } => with_pro(bus, serial, energy, |name, pro| {
             let start = pro
                 .start_energy_capture(*rate)
                 .with_context(|| format!("starting {name}'s capture"))?;
@@ -222,7 +201,7 @@ pub fn energy<B: Bus>(bus: &B, command: &EnergyCommand, cancel: &Cancel) -> Resu
             indicatif_println!("{name} captures {actual} pairs a second{asked}.");
             Ok(())
         }),
-        EnergyCommand::Latest { unit } => with_pro(bus, unit, energy, |name, pro| {
+        EnergyCommand::Latest => with_pro(bus, serial, energy, |name, pro| {
             let latest = match pro.latest_energy_sample() {
                 Err(CommandError::Firmware(EnergyError::DmaError)) => {
                     indicatif_println!(
@@ -258,14 +237,14 @@ pub fn energy<B: Bus>(bus: &B, command: &EnergyCommand, cancel: &Cancel) -> Resu
             }
             Ok(())
         }),
-        EnergyCommand::Total { unit } => with_pro(bus, unit, energy, |name, pro| {
+        EnergyCommand::Total => with_pro(bus, serial, energy, |name, pro| {
             let total = pro
                 .read_energy_accumulator()
                 .with_context(|| format!("reading {name}'s total"))?;
             indicatif_println!("{name}: {}.", describe_total(name, total)?);
             Ok(())
         }),
-        EnergyCommand::Stop { unit } => with_pro(bus, unit, energy, |name, pro| {
+        EnergyCommand::Stop => with_pro(bus, serial, energy, |name, pro| {
             // After a fault the stop still stops, and answers with the fault.
             match pro.stop_energy_capture() {
                 Ok(()) | Err(CommandError::Firmware(EnergyError::DmaError)) => {}
@@ -283,7 +262,7 @@ pub fn energy<B: Bus>(bus: &B, command: &EnergyCommand, cancel: &Cancel) -> Resu
             indicatif_println!("{name} stopped: {}.", describe_total(name, total)?);
             Ok(())
         }),
-        EnergyCommand::Calibration { unit } => with_pro(bus, unit, energy, |name, pro| {
+        EnergyCommand::Calibration => with_pro(bus, serial, energy, |name, pro| {
             for (range, label) in [
                 (CalibrationRange::Low, "Low range"),
                 (CalibrationRange::High, "High range"),
@@ -316,12 +295,11 @@ pub fn energy<B: Bus>(bus: &B, command: &EnergyCommand, cancel: &Cancel) -> Resu
             Ok(())
         }),
         EnergyCommand::Watch {
-            unit,
             rate,
             every,
             window,
             limit,
-        } => with_pro(bus, unit, energy, |name, pro| {
+        } => with_pro(bus, serial, energy, |name, pro| {
             let options = watch::Options {
                 rate: *rate,
                 every: *every,

@@ -43,7 +43,7 @@ const EXAMPLES: &str = "\
 Examples:
   verge                    what is attached, and how each unit can be updated
   verge update             install the latest release of ours on the only unit
-  verge update --serial CJ3E7A91C2 --release v0.3.0
+  verge --serial CJ3E7A91C2 update --release v0.3.0
   verge update --stock     put NXP's firmware back, from your LinkServer install
   verge isp flash --file build/mculink_cjtag.elf
                            flash a unit you put into ISP mode with the jumper";
@@ -62,6 +62,11 @@ struct Cli {
     /// Say more about what is happening. Twice for USB-level detail.
     #[arg(short, long, action = ArgAction::Count, global = true)]
     verbose: u8,
+
+    /// The unit to act on, by serial number. Needed only when more than one attached unit could
+    /// be meant and there is no terminal to ask at.
+    #[arg(long, global = true)]
+    serial: Option<String>,
 
     /// The GitHub repository releases of ours come from.
     #[arg(
@@ -156,9 +161,6 @@ enum Command {
 
 #[derive(Args)]
 struct DioArgs {
-    /// The unit, when more than one is attached.
-    #[arg(long)]
-    serial: Option<String>,
     /// Drive these pins high: 0 to 3, as `--high 0,1`, or `dio0` to `dio3`, or `all`.
     #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = parse_dio_pins)]
     high: Vec<u8>,
@@ -198,9 +200,6 @@ fn dio_names(mask: u8) -> String {
 
 #[derive(Args)]
 struct CjtagArgs {
-    /// The unit, when more than one is attached.
-    #[arg(long)]
-    serial: Option<String>,
     /// Offer OScan1 alone.
     #[arg(long, conflicts_with_all = ["all", "formats"])]
     oscan1_only: bool,
@@ -237,9 +236,6 @@ enum IspCommand {
     /// image of ours is built for it. A unit known to be another board than the full MCU-Link is
     /// restarted only with --stock.
     Enter {
-        /// The unit to restart, when more than one is attached.
-        #[arg(long)]
-        serial: Option<String>,
         /// You mean to flash NXP's stock image next, which goes on any board.
         #[arg(long)]
         stock: bool,
@@ -288,9 +284,6 @@ struct Source {
 struct UpdateArgs {
     #[command(flatten)]
     source: Source,
-    /// The unit to update, when more than one is attached.
-    #[arg(long)]
-    serial: Option<String>,
     /// Flash without asking first.
     #[arg(short, long)]
     yes: bool,
@@ -486,26 +479,93 @@ fn run<B: Bus + Sync, H: Http>(
     cancel: &Cancel,
     stop: &Cancel,
 ) -> Result<()> {
+    let serial = cli.serial.as_deref();
+    if let Some(serial) = serial {
+        let why = match &cli.command {
+            Some(Command::Batch(_)) => {
+                Some("`batch` takes every unit of a kind, one after another")
+            }
+            Some(Command::Inspect { .. }) => Some("`inspect` reads a file and opens no unit"),
+            Some(Command::Isp(
+                IspCommand::Flash(_) | IspCommand::Reset { .. } | IspCommand::Info { .. },
+            )) => Some("a unit in ISP mode reports no serial, so --port picks it instead"),
+            _ => None,
+        };
+        if let Some(why) = why {
+            bail!("--serial {serial} picks nothing here: {why}");
+        }
+    }
     match &cli.command {
         Some(Command::Batch(args)) => batch(bus, github, args, cancel, stop),
-        None | Some(Command::List) => list(bus, cli.verbose > 0),
-        Some(Command::Cjtag(args)) => cjtag(bus, args),
-        Some(Command::Dio(args)) => dio(bus, args),
-        Some(Command::Power(args)) => energy::power(bus, args),
-        Some(Command::Energy(command)) => energy::energy(bus, command, cancel),
-        Some(Command::Update(args)) => update_unit(bus, github, args, cancel),
-        Some(Command::Isp(IspCommand::Enter { serial, stock })) => {
-            bootloader(bus, serial.as_deref(), *stock, cancel)
-        }
+        None | Some(Command::List) => list(bus, cli.verbose > 0, serial),
+        Some(Command::Cjtag(args)) => cjtag(bus, args, serial),
+        Some(Command::Dio(args)) => dio(bus, args, serial),
+        Some(Command::Power(args)) => energy::power(bus, args, serial),
+        Some(Command::Energy(command)) => energy::energy(bus, command, serial, cancel),
+        Some(Command::Update(args)) => update_unit(bus, github, args, serial, cancel),
+        Some(Command::Isp(IspCommand::Enter { stock })) => bootloader(bus, serial, *stock, cancel),
         Some(Command::Isp(IspCommand::Flash(args))) => flash(bus, github, args, cancel),
         Some(Command::Isp(IspCommand::Reset { port })) => reset(bus, port.port.as_deref(), cancel),
         Some(Command::Isp(IspCommand::Info { port })) => {
             rom_info(bus, port.port.as_deref(), cancel)
         }
-        Some(Command::Release { tag }) => release(bus, github, tag.as_deref()),
+        Some(Command::Release { tag }) => release(bus, github, tag.as_deref(), serial),
         Some(Command::Inspect { file }) => inspect(file),
-        Some(Command::Read(args)) => read::read(args),
+        Some(Command::Read(args)) => read::read(args, serial),
     }
+}
+
+/// Whether a question can be asked here: dialoguer reads the answer from stdin and draws the
+/// question on stderr.
+fn interactive() -> bool {
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// The unit a command acts on: the one `serial` names; else the only attached unit that `fits`
+/// the command; else, at a terminal, the one the user picks from those that fit. Off a terminal,
+/// several that fit need `--serial`, and [`update::select`] says so.
+fn pick_unit<'a>(
+    units: &'a [Unit],
+    serial: Option<&str>,
+    fits: impl Fn(&Unit) -> bool,
+) -> Result<&'a Unit> {
+    if serial.is_none() {
+        let fitting: Vec<&Unit> = units.iter().filter(|unit| fits(unit)).collect();
+        match fitting.as_slice() {
+            [only] => return Ok(only),
+            [_, _, ..] if interactive() => return choose(&fitting),
+            _ => {}
+        }
+    }
+    Ok(update::select(units, serial)?)
+}
+
+fn choose<'a>(units: &[&'a Unit]) -> Result<&'a Unit> {
+    let items: Vec<String> = units.iter().map(|unit| describe_unit(unit)).collect();
+    let index = dialoguer::Select::new()
+        .with_prompt("Which MCU-Link?")
+        .items(&items)
+        .default(0)
+        .interact()?;
+    Ok(units[index])
+}
+
+fn runs_ours(unit: &Unit) -> bool {
+    matches!(
+        unit.state,
+        State::Probe {
+            firmware: Firmware::Ours(_),
+            ..
+        }
+    )
+}
+
+fn pro_running_ours(unit: &Unit) -> bool {
+    matches!(
+        &unit.state,
+        State::Probe { firmware: Firmware::Ours(ours), .. }
+            if ours.board.map(verge_probe::BoardKind::number) == Some(dap::Ours::BOARD_MCU_LINK_PRO)
+    )
 }
 
 fn describe_unit(unit: &Unit) -> String {
@@ -514,8 +574,13 @@ fn describe_unit(unit: &Unit) -> String {
     format!("{location:<8} {serial:<14} {}", unit.state)
 }
 
-fn list<B: Bus>(bus: &B, verbose: bool) -> Result<()> {
+fn list<B: Bus>(bus: &B, verbose: bool, serial: Option<&str>) -> Result<()> {
     let units = detect(bus).context("looking for MCU-Links")?;
+    if let Some(serial) = serial
+        && !units.iter().any(|unit| unit.serial() == Some(serial))
+    {
+        bail!("no attached MCU-Link has serial {serial}");
+    }
     if units.is_empty() {
         indicatif_println!("No MCU-Link is attached.");
         if cfg!(target_os = "linux") {
@@ -525,7 +590,10 @@ fn list<B: Bus>(bus: &B, verbose: bool) -> Result<()> {
         }
         return Ok(());
     }
-    for unit in &units {
+    for unit in units
+        .iter()
+        .filter(|unit| serial.is_none_or(|serial| unit.serial() == Some(serial)))
+    {
         indicatif_println!("{}", describe_unit(unit));
         let board = match (&unit.state, unit.hardware()) {
             (State::Bootloader, _) => "cannot be told in ISP mode".to_owned(),
@@ -707,10 +775,11 @@ fn update_unit<B: Bus, H: Http>(
     bus: &B,
     github: &GitHub<H>,
     args: &UpdateArgs,
+    serial: Option<&str>,
     cancel: &Cancel,
 ) -> Result<()> {
-    let units = detect_named(bus, args.serial.as_deref()).context("looking for MCU-Links")?;
-    let unit = update::select(&units, args.serial.as_deref())?;
+    let units = detect_named(bus, serial).context("looking for MCU-Links")?;
+    let unit = pick_unit(&units, serial, |_| true)?;
     let offer = offer(unit, &units);
     let Some(path) = offer.best() else {
         bail!(
@@ -1065,9 +1134,9 @@ fn arm_refusal(error: &ArmError) -> anyhow::Error {
     }
 }
 
-fn cjtag<B: Bus>(bus: &B, args: &CjtagArgs) -> Result<()> {
-    let units = detect_named(bus, args.serial.as_deref()).context("looking for MCU-Links")?;
-    let unit = update::select(&units, args.serial.as_deref())?;
+fn cjtag<B: Bus>(bus: &B, args: &CjtagArgs, serial: Option<&str>) -> Result<()> {
+    let units = detect_named(bus, serial).context("looking for MCU-Links")?;
+    let unit = pick_unit(&units, serial, runs_ours)?;
     let serial = unit.serial().unwrap_or("the unit");
     let State::Probe {
         firmware: Firmware::Ours(ours),
@@ -1112,7 +1181,7 @@ fn cjtag<B: Bus>(bus: &B, args: &CjtagArgs) -> Result<()> {
     Ok(())
 }
 
-fn dio<B: Bus>(bus: &B, args: &DioArgs) -> Result<()> {
+fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
     let fold = |pins: &[u8]| pins.iter().fold(0, |mask, pin| mask | pin);
     let (high, low, input) = (fold(&args.high), fold(&args.low), fold(&args.input));
     for (a, b, names) in [
@@ -1124,8 +1193,8 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs) -> Result<()> {
             bail!("{} named in both {names}", dio_names(a & b));
         }
     }
-    let units = detect_named(bus, args.serial.as_deref()).context("looking for MCU-Links")?;
-    let unit = update::select(&units, args.serial.as_deref())?;
+    let units = detect_named(bus, serial).context("looking for MCU-Links")?;
+    let unit = pick_unit(&units, serial, pro_running_ours)?;
     let serial = unit.serial().unwrap_or("the unit");
     let State::Probe {
         firmware: Firmware::Ours(ours),
@@ -1202,7 +1271,9 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs) -> Result<()> {
 
 fn bootloader<B: Bus>(bus: &B, serial: Option<&str>, stock: bool, cancel: &Cancel) -> Result<()> {
     let units = detect_named(bus, serial).context("looking for MCU-Links")?;
-    let unit = update::select(&units, serial)?;
+    let unit = pick_unit(&units, serial, |unit| {
+        matches!(unit.state, State::Probe { .. })
+    })?;
     if let Err(refused) = update::check_entry(unit, stock) {
         bail!(
             "{refused}. To put NXP's stock image on it, run `verge isp enter --stock`, then `verge isp flash --stock`. To put an image of ours built for it on it, run `verge update --file IMAGE` instead, which checks that the image declares this board before anything is flashed"
@@ -1280,7 +1351,12 @@ fn rom_info<B: Bus>(bus: &B, port: Option<&str>, cancel: &Cancel) -> Result<()> 
     Ok(())
 }
 
-fn release<B: Bus, H: Http>(bus: &B, github: &GitHub<H>, tag: Option<&str>) -> Result<()> {
+fn release<B: Bus, H: Http>(
+    bus: &B,
+    github: &GitHub<H>,
+    tag: Option<&str>,
+    serial: Option<&str>,
+) -> Result<()> {
     let release = match tag {
         None => github.latest(),
         Some(tag) => github.tagged(tag),
@@ -1299,7 +1375,16 @@ fn release<B: Bus, H: Http>(bus: &B, github: &GitHub<H>, tag: Option<&str>) -> R
         release.signature.name,
         release.checksum.name
     );
-    for unit in detect(bus).context("looking for MCU-Links")? {
+    let units = detect(bus).context("looking for MCU-Links")?;
+    if let Some(serial) = serial
+        && !units.iter().any(|unit| unit.serial() == Some(serial))
+    {
+        bail!("no attached MCU-Link has serial {serial}");
+    }
+    for unit in units
+        .into_iter()
+        .filter(|unit| serial.is_none_or(|serial| unit.serial() == Some(serial)))
+    {
         let standing = match (unit.build(), &unit.state) {
             (Some(build), _) => match build.compare(&release.tag) {
                 Relation::UpToDate => "runs this release".to_owned(),
