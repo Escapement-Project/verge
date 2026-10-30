@@ -22,6 +22,105 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+#[cfg(unix)]
+#[test]
+fn closed_stdout_ends_commands_quietly() {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    use std::process::{Command as Process, Stdio};
+
+    for (scenario, args) in [
+        ("bench", vec!["--help"]),
+        ("bench", vec!["--version"]),
+        ("bench", vec!["list", "-v"]),
+        ("ours-pro", vec!["cjtag"]),
+        ("ours-pro", vec!["dio"]),
+        ("ours-pro", vec!["power"]),
+        ("ours-pro", vec!["energy", "latest"]),
+        ("ours-pro", vec!["energy", "total"]),
+        ("ours-pro", vec!["energy", "calibration"]),
+        ("ours-pro", vec!["energy", "watch", "--for", "1s"]),
+        ("ours", vec!["release"]),
+    ] {
+        let (out, reader) = UnixStream::pair().unwrap();
+        drop(reader);
+        let mut process = Process::new(assert_cmd::cargo::cargo_bin!("verge"));
+        process
+            .args(["--simulate", scenario, "--simulate-pace", "0"])
+            .args(&args)
+            .env_remove("VERGE_REPO")
+            .env_remove("GITHUB_TOKEN")
+            .env_remove("RUST_LOG")
+            .stdout(Stdio::from(OwnedFd::from(out)));
+        let output = process.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{scenario} {args:?}: {stderr}");
+        assert!(stderr.is_empty(), "{scenario} {args:?}: {stderr}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn other_stdout_errors_are_reported() {
+    let mut process = std::process::Command::new(assert_cmd::cargo::cargo_bin!("verge"));
+    process
+        .args(["--simulate", "bench", "list", "-v"])
+        .env_remove("VERGE_REPO")
+        .env_remove("GITHUB_TOKEN")
+        .env_remove("RUST_LOG")
+        .stdout(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap(),
+        );
+    let output = process.output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stdout failure returned success");
+    assert!(stderr.contains("No space left on device"), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn closing_stdout_during_a_batch_finishes_and_records_the_current_unit() {
+    use std::io::{BufRead, BufReader};
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    use std::process::{Command as Process, Stdio};
+
+    let directory = tempfile::tempdir().unwrap();
+    let record = directory.path().join("batch.jsonl");
+    let (out, reader) = UnixStream::pair().unwrap();
+    reader
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let child = Process::new(assert_cmd::cargo::cargo_bin!("verge"))
+        .args(["--simulate", "arrivals", "--simulate-pace", "0.1"])
+        .args(["batch", "--yes", "--count", "3", "--record"])
+        .arg(&record)
+        .env_remove("VERGE_REPO")
+        .env_remove("GITHUB_TOKEN")
+        .env_remove("RUST_LOG")
+        .stdout(Stdio::from(OwnedFd::from(out)))
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut reader = BufReader::new(reader);
+    let mut first = String::new();
+    reader.read_line(&mut first).unwrap();
+    assert!(first.starts_with("Armed:"), "{first}");
+    drop(reader);
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        !stderr.contains("ERROR") && !stderr.contains("panicked"),
+        "{stderr}"
+    );
+    assert_eq!(record_results(&record), ["1-1 updated", "1-2 waiting"]);
+}
+
 #[test]
 fn list_is_the_default() {
     tool("bench")

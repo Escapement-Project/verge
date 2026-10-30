@@ -5,9 +5,9 @@ mod watch;
 
 use std::time::Duration;
 
+use crate::output::outputln;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
-use tracing_indicatif::indicatif_println;
 use verge_probe::aux::Aux;
 use verge_probe::bus::BusError;
 use verge_probe::detect::{Unit, detect_named};
@@ -153,7 +153,7 @@ pub fn power<B: Bus>(bus: &B, args: &PowerArgs, serial: Option<&str>) -> Result<
             Some(state) => pro.set_target_power(matches!(state, Switch::On)),
         }
         .with_context(|| format!("reaching {name}'s target supply"))?;
-        indicatif_println!(
+        outputln!(
             "{name}'s target supply is {}.",
             if on { "on" } else { "off" }
         );
@@ -179,13 +179,13 @@ pub fn energy<B: Bus>(
             } else {
                 format!(" (asked for {rate})")
             };
-            indicatif_println!("{name} captures {actual} pairs a second{asked}.");
+            outputln!("{name} captures {actual} pairs a second{asked}.");
             Ok(())
         }),
         EnergyCommand::Latest => with_pro(bus, serial, energy, |name, pro| {
             let latest = match pro.latest_energy_sample() {
                 Err(CommandError::Firmware(EnergyError::DmaError)) => {
-                    indicatif_println!(
+                    outputln!(
                         "{name}'s capture failed: the ADC overran or its DMA failed. A new start clears the fault."
                     );
                     return Ok(());
@@ -194,14 +194,14 @@ pub fn energy<B: Bus>(
             };
             match latest {
                 EnergyCaptureSample::Sample(sample) => match sample.calibrated {
-                    Some(calibrated) => indicatif_println!(
+                    Some(calibrated) => outputln!(
                         "{name}: {}, {} ({}), pair {}.",
                         si(f64::from(calibrated.voltage_millivolts) * 1e-3, "V"),
                         si(f64::from(calibrated.current_nanoamps) * 1e-9, "A"),
                         range_name(calibrated.range_id),
                         sample.raw.sequence
                     ),
-                    None => indicatif_println!(
+                    None => outputln!(
                         "{name}: voltage code {}, current code {}, pair {}, not calibrated.",
                         sample.raw.voltage_code,
                         sample.raw.current_code,
@@ -209,10 +209,10 @@ pub fn energy<B: Bus>(
                     ),
                 },
                 EnergyCaptureSample::NoSample => {
-                    indicatif_println!("{name}'s capture has no complete pair yet.");
+                    outputln!("{name}'s capture has no complete pair yet.");
                 }
                 EnergyCaptureSample::Stopped => {
-                    indicatif_println!("{name} is not capturing: start a capture first.");
+                    outputln!("{name} is not capturing: start a capture first.");
                 }
                 _ => bail!("{name} answered with a reading this tool does not know"),
             }
@@ -222,7 +222,7 @@ pub fn energy<B: Bus>(
             let total = pro
                 .read_energy_accumulator()
                 .with_context(|| format!("reading {name}'s total"))?;
-            indicatif_println!("{name}: {}.", describe_total(name, total)?);
+            outputln!("{name}: {}.", describe_total(name, total)?);
             Ok(())
         }),
         EnergyCommand::Stop => with_pro(bus, serial, energy, |name, pro| {
@@ -234,13 +234,13 @@ pub fn energy<B: Bus>(
                 }
             }
             if !keeps_totals(pro) {
-                indicatif_println!("{name} stopped.");
+                outputln!("{name} stopped.");
                 return Ok(());
             }
             let total = pro
                 .read_energy_accumulator()
                 .with_context(|| format!("reading {name}'s total"))?;
-            indicatif_println!("{name} stopped: {}.", describe_total(name, total)?);
+            outputln!("{name} stopped: {}.", describe_total(name, total)?);
             Ok(())
         }),
         EnergyCommand::Calibration => with_pro(bus, serial, energy, |name, pro| {
@@ -271,7 +271,7 @@ pub fn energy<B: Bus>(
                     (true, true) => "not calibrated: the last calibration failed before its first point, or none ran".to_owned(),
                     (true, false) => format!("the last calibration failed after {}", points.join(", ")),
                 };
-                indicatif_println!("{label}: {text}.");
+                outputln!("{label}: {text}.");
             }
             Ok(())
         }),
@@ -293,9 +293,9 @@ pub fn energy<B: Bus>(
                 None => "its firmware keeps no total".to_owned(),
             };
             if ended.running {
-                indicatif_println!("{name}: {total}. The capture keeps running.");
+                outputln!("{name}: {total}. The capture keeps running.");
             } else {
-                indicatif_println!("{name} stopped: {total}.");
+                outputln!("{name} stopped: {total}.");
             }
             Ok(())
         }),
@@ -351,32 +351,32 @@ fn record<B: Bus>(
         EndReason::Failed => "the capture failed: the ADC overran or its DMA failed",
         EndReason::Other(_) => "the stream ended for a reason this tool does not know",
     };
-    indicatif_println!(
+    outputln!(
         "{name}: {} pairs to {file}, {energy}; {why}.",
         recorded.pairs
     );
     if recorded.lost > 0 {
-        indicatif_println!(
+        outputln!(
             "{} pairs were lost: the probe dropped messages this side did not read in time.",
             recorded.lost
         );
     }
     let unreported = options.dio & !recorded.dio;
     if unreported != 0 {
-        indicatif_println!(
+        outputln!(
             "{name} reported no edges on {}: J15 turns the DIO pins off, and SPI takes them.",
             crate::dio_names(unreported)
         );
     }
     if recorded.dio != 0 {
-        indicatif_println!(
+        outputln!(
             "{} edges on {}.",
             recorded.edges,
             crate::dio_names(recorded.dio)
         );
     }
     if recorded.edges_lost > 0 {
-        indicatif_println!(
+        outputln!(
             "Edges were lost {} times: the pins changed faster than the probe takes them, SPI had \
              them, or this side did not read in time. The levels before each loss are not known.",
             recorded.edges_lost

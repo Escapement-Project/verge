@@ -120,15 +120,17 @@ pub fn read(args: &ReadArgs, serial: Option<&str>) -> Result<()> {
     }
 
     let mut out = io::stdout().lock();
-    write_hex_table(&mut out, args.address, args.width, &data)?;
-    out.flush()?;
+    write_hex_table(&mut out, args.address, args.width, &data)
+        .map_err(crate::output::Error::from)?;
+    out.flush().map_err(crate::output::Error::from)?;
     if args.time {
-        eprintln!(
+        writeln!(
+            io::stderr().lock(),
             "attach {:.6} s, read {:.6} s, {} bytes",
             (attached - started).as_secs_f64(),
             (read - attached).as_secs_f64(),
             data.len()
-        );
+        )?;
     }
     Ok(())
 }

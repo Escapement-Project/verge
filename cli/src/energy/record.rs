@@ -6,8 +6,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use crate::output::outputln;
 use anyhow::{Context, Result, anyhow, bail};
-use tracing_indicatif::indicatif_println;
 use verge_probe::aux::{Aux, AuxLink};
 use verge_probe::record::Sink;
 use verge_probe::stream::{Converter, Edge, EndReason, Message, Sample, Total};
@@ -57,7 +57,7 @@ pub fn record<B: Bus, L: AuxLink>(
             let kept = pro
                 .read_energy_accumulator()
                 .with_context(|| format!("reading {name}'s total"))?;
-            indicatif_println!(
+            outputln!(
                 "{name}: {}. A new capture replaces it.",
                 super::describe_total(name, kept)?
             );

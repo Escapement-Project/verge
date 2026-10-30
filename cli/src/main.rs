@@ -1,5 +1,6 @@
 use std::num::NonZeroUsize;
 mod energy;
+mod output;
 mod progress;
 mod read;
 
@@ -7,9 +8,10 @@ use std::io::IsTerminal;
 use std::path::{Path as FsPath, PathBuf};
 use std::process::ExitCode;
 
+use crate::output::outputln;
 use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Args, Parser, Subcommand};
-use tracing_indicatif::{IndicatifLayer, indicatif_println};
+use tracing_indicatif::IndicatifLayer;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::{EnvFilter, filter_fn};
 use tracing_subscriber::layer::SubscriberExt;
@@ -431,6 +433,13 @@ fn main() -> ExitCode {
     });
     match result {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error)
+            if error
+                .downcast_ref::<output::Error>()
+                .is_some_and(output::Error::is_broken_pipe) =>
+        {
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             tracing::error!(target: EXIT_TARGET, "{error:#}");
             if cancel.is_cancelled() {
@@ -583,9 +592,9 @@ fn list<B: Bus>(bus: &B, verbose: bool, serial: Option<&str>) -> Result<()> {
         bail!("no attached MCU-Link has serial {serial}");
     }
     if units.is_empty() {
-        indicatif_println!("No MCU-Link is attached.");
+        outputln!("No MCU-Link is attached.");
         if cfg!(target_os = "linux") {
-            indicatif_println!(
+            outputln!(
                 "If one is plugged in, check that your user may open it: see the udev rules in the README."
             );
         }
@@ -607,50 +616,51 @@ fn list<B: Bus>(bus: &B, verbose: bool, serial: Option<&str>) -> Result<()> {
         .map(|unit| named(unit).len())
         .fold(14, usize::max);
     for unit in shown {
-        indicatif_println!(
+        outputln!(
             "{:<indent$} {:<label$} {}",
             location(unit),
             named(unit),
             unit.state
         );
-        let row = |name: &str, value: &str| {
-            indicatif_println!("{:indent$} {name:<label$} {value}", "");
+        let row = |name: &str, value: &str| -> Result<()> {
+            outputln!("{:indent$} {name:<label$} {value}", "");
+            Ok(())
         };
         let board = match unit.state {
             State::Bootloader => "cannot be told in ISP mode".to_owned(),
             _ => unit.hardware().name(),
         };
-        row("board", &board);
+        row("board", &board)?;
         if verbose && let State::Probe { identity, firmware } = &unit.state {
             let field = |name: &str, value: Option<&str>| row(name, value.unwrap_or("-"));
-            field("vendor", identity.vendor.as_deref());
-            field("product", identity.product.as_deref());
-            field("protocol", identity.protocol.as_deref());
-            field("firmware", identity.firmware_version.as_deref());
+            field("vendor", identity.vendor.as_deref())?;
+            field("product", identity.product.as_deref())?;
+            field("protocol", identity.protocol.as_deref())?;
+            field("firmware", identity.firmware_version.as_deref())?;
             let packets = identity
                 .packet_count
                 .zip(identity.packet_size)
                 .map(|(count, size)| format!("{count} of {size} bytes"));
-            field("packets", packets.as_deref());
+            field("packets", packets.as_deref())?;
             if let Firmware::Ours(ours) = firmware {
-                field("capabilities", Some(&ours.flag_names().join(", ")));
+                field("capabilities", Some(&ours.flag_names().join(", ")))?;
                 if let Some(names) = ours.scan_format_names() {
-                    field("two-pin", Some(&names.join(", ")));
+                    field("two-pin", Some(&names.join(", ")))?;
                 }
             }
         }
         let offer = offer(unit, &units);
         match offer.paths.as_slice() {
-            [] => row("update", "not possible as it is"),
+            [] => row("update", "not possible as it is")?,
             [best, rest @ ..] => {
-                row("update", &format!("{best}. {}", best.describe()));
+                row("update", &format!("{best}. {}", best.describe()))?;
                 for other in rest {
-                    row("or", &other.to_string());
+                    row("or", &other.to_string())?;
                 }
             }
         }
         for note in &offer.notes {
-            row("note", note);
+            row("note", note)?;
         }
     }
     Ok(())
@@ -758,22 +768,23 @@ fn built_for(image: &Image, stock: bool) -> Result<Option<String>> {
     )))
 }
 
-fn report(outcome: &Outcome) {
+fn report(outcome: &Outcome) -> Result<()> {
     match outcome {
-        Outcome::Running(unit) => indicatif_println!(
+        Outcome::Running(unit) => outputln!(
             "Done: {} at {} now runs {}.",
             unit.serial().unwrap_or("the unit"),
             unit.device.location.as_deref().unwrap_or("?"),
             unit.state
         ),
-        Outcome::JumperStillFitted => indicatif_println!(
+        Outcome::JumperStillFitted => outputln!(
             "Flashed. The unit came back in ISP mode, so its ISP pin is still held low: by the ISP jumper, or by a probe on its debug connector. Take the jumper off or unplug the probe, then run `verge isp reset`."
         ),
-        Outcome::NotRestarted { maybe_jumper } => indicatif_println!(
+        Outcome::NotRestarted { maybe_jumper } => outputln!(
             "Flashed and verified, but the unit is still in ISP mode: {}. Then it starts the new image.",
             update::not_restarted(*maybe_jumper)
         ),
     }
+    Ok(())
 }
 
 fn log_image(image: &Image) {
@@ -878,7 +889,7 @@ fn update_unit<B: Bus, H: Http>(
     );
     drop(bars);
     let again = again(&args.source, &loaded.version, github);
-    report(&outcome.map_err(|error| explain(error, &again, Some(unit)))?);
+    report(&outcome.map_err(|error| explain(error, &again, Some(unit)))?)?;
     Ok(())
 }
 
@@ -927,7 +938,7 @@ fn flash<B: Bus, H: Http>(
     let outcome = update::flash_now(bus, image, port, &Timing::default(), &mut bars, cancel);
     drop(bars);
     let again = again(&args.source, &loaded.version, github);
-    report(&outcome.map_err(|error| explain(error, &again, None))?);
+    report(&outcome.map_err(|error| explain(error, &again, None))?)?;
     Ok(())
 }
 
@@ -936,7 +947,19 @@ struct BatchOutput {
     bars: Bars,
     record: RecordWriter<std::io::BufWriter<std::fs::File>>,
     record_error: Option<std::io::Error>,
+    output_error: Option<output::Error>,
     stop: Cancel,
+}
+
+impl BatchOutput {
+    fn line(&mut self, args: std::fmt::Arguments<'_>) {
+        if self.output_error.is_none()
+            && let Err(error) = output::line(args)
+        {
+            self.output_error = Some(error);
+            self.stop.cancel();
+        }
+    }
 }
 
 impl Progress for BatchOutput {
@@ -991,18 +1014,18 @@ impl Observer for BatchOutput {
             .seconds
             .map(|s| format!(" in {s:.1} s"))
             .unwrap_or_default();
-        indicatif_println!(
+        self.line(format_args!(
             "{:<8} {serial}  {firmware}  {}{seconds}{reason}",
             record.port,
             record.result.as_str().to_uppercase()
-        );
+        ));
     }
 
     fn unplug(&mut self, port: &str, blinking: bool) {
         if blinking {
-            indicatif_println!("{port:<8} blinking: unplug it when you like");
+            self.line(format_args!("{port:<8} blinking: unplug it when you like"));
         } else {
-            indicatif_println!("{port:<8} done: unplug it when you like");
+            self.line(format_args!("{port:<8} done: unplug it when you like"));
         }
     }
 
@@ -1076,7 +1099,7 @@ fn batch<B: Bus + Sync, H: Http>(
         )
     })?;
     if stop.is_cancelled() {
-        indicatif_println!("Stopped before the batch was armed. Nothing was flashed.");
+        outputln!("Stopped before the batch was armed. Nothing was flashed.");
         return Ok(());
     }
     let armed = Armed {
@@ -1106,9 +1129,10 @@ fn batch<B: Bus + Sync, H: Http>(
         bars: Bars::default(),
         record: RecordWriter::new(std::io::BufWriter::new(file)),
         record_error: None,
+        output_error: None,
         stop: stop.clone(),
     };
-    indicatif_println!(
+    outputln!(
         "Armed: {name}, for {}. Recording to {}. Plug units in; Ctrl-C stops taking new ones.",
         filter.describe(),
         path.display()
@@ -1128,7 +1152,6 @@ fn batch<B: Bus + Sync, H: Http>(
     }
     result?;
     let tally = batch.tally();
-    indicatif_println!("Batch done: {tally}.");
     if tally.failed > 0 {
         bail!(
             "{} units failed; the record file {} says why",
@@ -1136,6 +1159,10 @@ fn batch<B: Bus + Sync, H: Http>(
             path.display()
         );
     }
+    if let Some(error) = output.output_error {
+        return Err(error.into());
+    }
+    outputln!("Batch done: {tally}.");
     Ok(())
 }
 
@@ -1200,7 +1227,7 @@ fn cjtag<B: Bus>(bus: &B, args: &CjtagArgs, serial: Option<&str>) -> Result<()> 
     } else {
         ""
     };
-    indicatif_println!("{serial} offers two-pin {}{until}.", names.join(", "));
+    outputln!("{serial} offers two-pin {}{until}.", names.join(", "));
     Ok(())
 }
 
@@ -1276,7 +1303,7 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
         }
         after
     };
-    indicatif_println!("{serial}'s DIO pins, on J19 pins 2 to 5:");
+    outputln!("{serial}'s DIO pins, on J19 pins 2 to 5:");
     for n in 0..8 {
         let bit = 1 << n;
         if after.pins & bit == 0 {
@@ -1284,16 +1311,16 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
         }
         let level = |on: bool| if on { "high" } else { "low" };
         if after.outputs & bit != 0 {
-            indicatif_println!(
+            outputln!(
                 "  DIO{n}  output  driven {}",
                 level(after.levels & bit != 0)
             );
         } else {
-            indicatif_println!("  DIO{n}  input   reads {}", level(after.read & bit != 0));
+            outputln!("  DIO{n}  input   reads {}", level(after.read & bit != 0));
         }
     }
     let groups: Vec<String> = after.groups.iter().map(|&g| dio_names(g)).collect();
-    indicatif_println!("Direction groups: {}.", groups.join("; "));
+    outputln!("Direction groups: {}.", groups.join("; "));
     Ok(())
 }
 
@@ -1324,19 +1351,19 @@ fn bootloader<B: Bus>(bus: &B, serial: Option<&str>, stock: bool, cancel: &Cance
         "verge isp flash".to_owned()
     };
     match unit.hardware() {
-        Hardware::Board(board) if stock => indicatif_println!(
+        Hardware::Board(board) if stock => outputln!(
             "The unit, {}, is in ISP mode at {at}. Flash it with `{flash} --stock`.",
             board.a()
         ),
-        Hardware::Board(board) => indicatif_println!(
+        Hardware::Board(board) => outputln!(
             "The unit, {}, is in ISP mode at {at}, where the tool cannot tell its board. Flash it with `{flash}` and an image built for {}: the question names the boards the image is for.",
             board.a(),
             board.a()
         ),
         _ if stock => {
-            indicatif_println!("The unit is in ISP mode at {at}. Flash it with `{flash} --stock`.")
+            outputln!("The unit is in ISP mode at {at}. Flash it with `{flash} --stock`.")
         }
-        _ => indicatif_println!(
+        _ => outputln!(
             "The unit is in ISP mode at {at}. Its firmware did not say which board it is, so check that an image is built for it before you flash it with `{flash}`."
         ),
     }
@@ -1348,16 +1375,16 @@ fn reset<B: Bus>(bus: &B, port: Option<&str>, cancel: &Cancel) -> Result<()> {
     let outcome = update::reset_now(bus, port, &Timing::default(), &mut bars, cancel);
     drop(bars);
     match outcome? {
-        Outcome::Running(unit) => indicatif_println!(
+        Outcome::Running(unit) => outputln!(
             "Done: {} at {} runs {}.",
             unit.serial().unwrap_or("the unit"),
             unit.device.location.as_deref().unwrap_or("?"),
             unit.state
         ),
-        Outcome::JumperStillFitted => indicatif_println!(
+        Outcome::JumperStillFitted => outputln!(
             "The unit came back in ISP mode. Either its ISP pin is still held low, by the ISP jumper or by a probe on its debug connector, or its flash holds no image the ROM starts. Take the jumper off or unplug the probe and reset it again, or flash an image with `verge isp flash`."
         ),
-        Outcome::NotRestarted { maybe_jumper } => indicatif_println!(
+        Outcome::NotRestarted { maybe_jumper } => outputln!(
             "The unit is still in ISP mode: {}.",
             update::not_restarted(maybe_jumper)
         ),
@@ -1371,7 +1398,7 @@ fn rom_info<B: Bus>(bus: &B, port: Option<&str>, cancel: &Cancel) -> Result<()> 
         Some((start, size)) => format!("flash from 0x{start:08x}, {} KiB", size / 1024),
         None => "flash not reported".to_owned(),
     };
-    indicatif_println!(
+    outputln!(
         "{}: bootloader {}, {flash}.",
         rom.location.as_deref().unwrap_or("?"),
         info.version
@@ -1390,13 +1417,13 @@ fn release<B: Bus, H: Http>(
         Some(tag) => github.tagged(tag),
     }
     .with_context(|| format!("looking up Verge releases in {}", github.repo()))?;
-    indicatif_println!(
+    outputln!(
         "{}  {}",
         release.tag,
         release.published.as_deref().unwrap_or("")
     );
-    indicatif_println!("  {}", release.page);
-    indicatif_println!(
+    outputln!("  {}", release.page);
+    outputln!(
         "  {}, {} bytes, checked against {} and {}",
         release.image.name,
         release.image.size,
@@ -1434,19 +1461,19 @@ fn release<B: Bus, H: Http>(
         };
         let location = unit.device.location.as_deref().unwrap_or("?");
         let serial = unit.serial().unwrap_or("-");
-        indicatif_println!("{location:<8} {serial:<14} {standing}");
+        outputln!("{location:<8} {serial:<14} {standing}");
     }
     Ok(())
 }
 
 fn inspect(file: &FsPath) -> Result<()> {
     let image = Image::from_path(file)?;
-    indicatif_println!("{}: {}", file.display(), image.format);
+    outputln!("{}: {}", file.display(), image.format);
     if let Some(header) = &image.header {
-        indicatif_println!("  header {header:?}");
+        outputln!("  header {header:?}");
     }
     for chunk in image.chunks() {
-        indicatif_println!(
+        outputln!(
             "  0x{:08x}..0x{:08x}  {} bytes",
             chunk.address,
             chunk.end(),
@@ -1455,28 +1482,28 @@ fn inspect(file: &FsPath) -> Result<()> {
     }
     let runs = image.page_runs();
     let pages: usize = runs.iter().map(|r| r.data.len() / PAGE as usize).sum();
-    indicatif_println!(
+    outputln!(
         "  {} bytes into flash: {pages} pages of {PAGE} bytes to erase and write, in {} runs",
         image.data_len(),
         runs.len()
     );
-    indicatif_println!("  sha256 {}", image.sha256_hex());
+    outputln!("  sha256 {}", image.sha256_hex());
     match image.declaration() {
-        Ok(Some(declaration)) => indicatif_println!(
+        Ok(Some(declaration)) => outputln!(
             "  declares, at 0x{:08x} in format {}, that it runs on {} (boards 0x{:08x})",
             declaration.address,
             declaration.format,
             board::built_for(&image.boards()?),
             declaration.boards
         ),
-        Ok(None) => indicatif_println!(
-            "  declares no boards: as a Verge image, it goes on the full MCU-Link only"
-        ),
+        Ok(None) => {
+            outputln!("  declares no boards: as a Verge image, it goes on the full MCU-Link only")
+        }
         Err(_) => {}
     }
     match image.check_for_mculink() {
-        Ok(()) => indicatif_println!("  fits this part's flash and has a vector table"),
-        Err(error) => indicatif_println!("  will not be flashed: {error}"),
+        Ok(()) => outputln!("  fits this part's flash and has a vector table"),
+        Err(error) => outputln!("  will not be flashed: {error}"),
     }
     Ok(())
 }

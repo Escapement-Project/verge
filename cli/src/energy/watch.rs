@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::io::IsTerminal;
 use std::time::Duration;
 
+use crate::output::outputln;
 use anyhow::{Context, Result, anyhow, bail};
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -13,7 +14,6 @@ use ratatui::style::{Color, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::Line;
 use ratatui::widgets::{Axis, Block, Chart, Dataset, GraphType, Paragraph};
-use tracing_indicatif::indicatif_println;
 use verge_probe::stream::{Converter, EndReason, Message, Sample};
 use verge_probe::{Bus, Cancel, CommandError, EnergyCaptureSample, EnergyError, EnergyTotal};
 
@@ -374,7 +374,7 @@ pub fn watch<B: Bus>(
                 let kept = pro
                     .read_energy_accumulator()
                     .with_context(|| format!("reading {name}'s total"))?;
-                indicatif_println!(
+                outputln!(
                     "{name}: {}. A new capture replaces it.",
                     super::describe_total(name, kept)?
                 );
@@ -525,7 +525,7 @@ fn run<B: Bus>(
                 Some(terminal) => {
                     terminal.draw(|frame| render(frame, model))?;
                 }
-                None => indicatif_println!("{}", model.line()),
+                None => outputln!("{}", model.line()),
             }
             if deadline.is_some_and(|deadline| bus.now() >= deadline) {
                 return Ok(());
