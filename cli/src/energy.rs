@@ -8,14 +8,14 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use tracing_indicatif::indicatif_println;
-use verge_probe::aux::{Aux, AuxLink};
+use verge_probe::aux::Aux;
 use verge_probe::bus::BusError;
-use verge_probe::detect::{State, Unit, detect_named};
-use verge_probe::stream::{EndReason, Message};
+use verge_probe::detect::{Unit, detect_named};
+use verge_probe::pro::{Feature, ProLink, check_offered};
+use verge_probe::stream::EndReason;
 use verge_probe::{
-    Bus, CalibrationRange, Cancel, CommandError, DapTransport, EnergyAccumulator,
-    EnergyCalibration, EnergyCaptureSample, EnergyError, EnergyTotal, VergeControl, VergeInfo,
-    VergeTransport, dap,
+    Bus, CalibrationRange, Cancel, CommandError, EnergyAccumulator, EnergyCalibration,
+    EnergyCaptureSample, EnergyError, EnergyTotal, VergeControl, VergeInfo, VergeTransport, dap,
 };
 
 #[derive(Args)]
@@ -111,72 +111,6 @@ pub enum EnergyCommand {
 /// CMSIS-DAP.
 type Pro<'a> = VergeControl<'a, dyn ProLink + 'a>;
 
-/// The way to a Pro, and its energy stream where it has one: only Verge Aux does.
-trait ProLink: VergeTransport {
-    fn streams(&self) -> bool;
-    /// The next stream message, waiting up to `timeout`; `None` if none came.
-    fn message(&mut self, timeout: Duration) -> Result<Option<Message>>;
-}
-
-impl<L: AuxLink> ProLink for Aux<L> {
-    fn streams(&self) -> bool {
-        true
-    }
-
-    fn message(&mut self, timeout: Duration) -> Result<Option<Message>> {
-        Ok(Aux::message(self, timeout)?)
-    }
-}
-
-impl ProLink for DapTransport<'_> {
-    fn streams(&self) -> bool {
-        false
-    }
-
-    fn message(&mut self, _: Duration) -> Result<Option<Message>> {
-        Ok(None)
-    }
-}
-
-/// What a Pro offers that these commands reach.
-#[derive(Clone, Copy)]
-enum Feature {
-    Supply,
-    Energy,
-}
-
-impl Feature {
-    fn name(self) -> &'static str {
-        match self {
-            Feature::Supply => "target supply",
-            Feature::Energy => "energy measurement",
-        }
-    }
-
-    fn offered(self, info: &VergeInfo) -> bool {
-        match self {
-            Feature::Supply => info.supports_target_power(),
-            Feature::Energy => info.supports_energy_capture(),
-        }
-    }
-
-    /// Why a unit running Verge does not offer it.
-    fn missing(self, name: &str, info: &VergeInfo) -> String {
-        match self {
-            // Firmware that reports extended capabilities (format 6) offers energy capture on
-            // every Pro whose HW_VER_5 strap is low (mculink-verge PRO.md).
-            Feature::Energy if info.version >= 6 => format!(
-                "{name} reports no energy measurement: its HW_VER_5 strap says the circuit is not fitted"
-            ),
-            _ => format!(
-                "{name} runs build {}, which predates its {}: update it first",
-                info.firmware,
-                self.name()
-            ),
-        }
-    }
-}
-
 /// A Pro running Verge, whether its CMSIS-DAP is free or a debugger holds it.
 fn pro_running_verge(unit: &Unit) -> bool {
     unit.verge().is_some_and(|ours| {
@@ -187,24 +121,9 @@ fn pro_running_verge(unit: &Unit) -> bool {
 /// The Pro `serial` names, or the one [`crate::pick_unit`] finds, refusing anything else in a
 /// sentence that says why.
 fn find_pro<B: Bus>(bus: &B, serial: Option<&str>, feature: Feature) -> Result<Unit> {
-    let what = feature.name();
     let units = detect_named(bus, serial).context("looking for MCU-Links")?;
     let unit = crate::pick_unit(&units, serial, pro_running_verge)?;
-    let name = unit.serial().unwrap_or("the unit");
-    if let State::Unreadable { reason, .. } = &unit.state {
-        bail!("the tool could not ask {name} what it runs: {reason}");
-    }
-    let Some(ours) = unit.verge() else {
-        bail!(
-            "{name} is {}, not running Verge, so the tool cannot reach its {what}",
-            unit.state
-        );
-    };
-    if let Some(board) = ours.board.map(verge_probe::BoardKind::number)
-        && board != dap::Ours::BOARD_MCU_LINK_PRO
-    {
-        bail!("{name} is not an MCU-Link Pro, so it has no {what}");
-    }
+    verge_probe::pro::validate(unit, feature)?;
     Ok(unit.clone())
 }
 
@@ -216,53 +135,7 @@ fn with_pro<B: Bus, T>(
     f: impl FnOnce(&str, &mut Pro<'_>) -> Result<T>,
 ) -> Result<T> {
     let unit = find_pro(bus, serial, feature)?;
-    let name = unit.serial().unwrap_or("the unit");
-    if unit.device.aux {
-        match bus.open_aux(&unit.device) {
-            Ok(link) => {
-                let mut aux =
-                    Aux::open(link).with_context(|| format!("opening {name}'s Verge Aux"))?;
-                return run(name, &mut aux, feature, f);
-            }
-            Err(BusError::Busy { .. }) => {
-                tracing::info!(
-                    "another program holds {name}'s Verge Aux, so the tool uses CMSIS-DAP"
-                );
-            }
-            Err(error) => return Err(error).with_context(|| format!("opening {name}'s Verge Aux")),
-        }
-    }
-    let mut link = bus
-        .open_dap(&unit.device)
-        .with_context(|| format!("opening {name}"))?;
-    let mut transport = DapTransport(&mut link);
-    run(name, &mut transport, feature, f)
-}
-
-fn run<T>(
-    name: &str,
-    transport: &mut dyn ProLink,
-    feature: Feature,
-    f: impl FnOnce(&str, &mut Pro<'_>) -> Result<T>,
-) -> Result<T> {
-    let mut pro = VergeControl::new(transport);
-    check_offered(name, &mut pro, feature)?;
-    f(name, &mut pro)
-}
-
-fn check_offered<T: VergeTransport + ?Sized>(
-    name: &str,
-    pro: &mut VergeControl<'_, T>,
-    feature: Feature,
-) -> Result<()> {
-    let info = pro
-        .info()
-        .with_context(|| format!("asking {name} what it runs"))?
-        .with_context(|| format!("{name} no longer answers as Verge"))?;
-    if !feature.offered(info) {
-        bail!("{}", feature.missing(name, info));
-    }
-    Ok(())
+    verge_probe::pro::with_pro(bus, &unit, feature, f)
 }
 
 /// Whether the firmware keeps a running total.
