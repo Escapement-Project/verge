@@ -343,6 +343,31 @@ completed units. STOP stops accepting new units. CANCEL THE UNIT UNDER WAY stops
 update at its next safe point. During image loading, STOP or closing the window ends the batch
 immediately; no unit has been flashed.
 
+BENCH reaches a Pro's target supply and energy measurement through Verge Aux, so a debugger can
+keep CMSIS-DAP open meanwhile. The supply switches at once. Turning it off asks first while a
+capture runs. The panel shows the supply as commanded and the voltage as measured, which are
+separate readings. DIO controls follow once the firmware carries them on Aux.
+
+START RECORDING starts a capture at 1 to 100,000 pairs/s and records it. Starting clears the probe's
+energy total, and its calibration can interrupt target power for about 0.2 s. If another host
+already runs a capture, RECORD RUNNING CAPTURE records it at its own rate. STOP RECORDING stops a
+capture the window started, and leaves another host's running.
+
+The graph shows current, voltage or power. LIVE follows the newest pairs; INSPECT holds the view
+while recording carries on. Drag or scroll the graph to pan and zoom, or drag the window's marker
+in the overview under it. With SELECT on, dragging across the graph selects an interval; the left
+panel sets its ends exactly and zooms to it. The panel measures the visible window and the
+selection: duration, pairs, minimum, mean and peak current, mean voltage and power, charge and
+energy. It shows how much of each was not measured. Time without measurements adds nothing to
+charge or energy. The readings come from the recorded pairs, so zooming does not change them.
+
+Each recording goes to disk as it arrives, for as long as the disk has room. Recordings stay in a
+`captures` folder in that data directory until discarded. KEPT ON DISK reopens one, including one
+cut short by a crash. SAVE AS copies the open capture; OPEN reads one back. EXPORT writes the
+capture, or the selection, as CSV or as a sigrok session with voltage, current and a GAP channel.
+An export keeps whole pairs at its edges, with their own times, so it can start a little before
+the selection.
+
 ### Releases
 
 The tool looks for releases in `Escapement-Project/mculink-verge`. Select another repository with

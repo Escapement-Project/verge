@@ -639,6 +639,42 @@ fn pictures() {
         }
         shoot(&mut h, name);
     }
+
+    // The Bench view on a simulated Pro whose capture runs, recording into the pictures' directory.
+    let http = SimHttp::new(repo());
+    http.publish_ours("v0.3.0");
+    let key = http.public_key();
+    // Paced, so the stream arrives at its rate rather than as fast as the worker reads it.
+    let worker = Worker::spawn(
+        SimBus::scenario("ours-pro-energy").unwrap().paced(1.0),
+        GitHub::new(http, repo(), None).with_key(Some(key)),
+        || {},
+    );
+    let app = VergeApp::new(
+        Box::new(worker),
+        Log::default(),
+        Config {
+            repo: repo(),
+            simulated: Some("test".into()),
+            stock_dirs: vec![],
+            record_dir: dir.clone(),
+            cache: None,
+        },
+    );
+    let mut h = rendered(app);
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "BENCH");
+    until(&mut h, "RECORD RUNNING CAPTURE");
+    shoot(&mut h, "16-bench-connected");
+    press(&mut h, "RECORD RUNNING CAPTURE");
+    until(&mut h, "STOP RECORDING");
+    for _ in 0..200 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    shoot(&mut h, "17-bench-recording");
+    press(&mut h, "STOP RECORDING");
+    until(&mut h, "RECORD RUNNING CAPTURE");
 }
 
 /// A directory of its own for a test's batch record.
@@ -1876,4 +1912,174 @@ fn a_failed_copy_that_cannot_be_deleted_is_left_to_the_user() {
             .is_none()
     );
     std::fs::remove_dir_all(cache.root()).unwrap();
+}
+
+#[test]
+fn bench_supply_controls_use_aux_and_confirm_during_capture() {
+    let mut h = harness(sim_app(
+        SimBus::scenario("ours-pro-energy").unwrap(),
+        vec![],
+    ));
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "BENCH");
+    until(&mut h, "RECORD RUNNING CAPTURE");
+    assert!(
+        h.query_by_label("DIO awaits firmware support through Aux.")
+            .is_some()
+    );
+    // A capture started before the GUI connected still requires confirmation.
+    if h.query_by_label("TURN ON").is_some() {
+        press(&mut h, "TURN ON");
+        until(&mut h, "TURN OFF");
+    }
+    press(&mut h, "TURN OFF");
+    until(&mut h, "Turn off target supply?");
+    press(&mut h, "KEEP SUPPLY ON");
+    for _ in 0..10 {
+        h.step();
+    }
+    assert!(h.query_by_label("Turn off target supply?").is_none());
+    assert!(h.query_by_label("TURN OFF").is_some());
+    press(&mut h, "TURN OFF");
+    until(&mut h, "TURN OFF SUPPLY");
+    press(&mut h, "TURN OFF SUPPLY");
+    until(&mut h, "TURN ON");
+    press(&mut h, "TURN ON");
+    until(&mut h, "TURN OFF");
+}
+
+#[test]
+fn bench_refuses_older_firmware_and_reaches_a_debugger_held_pro() {
+    let mut h = harness(sim_app(SimBus::scenario("ours").unwrap(), vec![]));
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "BENCH");
+    until_contains(&mut h, "which recording needs");
+    assert!(h.query_by_label("START RECORDING").is_none());
+    let mut h = harness(sim_app(
+        SimBus::scenario("ours-pro-debugger").unwrap(),
+        vec![],
+    ));
+    for _ in 0..30 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    press(&mut h, "BENCH");
+    until(&mut h, "START RECORDING");
+}
+
+#[test]
+fn a_worker_failure_during_recording_unlocks_the_window() {
+    use crate::bench_worker::Status;
+    use crate::worker::JobError;
+    let (app, backend) = manual_app("ours-pro", true);
+    let instance = verge_probe::detect(&SimBus::scenario("ours-pro").unwrap()).unwrap()[0]
+        .device
+        .instance
+        .clone();
+    let mut h = harness(app);
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "BENCH");
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::Bench(Status {
+            instance,
+            connected: true,
+            recording: true,
+            ..Status::default()
+        }));
+    h.step();
+    assert!(h.state().busy());
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::WorkerFailed(JobError {
+            message: "USB worker failed".into(),
+            advice: None,
+            left_in_isp: false,
+        }));
+    h.step();
+    assert!(!h.state().busy());
+    press(&mut h, "UNITS");
+    h.step();
+}
+
+#[test]
+fn a_session_the_worker_dropped_can_be_reconnected() {
+    use crate::bench_worker::Status;
+    let (app, backend) = manual_app("ours-pro", true);
+    let instance = verge_probe::detect(&SimBus::scenario("ours-pro").unwrap()).unwrap()[0]
+        .device
+        .instance
+        .clone();
+    let mut h = harness(app);
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "BENCH");
+    h.step();
+    let connects = |backend: &std::sync::Arc<std::sync::Mutex<Manual>>| {
+        backend
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .filter(|sent| sent.starts_with("bench Connect"))
+            .count()
+    };
+    assert_eq!(connects(&backend), 1);
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::Bench(Status {
+            instance,
+            connected: false,
+            error: Some("disk full".into()),
+            ..Status::default()
+        }));
+    until(&mut h, "RECONNECT");
+    press(&mut h, "RECONNECT");
+    h.step();
+    assert_eq!(connects(&backend), 2);
+}
+
+#[test]
+fn a_recording_failure_keeps_a_pending_close_open() {
+    use crate::bench_worker::Status;
+    let (app, backend) = manual_app("ours-pro", true);
+    let instance = verge_probe::detect(&SimBus::scenario("ours-pro").unwrap()).unwrap()[0]
+        .device
+        .instance
+        .clone();
+    let mut h = harness(app);
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "BENCH");
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::Bench(Status {
+            instance: instance.clone(),
+            connected: true,
+            recording: true,
+            ..Status::default()
+        }));
+    h.step();
+    request_close(&mut h);
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::Bench(Status {
+            instance,
+            connected: true,
+            recording: false,
+            error: Some("disk full".into()),
+            ..Status::default()
+        }));
+    h.step();
+    assert!(!root_commands(&h).contains(&ViewportCommand::Close));
+    assert!(!h.state().busy());
+    h.get_by_label("disk full");
 }

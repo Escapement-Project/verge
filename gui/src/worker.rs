@@ -19,6 +19,7 @@ use verge_probe::update::{self, Outcome, Timing, UpdateError};
 use verge_probe::{Bus, Unit, detect};
 
 pub enum Request {
+    Bench(crate::bench_worker::Command),
     Detect,
     Release,
     Install {
@@ -83,6 +84,7 @@ pub enum BatchEvent {
 
 #[derive(Clone, Debug)]
 pub enum Event {
+    Bench(crate::bench_worker::Status),
     Units(Result<Vec<Unit>, String>),
     Release(Result<Box<Release>, String>),
     Progress(ProgressEvent),
@@ -98,7 +100,10 @@ pub trait Backend {
 }
 
 /// Forwards an operation's progress as events.
+type BenchStatus = std::sync::Arc<std::sync::Mutex<Option<crate::bench_worker::Status>>>;
+
 struct Forward<'a> {
+    bench_status: &'a BenchStatus,
     events: &'a Sender<Event>,
     repaint: &'a (dyn Fn() + Send),
 }
@@ -106,7 +111,11 @@ struct Forward<'a> {
 impl Forward<'_> {
     fn send(&self, event: Event) {
         // The window may have gone; nothing then reads the event.
-        let _ = self.events.send(event);
+        if let Event::Bench(status) = event {
+            *self.bench_status.lock().expect("bench status lock") = Some(status);
+        } else {
+            let _ = self.events.send(event);
+        }
         (self.repaint)();
     }
 }
@@ -487,11 +496,70 @@ fn serve<B: Bus + Sync, H: Http + Clone + Send + 'static>(
     requests: &Receiver<Request>,
     events: &Sender<Event>,
     repaint: &(dyn Fn() + Send),
+    bench_status: &BenchStatus,
 ) {
-    let mut forward = Forward { events, repaint };
-    while let Ok(request) = requests.recv() {
+    let mut forward = Forward {
+        events,
+        repaint,
+        bench_status,
+    };
+    let mut bench: Option<crate::bench_worker::Session<B::Aux>> = None;
+    loop {
+        if let Some(session) = bench.as_mut() {
+            match session.tick() {
+                Ok(true) => forward.send(Event::Bench(session.status())),
+                Ok(false) => {}
+                Err(error) => {
+                    session.fail(error);
+                    forward.send(Event::Bench(session.status()));
+                    bench = None;
+                }
+            }
+        }
+        let request =
+            match requests.recv_timeout(if bench.as_ref().is_some_and(|b| b.recording()) {
+                Duration::ZERO
+            } else {
+                Duration::from_millis(50)
+            }) {
+                Ok(request) => request,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
         match request {
+            Request::Bench(command) => {
+                use crate::bench_worker::{Command, Session, Status};
+                match command {
+                    Command::Connect(unit) => {
+                        bench.take();
+                        match Session::open(bus, &unit) {
+                            Ok(session) => {
+                                forward.send(Event::Bench(session.status()));
+                                bench = Some(session);
+                            }
+                            Err(error) => forward.send(Event::Bench(Status {
+                                instance: unit.device.instance.clone(),
+                                error: Some(format!("{error:#}")),
+                                ..Status::default()
+                            })),
+                        }
+                    }
+                    Command::Disconnect => {
+                        bench.take();
+                    }
+                    command => {
+                        if let Some(session) = bench.as_mut() {
+                            let open = session.command(command);
+                            forward.send(Event::Bench(session.status()));
+                            if !open {
+                                bench = None;
+                            }
+                        }
+                    }
+                }
+            }
             Request::Detect => {
+                bench.take();
                 forward.send(Event::Units(detect(bus).map_err(|e| e.to_string())));
             }
             Request::Release => {
@@ -557,6 +625,7 @@ fn serve<B: Bus + Sync, H: Http + Clone + Send + 'static>(
 pub struct Worker {
     requests: Option<Sender<Request>>,
     events: Receiver<Event>,
+    bench_status: BenchStatus,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -568,13 +637,25 @@ impl Worker {
     {
         let (request_tx, request_rx) = channel();
         let (event_tx, event_rx) = channel();
+        let bench_status = BenchStatus::default();
+        let work_status = bench_status.clone();
         let thread = std::thread::Builder::new()
             .name("usb".into())
-            .spawn(move || serve(&bus, &github, &request_rx, &event_tx, &repaint))
+            .spawn(move || {
+                serve(
+                    &bus,
+                    &github,
+                    &request_rx,
+                    &event_tx,
+                    &repaint,
+                    &work_status,
+                )
+            })
             .expect("the worker thread starts");
         Worker {
             requests: Some(request_tx),
             events: event_rx,
+            bench_status,
             thread: Some(thread),
         }
     }
@@ -589,6 +670,9 @@ impl Backend for Worker {
     }
 
     fn try_recv(&mut self) -> Option<Event> {
+        if let Some(status) = self.bench_status.lock().expect("bench status lock").take() {
+            return Some(Event::Bench(status));
+        }
         match self.events.try_recv() {
             Ok(event) => Some(event),
             Err(TryRecvError::Empty) => None,
@@ -636,6 +720,7 @@ pub struct Manual {
 impl Backend for Manual {
     fn send(&mut self, request: Request) {
         self.sent.push(match request {
+            Request::Bench(command) => format!("bench {command:?}"),
             Request::Detect => "detect".into(),
             Request::Release => "release".into(),
             Request::Install {

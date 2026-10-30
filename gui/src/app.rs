@@ -48,6 +48,7 @@ pub struct Config {
 enum View {
     Units,
     Batch,
+    Bench,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,6 +184,7 @@ pub struct VergeApp {
     view: View,
     batch_form: BatchForm,
     last_batch: Option<BatchRun>,
+    bench: crate::bench::Bench,
 }
 
 fn kib(bytes: u64) -> String {
@@ -257,7 +259,7 @@ fn frame(ui: &mut Ui, fill: Option<Color32>, stroke: Stroke, add: impl FnOnce(&m
 }
 
 /// A held notice or a refusal: a line with a coloured left edge.
-fn edged(ui: &mut Ui, edge: Color32, words: &str) {
+pub(crate) fn edged(ui: &mut Ui, edge: Color32, words: &str) {
     let response = Frame::new()
         .fill(color::SURFACE)
         .inner_margin(Margin {
@@ -279,8 +281,8 @@ fn edged(ui: &mut Ui, edge: Color32, words: &str) {
     );
 }
 
-fn label(ui: &mut Ui, words: &str) {
-    ui.label(text(Role::Label, words.to_uppercase()).color(color::TEXT_2));
+pub(crate) fn label(ui: &mut Ui, words: &str) -> egui::Response {
+    ui.label(text(Role::Label, words.to_uppercase()).color(color::TEXT_2))
 }
 
 /// Text that wraps at the edge of the space it is given.
@@ -333,8 +335,28 @@ fn slot(ui: &mut Ui, words: &str, fill: Option<Color32>) -> egui::Response {
     ui.add_sized(vec2(320.0, style::SLOT_HEIGHT), button)
 }
 
+/// One of a row of choices: filled with the accent when it is the one chosen.
+pub(crate) fn choice(ui: &mut Ui, words: &str, chosen: bool) -> egui::Response {
+    let rich = text(Role::Action, words.to_uppercase()).color(if chosen {
+        color::INK
+    } else {
+        color::TEXT
+    });
+    let edge = if chosen { color::ACCENT } else { color::BORDER };
+    ui.add(
+        egui::Button::new(rich)
+            .fill(if chosen {
+                color::ACCENT
+            } else {
+                Color32::TRANSPARENT
+            })
+            .stroke(Stroke::new(1.0, edge))
+            .selected(chosen),
+    )
+}
+
 /// A neutral outlined button.
-fn outline(ui: &mut Ui, words: &str, enabled: bool) -> egui::Response {
+pub(crate) fn outline(ui: &mut Ui, words: &str, enabled: bool) -> egui::Response {
     let button = egui::Button::new(text(Role::Action, words.to_uppercase()).color(color::TEXT))
         .fill(Color32::TRANSPARENT)
         .stroke(Stroke::new(1.0, color::BORDER));
@@ -345,6 +367,7 @@ impl VergeApp {
     pub fn new(backend: Box<dyn Backend>, log: Log, config: Config) -> VergeApp {
         let stock = stock::newest_from(&config.stock_dirs);
         let batch_form = BatchForm::new(&config.record_dir);
+        let bench = crate::bench::Bench::new(&config.record_dir);
         let mut app = VergeApp {
             backend,
             log,
@@ -369,6 +392,7 @@ impl VergeApp {
             view: View::Units,
             batch_form,
             last_batch: None,
+            bench,
         };
         app.backend.send(Request::Detect);
         app.backend.send(Request::Release);
@@ -379,7 +403,7 @@ impl VergeApp {
     #[must_use]
     pub fn busy(&self) -> bool {
         match &self.operation {
-            Operation::Idle => false,
+            Operation::Idle => self.bench.busy(),
             Operation::Installing(_) => true,
             Operation::Batch(run) => run.running(),
         }
@@ -389,6 +413,7 @@ impl VergeApp {
         if self.worker_error.is_some() {
             return;
         }
+        self.bench.disconnect(self.backend.as_mut());
         self.scan = Scan::Scanning;
         self.backend.send(Request::Detect);
     }
@@ -400,6 +425,7 @@ impl VergeApp {
 
     fn handle(&mut self, event: Event, now: f64) {
         match event {
+            Event::Bench(status) => self.bench.receive(status),
             Event::Units(Ok(units)) => {
                 let kept = self
                     .selected
@@ -438,6 +464,7 @@ impl VergeApp {
                 self.rescan();
             }
             Event::WorkerFailed(error) => {
+                self.bench.worker_failed(&error.message);
                 self.worker_error = Some(error.message.clone());
                 self.finish_job(Err(error.clone()), now);
                 self.batch_event(BatchEvent::Ended(Err(error.message.clone())), now);
@@ -749,11 +776,19 @@ impl VergeApp {
         while let Some(event) = self.backend.try_recv() {
             self.handle(event, now);
         }
+        self.bench.tick();
+        if self.bench.take_failure() {
+            self.close_pending = false;
+        }
         self.poll_picker();
 
         if ctx.input(|i| i.viewport().close_requested()) && self.busy() {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.close_pending = true;
+            if self.bench.recording() {
+                self.backend
+                    .send(Request::Bench(crate::bench_worker::Command::Stop));
+            }
             if let Operation::Batch(run) = &self.operation {
                 run.stop.cancel();
             }
@@ -786,28 +821,12 @@ impl VergeApp {
                     .inner_margin(Margin::symmetric(space::M as i8, space::XS as i8)),
             )
             .show(ui, |ui| self.log_drawer(ui));
-        if self.view == View::Units {
-            egui::Panel::left("units")
-                .exact_size(300.0)
-                .frame(
-                    Frame::new()
-                        .fill(color::SUNKEN)
-                        .inner_margin(Margin::same(space::M as i8)),
-                )
-                .show(ui, |ui| self.unit_list(ui));
+        if self.view == View::Bench {
+            self.bench
+                .show(ui, &self.units, &mut self.selected, self.backend.as_mut());
+        } else {
+            self.views(ui, now);
         }
-        egui::CentralPanel::default()
-            .frame(
-                Frame::new()
-                    .fill(color::BACKGROUND)
-                    .inner_margin(Margin::same(space::L as i8)),
-            )
-            .show(ui, |ui| {
-                ScrollArea::vertical().show(ui, |ui| match self.view {
-                    View::Units => self.main(ui, now),
-                    View::Batch => self.batch_view(ui, now),
-                });
-            });
 
         if self.about_open {
             let mut open = true;
@@ -828,12 +847,44 @@ impl VergeApp {
         }
     }
 
+    /// The Units and Batch views, which scroll in the central panel.
+    fn views(&mut self, ui: &mut Ui, now: f64) {
+        if self.view == View::Units {
+            egui::Panel::left("units")
+                .exact_size(300.0)
+                .frame(
+                    Frame::new()
+                        .fill(color::SUNKEN)
+                        .inner_margin(Margin::same(space::M as i8)),
+                )
+                .show(ui, |ui| self.unit_list(ui));
+        }
+        egui::CentralPanel::default()
+            .frame(
+                Frame::new()
+                    .fill(color::BACKGROUND)
+                    .inner_margin(Margin::same(space::L as i8)),
+            )
+            .show(ui, |ui| {
+                ScrollArea::vertical().show(ui, |ui| match self.view {
+                    View::Units => self.main(ui, now),
+                    View::Batch => self.batch_view(ui, now),
+                    // Drawn by `show`, in panels of its own.
+                    View::Bench => {}
+                });
+            });
+    }
+
     fn strip(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.label(text(Role::Title, "VERGE").color(color::TEXT));
             ui.add_space(space::M);
             let idle = !self.busy();
-            for (view, words) in [(View::Units, "Units"), (View::Batch, "Batch")] {
+            for (view, words) in [
+                (View::Units, "Units"),
+                (View::Batch, "Batch"),
+                (View::Bench, "Bench"),
+            ] {
                 let selected = self.view == view;
                 let button = egui::Button::new(
                     text(Role::Action, words.to_uppercase()).color(if selected {
@@ -858,6 +909,9 @@ impl VergeApp {
                 .selected(selected);
                 let response = ui.add_enabled(idle || selected, button);
                 if response.clicked() && !selected {
+                    if self.view == View::Bench {
+                        self.bench.disconnect(self.backend.as_mut());
+                    }
                     self.view = view;
                     self.confirming = None;
                     self.batch_form.confirming = None;
@@ -865,31 +919,6 @@ impl VergeApp {
                 response.on_disabled_hover_text("Wait for what is running to finish.");
             }
             ui.add_space(space::M);
-            label(ui, "releases");
-            ui.label(text(Role::Data, self.config.repo.to_string()).color(color::TEXT));
-            match &self.release {
-                None => label(ui, "looking up"),
-                Some(Ok(release)) => {
-                    label(ui, "latest");
-                    ui.label(text(Role::Data, &release.tag).color(color::TEXT));
-                }
-                Some(Err(_)) => label(ui, "none found"),
-            }
-            if let Some(scenario) = &self.config.simulated {
-                ui.add_space(space::M);
-                Frame::new()
-                    .stroke(Stroke::new(1.0, color::ATTENTION))
-                    .inner_margin(Margin::symmetric(space::S as i8, 2))
-                    .show(ui, |ui| {
-                        ui.label(
-                            text(
-                                Role::Label,
-                                format!("SIMULATED BENCH: {}", scenario.to_uppercase()),
-                            )
-                            .color(color::ATTENTION),
-                        );
-                    });
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if outline(ui, "Licences", true).clicked() {
                     self.about_open = true;
@@ -902,6 +931,46 @@ impl VergeApp {
                     self.rescan();
                     self.backend.send(Request::Release);
                 }
+                if let Some(scenario) = &self.config.simulated {
+                    ui.add_space(space::M);
+                    Frame::new()
+                        .stroke(Stroke::new(1.0, color::ATTENTION))
+                        .inner_margin(Margin::symmetric(space::S as i8, 2))
+                        .show(ui, |ui| {
+                            ui.label(
+                                text(
+                                    Role::Label,
+                                    format!("SIMULATED BENCH: {}", scenario.to_uppercase()),
+                                )
+                                .color(color::ATTENTION),
+                            );
+                        });
+                }
+                ui.add_space(space::M);
+                // One line, cut short where the window leaves too little room for it.
+                let mut releases = egui::text::LayoutJob::default();
+                let mut add = |rich: egui::RichText| {
+                    rich.append_to(
+                        &mut releases,
+                        ui.style(),
+                        egui::FontSelection::Default,
+                        egui::Align::Center,
+                    );
+                };
+                let tag = |words: &str| {
+                    text(Role::Label, format!("{} ", words.to_uppercase())).color(color::TEXT_2)
+                };
+                add(tag("releases"));
+                add(text(Role::Data, format!("{}  ", self.config.repo)).color(color::TEXT));
+                match &self.release {
+                    None => add(tag("looking up")),
+                    Some(Ok(release)) => {
+                        add(tag("latest"));
+                        add(text(Role::Data, &release.tag).color(color::TEXT));
+                    }
+                    Some(Err(_)) => add(tag("none found")),
+                }
+                ui.add(egui::Label::new(releases).truncate());
             });
         });
         if self.close_pending {
@@ -910,6 +979,10 @@ impl VergeApp {
                 color::ATTENTION,
                 if matches!(self.operation, Operation::Batch(_)) {
                     "The window closes when the batch's unit under way finishes. The batch takes no new units."
+                } else if self.bench.recording() {
+                    "Closing after the recording stops."
+                } else if self.bench.busy() {
+                    "Closing when the file operation finishes. Close any file dialog to continue."
                 } else {
                     "The window closes when this update finishes. Cancel stops it at the next safe point and leaves the unit in ISP mode for the next flash."
                 },

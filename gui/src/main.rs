@@ -4,6 +4,8 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod app;
+mod bench;
+mod bench_worker;
 mod glyph;
 mod log;
 mod style;
