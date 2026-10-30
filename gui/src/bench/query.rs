@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use verge_probe::capture::{Archive, Envelope, Interval, Statistics, View};
+use verge_probe::capture::{Archive, DigitalView, Envelope, Interval, Statistics, View};
 
 pub struct Query {
     pub generation: u64,
@@ -19,6 +19,7 @@ pub struct Answer {
     /// The visible range and as much again either side, so a pan or a zoom out has bins to
     /// draw before its own answer comes back.
     pub view: View,
+    pub digital: DigitalView,
     pub visible: Interval,
     /// The visible range's own statistics.
     pub window: Statistics,
@@ -116,6 +117,7 @@ fn run(query: &Query) -> Result<Answer> {
         visible.end_ns.saturating_add(width),
     );
     let view = archive.view(around, query.pixels.saturating_mul(3), &query.cancel)?;
+    let digital = archive.digital(around, query.pixels.saturating_mul(3), &query.cancel)?;
     let window = archive.statistics(visible, &query.cancel)?;
     let overview = archive.view(extent, 128, &query.cancel)?;
     let fallback = overview
@@ -129,6 +131,7 @@ fn run(query: &Query) -> Result<Answer> {
         .transpose()?;
     Ok(Answer {
         view,
+        digital,
         visible,
         window,
         overview,

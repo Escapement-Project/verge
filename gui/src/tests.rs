@@ -140,7 +140,7 @@ fn until(h: &mut Harness<'_, VergeApp>, label: &str) {
 fn until_contains(h: &mut Harness<'_, VergeApp>, label: &str) {
     for _ in 0..400 {
         h.step();
-        if h.query_by_label_contains(label).is_some() {
+        if h.query_all_by_label_contains(label).next().is_some() {
             return;
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -666,6 +666,16 @@ fn pictures() {
     press(&mut h, "BENCH");
     until(&mut h, "RECORD RUNNING CAPTURE");
     shoot(&mut h, "16-bench-connected");
+    press(&mut h, "DIO0–2 OUTPUT");
+    until(&mut h, "DRIVE PINS");
+    shoot(&mut h, "18-bench-drive-confirmation");
+    press(&mut h, "DRIVE PINS");
+    for _ in 0..40 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    shoot(&mut h, "19-bench-outputs");
+    press(&mut h, "DIO0–2 INPUT");
     press(&mut h, "RECORD RUNNING CAPTURE");
     until(&mut h, "STOP RECORDING");
     for _ in 0..200 {
@@ -1923,10 +1933,7 @@ fn bench_supply_controls_use_aux_and_confirm_during_capture() {
     until(&mut h, "UPDATE TO V0.3.0");
     press(&mut h, "BENCH");
     until(&mut h, "RECORD RUNNING CAPTURE");
-    assert!(
-        h.query_by_label("DIO awaits firmware support through Aux.")
-            .is_some()
-    );
+    until(&mut h, "DIO0–2 OUTPUT");
     // A capture started before the GUI connected still requires confirmation.
     if h.query_by_label("TURN ON").is_some() {
         press(&mut h, "TURN ON");
@@ -1946,6 +1953,70 @@ fn bench_supply_controls_use_aux_and_confirm_during_capture() {
     until(&mut h, "TURN ON");
     press(&mut h, "TURN ON");
     until(&mut h, "TURN OFF");
+}
+
+#[test]
+fn bench_dio_explains_each_unavailable_state() {
+    for (scenario, reason) in [
+        ("ours-pro-old-aux", "predates DIO on Verge Aux"),
+        ("ours-pro-j15", "remove J15"),
+        ("ours-pro-aux-taken", "Verge Aux"),
+        ("ours-plain", "not an MCU-Link Pro"),
+    ] {
+        let mut h = harness(sim_app(SimBus::scenario(scenario).unwrap(), vec![]));
+        until(&mut h, "UPDATE TO V0.3.0");
+        press(&mut h, "BENCH");
+        for _ in 0..400 {
+            h.step();
+            if h.query_all_by_label_contains(reason).next().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            h.query_all_by_label_contains(reason).next().is_some(),
+            "{scenario}"
+        );
+        assert!(h.query_by_label("DIO0–2 OUTPUT").is_none());
+    }
+}
+
+#[test]
+fn bench_dio_asks_before_driving_and_keeps_inputs_on_cancel() {
+    let bus = SimBus::scenario("ours-pro-held").unwrap();
+    let mut h = harness(sim_app(bus.clone(), vec![]));
+    until(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "BENCH");
+    until(&mut h, "DIO0–2 OUTPUT");
+    h.get_by_label("HIGH");
+    press(&mut h, "DIO0–2 OUTPUT");
+    until(&mut h, "Drive DIO0–2?");
+    assert!(!bus.log().iter().any(|s| s.contains("AUX 8e0707")));
+    press(&mut h, "KEEP AS INPUTS");
+    for _ in 0..10 {
+        h.step();
+    }
+    assert!(h.query_by_label("Drive DIO0–2?").is_none());
+    assert!(!bus.log().iter().any(|s| s.contains("AUX 8e0707")));
+    press(&mut h, "DIO0–2 OUTPUT");
+    until(&mut h, "DRIVE PINS");
+    press(&mut h, "DRIVE PINS");
+    for _ in 0..400 {
+        h.step();
+        if h.query_all_by_label("SET HIGH").count() == 3 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(h.query_all_by_label("SET HIGH").count(), 3);
+    assert!(bus.log().iter().any(|s| s.contains("AUX 8e0707")));
+    press(&mut h, "DIO0–2 INPUT");
+    for _ in 0..20 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(h.query_by_label("Drive DIO0–2?").is_none());
+    assert_eq!(h.query_all_by_label("SET HIGH").count(), 0);
 }
 
 #[test]

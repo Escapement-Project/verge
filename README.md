@@ -346,7 +346,10 @@ immediately; no unit has been flashed.
 BENCH reaches a Pro's target supply and energy measurement through Verge Aux, so a debugger can
 keep CMSIS-DAP open meanwhile. The supply switches at once. Turning it off asks first while a
 capture runs. The panel shows the supply as commanded and the voltage as measured, which are
-separate readings. DIO controls follow once the firmware carries them on Aux.
+separate readings. DIO shows each pin’s direction and level. DIO0–2 change direction together;
+DIO3 changes alone. Switching to output asks first: check that the target is not driving the pins.
+Inputs have pull-downs. Outputs read their own drive. DIO requires current Verge firmware with
+DIO on Aux and J15 removed at startup.
 
 START RECORDING starts a capture at 1 to 100,000 pairs/s and records it. Starting clears the probe's
 energy total, and its calibration can interrupt target power for about 0.2 s. If another host
@@ -369,6 +372,9 @@ Each recording goes to disk as it arrives, for as long as the disk has room. Rec
 `captures` folder in that data directory until discarded. KEPT ON DISK reopens one, including one
 cut short by a crash. SAVE AS copies the open capture; OPEN reads one back. EXPORT writes the
 capture, or the selection, as CSV or as a sigrok session with voltage, current and a GAP channel.
+Recordings include all four DIO pins. Their lanes below the trace share its time axis. Zoomed
+out, a lane keeps short pulses visible. Missing edges leave breaks and an edge-loss report count.
+Exports include DIO levels and a DIO_GAP channel (dio_gap in CSV) for time whose levels are unknown.
 An export keeps whole pairs at its edges, with their own times, so it can start a little before
 the selection.
 

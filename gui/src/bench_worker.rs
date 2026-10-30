@@ -7,13 +7,24 @@ use verge_probe::aux::Aux;
 use verge_probe::capture::Recorder;
 use verge_probe::pro;
 use verge_probe::stream::{EndReason, Message};
-use verge_probe::{Bus, CommandError, EnergyCaptureSample, EnergyError, Unit, VergeControl};
+use verge_probe::{
+    Bus, CommandError, DioState, EnergyCaptureSample, EnergyError, Refused, Unit, VergeControl,
+};
+
+#[derive(Clone, Copy, Debug)]
+pub struct DioChange {
+    pub mask: u8,
+    pub outputs: u8,
+    pub levels: u8,
+}
 
 #[derive(Clone, Debug)]
 pub enum Command {
     Connect(Box<Unit>),
     Disconnect,
     CancelSupply,
+    CancelDio,
+    Dio { change: DioChange, confirmed: bool },
     Supply { on: bool, confirmed: bool },
     Start { rate: u32, path: PathBuf },
     Stop,
@@ -32,6 +43,10 @@ pub struct Status {
     pub path: Option<PathBuf>,
     pub confirm_off: bool,
     pub error: Option<String>,
+    pub dio: Option<DioState>,
+    pub dio_reason: Option<String>,
+    pub confirm_dio: Option<DioChange>,
+    pub edge_losses: u64,
 }
 
 pub struct Session<L: verge_probe::aux::AuxLink> {
@@ -42,6 +57,8 @@ pub struct Session<L: verge_probe::aux::AuxLink> {
     stopping: Option<Instant>,
     synced: bool,
     poll_at: Instant,
+    stream_mask: u8,
+    stream_levels: u8,
 }
 
 impl<L: verge_probe::aux::AuxLink> Session<L> {
@@ -59,7 +76,16 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
             stopping: None,
             synced: false,
             poll_at: Instant::now(),
+            stream_mask: 0,
+            stream_levels: 0,
         };
+        session.status.dio_reason = pro::check_offered(
+            unit.serial().unwrap_or("the unit"),
+            &mut VergeControl::new(&mut session.aux),
+            pro::Feature::Dio,
+        )
+        .err()
+        .map(|e| e.to_string());
         session.poll()?;
         Ok(session)
     }
@@ -88,6 +114,14 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
             Err(error) => return Err(error.into()),
             _ => bail!("unsupported capture state"),
         }
+        if self.status.dio_reason.is_none() {
+            let mut state = control.access_dio(0, 0, 0)?;
+            if self.recorder.is_some() {
+                state.read =
+                    (state.read & !self.stream_mask) | (self.stream_levels & self.stream_mask);
+            }
+            self.status.dio = Some(state);
+        }
         self.poll_at = Instant::now() + Duration::from_millis(500);
         Ok(())
     }
@@ -110,6 +144,33 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
     fn act(&mut self, command: Command) -> Result<()> {
         self.status.error = None;
         match command {
+            Command::CancelDio => self.status.confirm_dio = None,
+            Command::Dio { change, confirmed } => {
+                if let Some(reason) = &self.status.dio_reason {
+                    bail!("{reason}");
+                }
+                let mut control = VergeControl::new(&mut self.aux);
+                let state = control.access_dio(0, 0, 0)?;
+                if state.split(change.mask, change.outputs).is_some() {
+                    self.status.dio = Some(state);
+                    self.status.error =
+                        Some("DIO0–2 must change direction together; DIO3 changes alone.".into());
+                    return Ok(());
+                }
+                if change.mask & change.outputs & !state.outputs != 0 && !confirmed {
+                    self.status.confirm_dio = Some(change);
+                    return Ok(());
+                }
+                self.status.confirm_dio = None;
+                match control.access_dio(change.mask, change.outputs, change.levels) {
+                    Ok(state) => self.status.dio = Some(state),
+                    Err(CommandError::Firmware(Refused(state))) => {
+                        self.status.dio = Some(state);
+                        self.status.error = Some("The probe refused the DIO change.".into());
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
             Command::Supply { on, confirmed } => {
                 self.poll()?;
                 if !on && self.status.capturing && !confirmed {
@@ -130,13 +191,29 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
                 let recorder = Recorder::create(&path)?;
                 let mut control = VergeControl::new(&mut self.aux);
                 let started = if self.status.capturing {
-                    control.stream_energy_capture(0).map(drop).map_err(|error| {
-                        let cleanup = control.end_energy_stream();
-                        anyhow::anyhow!("attaching to capture: {error}; ending stream: {cleanup:?}")
-                    })
+                    control
+                        .stream_energy_capture(if self.status.dio_reason.is_none() {
+                            0x0f
+                        } else {
+                            0
+                        })
+                        .map(drop)
+                        .map_err(|error| {
+                            let cleanup = control.end_energy_stream();
+                            anyhow::anyhow!(
+                                "attaching to capture: {error}; ending stream: {cleanup:?}"
+                            )
+                        })
                 } else {
                     control
-                        .start_energy_stream(rate, 0)
+                        .start_energy_stream(
+                            rate,
+                            if self.status.dio_reason.is_none() {
+                                0x0f
+                            } else {
+                                0
+                            },
+                        )
                         .map(drop)
                         .map_err(|error| {
                             let cleanup = control.stop_energy_capture();
@@ -156,6 +233,8 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
                 self.status.path = Some(path);
                 self.status.recording = true;
                 self.synced = false;
+                self.stream_mask = 0;
+                self.status.edge_losses = 0;
                 self.status.rate = None;
                 self.status.capturing = true;
             }
@@ -164,6 +243,11 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
             Command::Connect(_) | Command::Disconnect => {}
         }
         Ok(())
+    }
+    fn update_levels(&mut self) {
+        if let Some(state) = &mut self.status.dio {
+            state.read = (state.read & !self.stream_mask) | (self.stream_levels & self.stream_mask);
+        }
     }
     fn ask_stop(&mut self) -> Result<()> {
         if !self.recording() || self.stopping.is_some() {
@@ -197,6 +281,19 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
                 if let Message::Header(header) = &message {
                     self.synced = true;
                     self.status.rate = Some(header.rate);
+                    self.stream_mask = header.dio_mask;
+                    self.stream_levels = header.dio_levels;
+                    self.update_levels();
+                    changed = true;
+                }
+                if let Message::Edges(edges) = &message {
+                    if edges.lost() {
+                        self.status.edge_losses += 1;
+                    }
+                    if let Some(edge) = edges.edges.last() {
+                        self.stream_levels = edge.levels;
+                    }
+                    self.update_levels();
                     changed = true;
                 }
                 if !self.synced {
@@ -527,6 +624,16 @@ mod hardware {
         until(&mut h, |r| {
             r.bench.status.as_ref().is_some_and(|s| s.connected)
         });
+        let dio = h
+            .state()
+            .bench
+            .status
+            .as_ref()
+            .unwrap()
+            .dio
+            .as_ref()
+            .expect("DIO through Aux");
+        assert_eq!(dio.outputs & 8, 0, "DIO3 must remain an input");
         assert!(
             !h.state().bench.status.as_ref().unwrap().capturing,
             "leave any existing capture to its owner"
@@ -543,6 +650,32 @@ mod hardware {
         }));
         until(&mut h, |r| r.bench.status.as_ref().unwrap().supply);
         std::thread::sleep(Duration::from_millis(100));
+        let (mut polled_high, mut polled_low) = (false, false);
+        for _ in 0..100 {
+            h.state_mut().worker.send(Request::Bench(Command::Dio {
+                change: DioChange {
+                    mask: 0,
+                    outputs: 0,
+                    levels: 0,
+                },
+                confirmed: false,
+            }));
+            h.step();
+            let dio = h
+                .state()
+                .bench
+                .status
+                .as_ref()
+                .unwrap()
+                .dio
+                .as_ref()
+                .unwrap();
+            assert_eq!(dio.outputs & 8, 0);
+            polled_high |= dio.read & 8 != 0;
+            polled_low |= dio.read & 8 == 0;
+            std::thread::sleep(Duration::from_millis(3));
+        }
+        assert!(polled_high && polled_low, "DIO3 must toggle when polled");
         for (rate, seconds) in [(1000, 3), (100_000, 12)] {
             let path = directory.join(format!("gui-{rate}.vergecapture"));
             h.state_mut().worker.send(Request::Bench(Command::Start {
@@ -620,6 +753,51 @@ mod hardware {
             assert!(view.statistics.samples > u64::from(rate));
             assert!(view.statistics.mean_voltage_v().unwrap_or_default() > 1.0);
             assert!(view.statistics.mean_current_a().unwrap_or_default() > 0.0);
+            assert_eq!(archive.header().unwrap().dio_mask, 15);
+            let digital = archive
+                .digital(extent, 800, &AtomicBool::new(false))
+                .unwrap();
+            assert_eq!(digital.loss_events, 0);
+            assert!(digital.bins.iter().any(|bin| bin.high & 8 != 0));
+            assert!(digital.bins.iter().any(|bin| bin.low & 8 != 0));
+            let csv_path = directory.join(format!("gui-{rate}.csv"));
+            archive
+                .export(&csv_path, true, extent, &AtomicBool::new(false))
+                .unwrap();
+            let edges = {
+                use std::io::BufRead;
+                let mut levels = archive.header().unwrap().dio_levels & 8 != 0;
+                let mut edges = Vec::new();
+                for line in std::io::BufReader::new(std::fs::File::open(csv_path).unwrap()).lines()
+                {
+                    let line = line.unwrap();
+                    if !line.starts_with(',') {
+                        continue;
+                    }
+                    let fields: Vec<_> = line.split(',').collect();
+                    let high = fields[7] == "1";
+                    if high != levels {
+                        edges.push(fields[1].parse::<u64>().unwrap());
+                        levels = high;
+                    }
+                }
+                edges
+            };
+            assert!(edges.len() as f64 > extent.duration_ns() as f64 / 1e9 * 50.0);
+            assert!(
+                edges.windows(2).all(|w| w[1] - w[0] < 20_000_000),
+                "a missing DIO3 transition"
+            );
+            eprintln!(
+                "DIO: {} transitions at {rate} pairs/s, {} loss reports; first intervals {:?} ns",
+                edges.len(),
+                digital.loss_events,
+                edges
+                    .windows(2)
+                    .take(4)
+                    .map(|w| w[1] - w[0])
+                    .collect::<Vec<_>>()
+            );
             if let Some((selected, expected)) = old_selection {
                 assert_eq!(
                     archive
@@ -654,6 +832,121 @@ mod hardware {
             h.render()
                 .unwrap()
                 .save(directory.join(format!("gui-{rate}.png")))
+                .unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod dio_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use verge_probe::capture::{Archive, Interval};
+    use verge_probe::sim::SimBus;
+
+    #[test]
+    fn dio_polling_group_confirmation_and_split_refusal() {
+        let bus = SimBus::scenario("ours-pro-held").unwrap();
+        let unit = verge_probe::detect(&bus).unwrap().remove(0);
+        let mut session = Session::open(&bus, &unit).unwrap();
+        assert_eq!(session.status.dio.as_ref().unwrap().read, 8);
+        let change = DioChange {
+            mask: 7,
+            outputs: 7,
+            levels: 5,
+        };
+        session.command(Command::Dio {
+            change,
+            confirmed: false,
+        });
+        assert!(session.status.confirm_dio.is_some());
+        assert_eq!(session.status.dio.as_ref().unwrap().outputs, 0);
+        session.command(Command::CancelDio);
+        assert!(session.status.confirm_dio.is_none());
+        session.command(Command::Dio {
+            change,
+            confirmed: false,
+        });
+        session.command(Command::Dio {
+            change,
+            confirmed: true,
+        });
+        let state = session.status.dio.as_ref().unwrap();
+        assert_eq!((state.outputs, state.read), (7, 13));
+        session.command(Command::Dio {
+            change: DioChange {
+                mask: 1,
+                outputs: 0,
+                levels: 0,
+            },
+            confirmed: true,
+        });
+        assert!(session.status.error.as_ref().unwrap().contains("together"));
+        assert_eq!(session.status.dio.as_ref().unwrap().outputs, 7);
+        session.command(Command::Dio {
+            change: DioChange {
+                mask: 7,
+                outputs: 0,
+                levels: 0,
+            },
+            confirmed: false,
+        });
+        assert_eq!(session.status.dio.as_ref().unwrap().outputs, 0);
+        assert!(session.status.confirm_dio.is_none());
+    }
+
+    #[test]
+    fn dio_recording_uses_all_pins_and_keeps_edges_and_loss() {
+        for scenario in ["ours-pro", "ours-pro-edge-loss"] {
+            let bus = SimBus::scenario(scenario).unwrap().paced(0.1);
+            let unit = verge_probe::detect(&bus).unwrap().remove(0);
+            let mut session = Session::open(&bus, &unit).unwrap();
+            session.command(Command::Supply {
+                on: true,
+                confirmed: false,
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("dio.vergecapture");
+            assert!(session.command(Command::Start {
+                rate: 1000,
+                path: path.clone()
+            }));
+            let mut saw_high = false;
+            let mut saw_low = false;
+            for _ in 0..40 {
+                session.tick().unwrap();
+                if let Some(state) = &session.status.dio {
+                    saw_high |= state.read & 8 != 0;
+                    saw_low |= state.read & 8 == 0;
+                }
+            }
+            assert!(
+                saw_high && saw_low,
+                "levels must come from edges between polls"
+            );
+            session.close().unwrap();
+            let archive = Archive::open(&path).unwrap();
+            assert_eq!(archive.header().unwrap().dio_mask, 15);
+            let view = archive
+                .digital(archive.extent().unwrap(), 500, &AtomicBool::new(false))
+                .unwrap();
+            assert!(view.bins.iter().any(|bin| bin.high & 8 != 0));
+            assert!(view.bins.iter().any(|bin| bin.low & 8 != 0));
+            assert_eq!(
+                view.loss_events,
+                u64::from(scenario == "ours-pro-edge-loss")
+            );
+            let selected = Interval::new(
+                archive.extent().unwrap().start_ns,
+                archive.extent().unwrap().end_ns,
+            );
+            archive
+                .export(
+                    &dir.path().join("dio.sr"),
+                    false,
+                    selected,
+                    &AtomicBool::new(false),
+                )
                 .unwrap();
         }
     }

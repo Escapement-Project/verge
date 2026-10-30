@@ -2,7 +2,7 @@
 
 mod query;
 use crate::app::{choice, edged, label, outline, sentence};
-use crate::bench_worker::{Command, Status};
+use crate::bench_worker::{Command, DioChange, Status};
 use crate::style::{self, Role, color, space, text};
 use crate::worker::{Backend, Request};
 use egui::{Color32, CornerRadius, Frame, Margin, ScrollArea, Stroke, Ui, Vec2, vec2};
@@ -458,11 +458,119 @@ impl Bench {
             ui.add_space(space::S);
             edged(ui, color::ATTENTION, &notice);
         }
+        self.dio(ui, chosen, backend);
         self.measurements(ui);
         self.kept(ui);
+    }
+
+    fn dio(&mut self, ui: &mut Ui, chosen: Option<&Unit>, backend: &mut dyn Backend) {
         ui.add_space(space::L);
         label(ui, "dio");
-        ui.label(text(Role::Body, "DIO awaits firmware support through Aux.").color(color::TEXT_2));
+        let state = self
+            .status
+            .as_ref()
+            .filter(|s| s.connected)
+            .and_then(|s| s.dio.clone());
+        let Some(state) = state else {
+            let reason = self
+                .status
+                .as_ref()
+                .and_then(|s| s.dio_reason.clone().or_else(|| s.error.as_ref().map(|error| if error.contains("Verge Aux") { "Verge Aux is unavailable. Close the program holding it and reconnect.".into() } else { "Reconnect to an available Pro to use DIO.".into() })))
+                .or_else(|| {
+                    chosen.and_then(|unit| {
+                        pro::validate(unit, pro::Feature::Dio)
+                            .err()
+                            .map(|e| e.to_string())
+                    })
+                })
+                .unwrap_or_else(|| "Select an available Pro running Verge to use DIO.".into());
+            ui.add_enabled(false, egui::Label::new(text(Role::Body, reason)));
+            return;
+        };
+        for group in &state.groups {
+            let name = if *group == 7 { "DIO0–2" } else { "DIO3" };
+            ui.horizontal(|ui| {
+                ui.label(text(Role::Data, name));
+                for output in [false, true] {
+                    let selected = (state.outputs & group != 0) == output;
+                    let words = format!("{name} {}", if output { "output" } else { "input" });
+                    let response = ui.selectable_label(
+                        selected,
+                        text(Role::Data, if output { "Output" } else { "Input" }),
+                    );
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::Role::Button,
+                            ui.is_enabled(),
+                            words.to_uppercase(),
+                        )
+                    });
+                    if response.clicked() && !selected {
+                        backend.send(Request::Bench(Command::Dio {
+                            change: DioChange {
+                                mask: *group,
+                                outputs: if output { *group } else { 0 },
+                                levels: state.levels,
+                            },
+                            confirmed: false,
+                        }));
+                    }
+                }
+            });
+        }
+        egui::Grid::new("dio-levels")
+            .num_columns(4)
+            .spacing([space::S, space::XS])
+            .show(ui, |ui| {
+                for pin in 0..4 {
+                    let bit = 1 << pin;
+                    if state.pins & bit == 0 {
+                        continue;
+                    }
+                    let output = state.outputs & bit != 0;
+                    ui.label(text(Role::Data, format!("DIO{pin}")));
+                    ui.label(
+                        text(Role::Data, if output { "OUT" } else { "IN" }).color(color::TEXT_2),
+                    );
+                    let high = state.read & bit != 0;
+                    ui.label(
+                        text(Role::Data, if high { "HIGH" } else { "LOW" }).color(if high {
+                            color::ACCENT
+                        } else {
+                            color::TEXT_2
+                        }),
+                    );
+                    if output
+                        && ui
+                            .small_button(text(
+                                Role::Data,
+                                if state.levels & bit == 0 {
+                                    "SET HIGH"
+                                } else {
+                                    "SET LOW"
+                                },
+                            ))
+                            .clicked()
+                    {
+                        backend.send(Request::Bench(Command::Dio {
+                            change: DioChange {
+                                mask: bit,
+                                outputs: bit,
+                                levels: state.levels ^ bit,
+                            },
+                            confirmed: false,
+                        }));
+                    }
+                    ui.end_row();
+                }
+            });
+        ui.label(
+            text(
+                Role::Body,
+                "Inputs have pull-downs. Outputs read their drive.",
+            )
+            .color(color::TEXT_2),
+        );
     }
 
     fn supply(&mut self, ui: &mut Ui, status: &Status, backend: &mut dyn Backend) {
@@ -738,6 +846,25 @@ impl Bench {
                     });
                 });
         }
+        if let Some(change) = self.status.as_ref().and_then(|s| s.confirm_dio) {
+            let group = if change.mask & 7 != 0 {
+                "DIO0–2"
+            } else {
+                "DIO3"
+            };
+            egui::Window::new(format!("Drive {group}?"))
+                .collapsible(false).resizable(false).show(ui.ctx(), |ui| {
+                    ui.label(text(Role::Body, "Check that the target is not driving these pins. The probe cannot detect contention."));
+                    ui.horizontal(|ui| {
+                        if outline(ui, "Drive pins", true).clicked() {
+                            backend.send(Request::Bench(Command::Dio { change, confirmed: true }));
+                        }
+                        if outline(ui, "Keep as inputs", true).clicked() {
+                            backend.send(Request::Bench(Command::CancelDio));
+                        }
+                    });
+                });
+        }
         if self.off_confirm {
             egui::Window::new("Turn off target supply?")
                 .collapsible(false)
@@ -942,12 +1069,25 @@ impl Bench {
                 self.requery();
             }
         }
+        self.digital_lanes(ui, &answer.digital, &response.transform);
         self.overview(ui, &answer, self.current().unwrap_or(visible), extent);
         if answer.view.lost_pairs > 0 {
             ui.label(
                 text(
                     Role::Data,
                     format!("{} pairs lost in this capture", answer.view.lost_pairs),
+                )
+                .color(color::ATTENTION),
+            );
+        }
+        if answer.digital.loss_events > 0 {
+            ui.label(
+                text(
+                    Role::Data,
+                    format!(
+                        "{} DIO edge-loss reports in this capture",
+                        answer.digital.loss_events
+                    ),
                 )
                 .color(color::ATTENTION),
             );
@@ -959,6 +1099,100 @@ impl Bench {
         if (footer - self.footer).abs() > 0.5 {
             self.footer = footer;
             ui.ctx().request_repaint();
+        }
+    }
+
+    fn digital_lanes(
+        &self,
+        ui: &mut Ui,
+        digital: &verge_probe::capture::DigitalView,
+        transform: &egui_plot::PlotTransform,
+    ) {
+        if digital.pins == 0 {
+            return;
+        }
+        let count = digital.pins.count_ones() as f32;
+        let (rect, _) = ui.allocate_exact_size(
+            vec2(ui.available_width(), count * 24.0),
+            egui::Sense::hover(),
+        );
+        let frame = *transform.frame();
+        let clip = egui::Rect::from_min_max(
+            egui::pos2(frame.left(), rect.top()),
+            egui::pos2(frame.right(), rect.bottom()),
+        );
+        let painter = ui.painter().with_clip_rect(clip);
+        let x = |time| {
+            transform
+                .position_from_point(&egui_plot::PlotPoint::new(seconds(time), 0.0))
+                .x
+        };
+        let mut row = 0;
+        for pin in 0..4 {
+            let bit = 1 << pin;
+            if digital.pins & bit == 0 {
+                continue;
+            }
+            let top = rect.top() + row as f32 * 24.0 + 3.0;
+            row += 1;
+            ui.painter().text(
+                egui::pos2(frame.left() - 8.0, top + 7.0),
+                egui::Align2::RIGHT_CENTER,
+                format!("DIO{pin}"),
+                egui::FontId::monospace(11.0),
+                color::TEXT_2,
+            );
+            let mut previous: Option<(f32, f32)> = None;
+            for bin in &digital.bins {
+                let left = x(bin.interval.start_ns);
+                let right = x(bin.interval.end_ns);
+                if right < clip.left() || left > clip.right() {
+                    previous = None;
+                    continue;
+                }
+                if bin.gap || (bin.high | bin.low) & bit == 0 {
+                    previous = None;
+                    if bin.gap {
+                        painter.rect_filled(
+                            egui::Rect::from_min_max(
+                                egui::pos2(left, top),
+                                egui::pos2(right, top + 14.0),
+                            ),
+                            0,
+                            color::ATTENTION.gamma_multiply(0.2),
+                        );
+                    }
+                    continue;
+                }
+                let high = bin.high & bit != 0;
+                let low = bin.low & bit != 0;
+                let y = top + if high { 0.0 } else { 14.0 };
+                if let Some((last_x, last_y)) = previous
+                    && (last_x - left).abs() < 0.5
+                {
+                    painter.line_segment(
+                        [egui::pos2(left, last_y), egui::pos2(left, y)],
+                        Stroke::new(1.0, color::ACCENT),
+                    );
+                }
+                if high && low {
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(left, top),
+                            egui::pos2(right.max(left + 1.0), top + 14.0),
+                        ),
+                        0,
+                        color::ACCENT.gamma_multiply(0.6),
+                    );
+                    previous = None;
+                } else {
+                    painter.line_segment(
+                        [egui::pos2(left, y), egui::pos2(right, y)],
+                        Stroke::new(1.0, color::ACCENT),
+                    );
+                    previous = Some((right, y));
+                }
+            }
         }
     }
 
@@ -1364,11 +1598,15 @@ mod tests {
 
     /// `count` pairs at `rate`, each pair's current code from `code`; 65535 is 350 mA.
     fn capture(path: &Path, rate: u32, count: u32, code: impl Fn(u32) -> u16) {
+        capture_with_dio(path, rate, count, code, false);
+    }
+    fn capture_with_dio(path: &Path, rate: u32, count: u32, code: impl Fn(u32) -> u16, dio: bool) {
         let header: Header = serde_json::from_value(serde_json::json!({"rate":rate,"setting_ma":350,"full_scale_mv":3300,"first_sequence":0,"previous_low":true,
-            "low":[{"code":0,"current_nanoamps":0},{"code":65535,"current_nanoamps":350000000}],"high":[],"dio_mask":0,"dio_levels":0,"edge_resolution_ns":0})).unwrap();
+            "low":[{"code":0,"current_nanoamps":0},{"code":65535,"current_nanoamps":350000000}],"high":[],"dio_mask":if dio {15} else {0},"dio_levels":if code(0)>1000 {8} else {0},"edge_resolution_ns":11})).unwrap();
         let period = 1_000_000_000 / u64::from(rate);
         let mut writer = CaptureWriter::create(path).unwrap();
         writer.ingest(Message::Header(header)).unwrap();
+        let mut last_levels = if code(0) > 1000 { 8 } else { 0 };
         for first in (0..count).step_by(99) {
             let pairs = (first..(first + 99).min(count))
                 .map(|i| Pair {
@@ -1385,6 +1623,31 @@ mod tests {
                     pairs,
                 )))
                 .unwrap();
+            if dio {
+                let mut edges = Vec::new();
+                for i in first..(first + 99).min(count) {
+                    let levels = if code(i) > 1000 { 8 } else { 0 };
+                    if levels != last_levels {
+                        edges.push(verge_probe::stream::Edge {
+                            time_ns: u64::from(i) * period,
+                            levels,
+                        });
+                        last_levels = levels;
+                    }
+                }
+                if !edges.is_empty() {
+                    let flags = if first <= 20_050 && first + 99 > 20_050 {
+                        verge_probe::stream::Edges::LOST
+                    } else {
+                        0
+                    };
+                    writer
+                        .ingest(Message::Edges(verge_probe::stream::Edges::new(
+                            flags, edges,
+                        )))
+                        .unwrap();
+                }
+            }
         }
         writer
             .ingest(Message::End(End {
@@ -1599,14 +1862,35 @@ mod tests {
         if path.exists() {
             std::fs::remove_file(&path).unwrap();
         }
-        capture(&path, 1000, 60_000, |i| {
-            let noise = (i.wrapping_mul(2_654_435_761) >> 24) as u16;
-            if i % 10 < 2 {
-                2900 + noise / 2
-            } else {
-                340 + noise / 16
+        capture_with_dio(
+            &path,
+            1000,
+            60_000,
+            |i| {
+                let noise = (i.wrapping_mul(2_654_435_761) >> 24) as u16;
+                if i % 10 < 2 {
+                    2900 + noise / 2
+                } else {
+                    340 + noise / 16
+                }
+            },
+            true,
+        );
+        let archive = Archive::open(&path).unwrap();
+        for csv in [true, false] {
+            let out = dir.join(if csv { "marker.csv" } else { "marker.sr" });
+            if out.exists() {
+                std::fs::remove_file(&out).unwrap();
             }
-        });
+            archive
+                .export(
+                    &out,
+                    csv,
+                    Interval::new(20_000_000_000, 20_500_000_000),
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+        }
         let mut bench = Bench::new(&dir);
         bench.open(path);
         let mut h = harness(bench, true);
