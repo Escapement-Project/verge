@@ -5,9 +5,12 @@ use crate::app::{choice, edged, label, outline, sentence};
 use crate::bench_worker::{Command, Status};
 use crate::style::{self, Role, color, space, text};
 use crate::worker::{Backend, Request};
-use egui::{Color32, CornerRadius, Frame, Margin, ScrollArea, Stroke, Ui, vec2};
-use egui_plot::{GridInput, GridMark, Line, Plot, Span, uniform_grid_spacer};
+use egui::{Color32, CornerRadius, Frame, Margin, ScrollArea, Stroke, Ui, Vec2, vec2};
+use egui_plot::{
+    FilledArea, GridInput, GridMark, Line, Plot, PlotUi, Points, Span, uniform_grid_spacer,
+};
 use query::{Answer, Queries, Query};
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -15,7 +18,9 @@ use std::sync::{
     mpsc::{self, Receiver},
 };
 use std::time::{Duration, Instant, SystemTime};
-use verge_probe::capture::{Archive, Interval, Statistics, View, recovered_sessions};
+use verge_probe::capture::{
+    Archive, Envelope, Interval, Statistics, Supported, recovered_sessions,
+};
 use verge_probe::{Unit, pro};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -47,6 +52,14 @@ impl Quantity {
             Self::Power => (s.min_mv_na? as f64 * 1e-9, s.max_mv_na? as f64 * 1e-9),
         })
     }
+    fn value(self, s: &Supported) -> f64 {
+        let (millivolts, nanoamps) = (f64::from(s.sample.millivolts), f64::from(s.sample.nanoamps));
+        match self {
+            Self::Current => nanoamps * 1e-6,
+            Self::Voltage => millivolts * 1e-3,
+            Self::Power => millivolts * nanoamps * 1e-9,
+        }
+    }
 }
 enum FileAction {
     Open,
@@ -72,14 +85,12 @@ pub struct Bench {
     recovered: Vec<PathBuf>,
     queries: Queries,
     generation: u64,
-    /// The generation of the answer on screen.
-    answered: u64,
     /// The last query failed: asking again waits for something to change.
     query_failed: bool,
     pending: bool,
     dirty: bool,
     queried_at: Instant,
-    answer: Option<Answer>,
+    answer: Option<Arc<Answer>>,
     interval: Option<Interval>,
     selection: Option<Interval>,
     span: u64,
@@ -87,10 +98,14 @@ pub struct Bench {
     quantity: Quantity,
     select_mode: bool,
     drag_start: Option<u64>,
+    /// Move the plot to `interval`, or to the live window, on the next frame.
     reset_bounds: bool,
-    y_lock: bool,
-    y_bounds: Option<[f64; 2]>,
-    y_fit: u8,
+    /// Y follows the visible data until the user moves it.
+    y_fit: bool,
+    /// The vertical travel of the drag or scroll under way while Y fits.
+    travel: f32,
+    /// The travel that took Y off the fit, applied on the next frame.
+    carry: f32,
     io: Option<Receiver<Result<FileResult, String>>>,
     failed: bool,
     notice: Option<String>,
@@ -98,6 +113,9 @@ pub struct Bench {
     off_confirm: bool,
     /// The height under the plot, measured on the frame before.
     footer: f32,
+    /// The plot as last drawn.
+    #[cfg(test)]
+    shown: Option<egui_plot::PlotTransform>,
 }
 
 impl Bench {
@@ -121,7 +139,6 @@ impl Bench {
             recovered: Vec::new(),
             queries: Queries::new(),
             generation: 0,
-            answered: 0,
             query_failed: false,
             pending: false,
             dirty: true,
@@ -135,15 +152,17 @@ impl Bench {
             select_mode: false,
             drag_start: None,
             reset_bounds: true,
-            y_lock: false,
-            y_bounds: None,
-            y_fit: 0,
+            y_fit: true,
+            travel: 0.0,
+            carry: 0.0,
             io: Some(rx),
             failed: false,
             notice: None,
             start_confirm: false,
             off_confirm: false,
             footer: 120.0,
+            #[cfg(test)]
+            shown: None,
         }
     }
     pub fn recording(&self) -> bool {
@@ -162,6 +181,16 @@ impl Bench {
         self.off_confirm = false;
         self.notice = Some(message.to_owned());
         self.invalidate();
+    }
+    /// The range on screen: the live window, or where the user moved the plot, which the last
+    /// answer may not have caught up with.
+    fn current(&self) -> Option<Interval> {
+        let answer = self.answer.as_ref()?;
+        Some(if self.follow {
+            answer.visible
+        } else {
+            self.interval.unwrap_or(answer.visible)
+        })
     }
     pub fn inspect(&mut self, interval: Interval, selection: Option<Interval>) {
         self.follow = false;
@@ -214,13 +243,22 @@ impl Bench {
         self.answer = None;
         self.follow = true;
         self.reset_bounds = true;
+        self.y_fit = true;
         self.invalidate();
     }
+    /// What is asked for changed: answers to earlier questions are dropped.
     fn invalidate(&mut self) {
         self.query_failed = false;
         self.queries.cancel();
         self.generation += 1;
         self.pending = false;
+        self.dirty = true;
+    }
+    /// The range moved. The query under way finishes and draws, and the next one asks for where
+    /// the range is then: cancelling on every frame of a pan would leave nothing drawn until it
+    /// stopped.
+    fn requery(&mut self) {
+        self.query_failed = false;
         self.dirty = true;
     }
     pub fn disconnect(&mut self, backend: &mut dyn Backend) {
@@ -295,10 +333,7 @@ impl Bench {
         {
             self.pending = false;
             match result {
-                Ok(answer) => {
-                    self.answer = Some(answer);
-                    self.answered = generation;
-                }
+                Ok(answer) => self.answer = Some(Arc::new(answer)),
                 Err(error) => {
                     self.notice = Some(error);
                     self.query_failed = true;
@@ -546,7 +581,7 @@ impl Bench {
                 if from.changed() || to.changed() {
                     selection = Interval::new(nanos(start), nanos(end));
                     self.selection = Some(selection);
-                    self.invalidate();
+                    self.requery();
                 }
             });
             ui.horizontal(|ui| {
@@ -559,7 +594,7 @@ impl Bench {
                 }
             });
         }
-        let window = (answer.view.interval, answer.view.statistics.clone());
+        let window = (answer.visible, answer.window.clone());
         let selection = self.selection.map(|selection| match &answer.selection {
             Some((queried, statistics)) if *queried == selection => {
                 Some((selection, statistics.clone()))
@@ -736,8 +771,7 @@ impl Bench {
                     && self.quantity != quantity
                 {
                     self.quantity = quantity;
-                    self.y_bounds = None;
-                    self.y_fit = 2;
+                    self.y_fit = true;
                 }
             }
             ui.add_space(space::M);
@@ -748,7 +782,7 @@ impl Bench {
             }
             if choice(ui, "Inspect", !self.follow).clicked() && self.follow {
                 self.follow = false;
-                self.interval = self.answer.as_ref().map(|a| a.view.interval);
+                self.interval = self.current();
                 self.invalidate();
             }
             ui.add_space(space::M);
@@ -757,11 +791,8 @@ impl Bench {
                 if choice(ui, &format!("{seconds}s"), self.follow && self.span == span).clicked() {
                     self.span = span;
                     self.reset_bounds = true;
-                    self.interval = self.answer.as_ref().map(|a| {
-                        Interval::new(
-                            a.view.interval.end_ns.saturating_sub(self.span),
-                            a.view.interval.end_ns,
-                        )
+                    self.interval = self.current().map(|current| {
+                        Interval::new(current.end_ns.saturating_sub(self.span), current.end_ns)
                     });
                     self.invalidate();
                 }
@@ -770,9 +801,8 @@ impl Bench {
             if choice(ui, "Select", self.select_mode).clicked() {
                 self.select_mode = !self.select_mode;
             }
-            if choice(ui, "Lock Y", self.y_lock).clicked() {
-                self.y_lock = !self.y_lock;
-                self.y_bounds = None;
+            if choice(ui, "Fit Y", self.y_fit).clicked() {
+                self.y_fit = !self.y_fit;
             }
         });
         ui.add_space(space::S);
@@ -781,6 +811,8 @@ impl Bench {
     fn graph(&mut self, ui: &mut Ui) {
         self.toolbar(ui);
         let Some(answer) = self.answer.clone() else {
+            // A selection drag under way ends with the plot it was on.
+            self.drag_start = None;
             let size = vec2(
                 ui.available_width(),
                 (ui.available_height() - 48.0).max(160.0),
@@ -809,15 +841,19 @@ impl Bench {
             self.files(ui);
             return;
         };
-        let interval = answer.view.interval;
+        let visible = answer.visible;
         let extent = answer.view.extent;
         let quantity = self.quantity;
         let selection = self.selection;
         let follow = self.follow;
-        // A new interval's bounds apply once its own answer is drawn, not the one before it.
-        let fresh = self.answered == self.generation;
-        let reset = self.reset_bounds && fresh;
-        let y_bounds = if self.y_fit > 0 { None } else { self.y_bounds };
+        let target = if follow {
+            Some(visible)
+        } else {
+            self.reset_bounds.then(|| self.interval.unwrap_or(visible))
+        };
+        let fit = self.y_fit;
+        let carry = std::mem::take(&mut self.carry);
+        let mut fitted = None;
         let mut pointer = None;
         let plot = Plot::new("energy")
             .height((ui.available_height() - self.footer).max(160.0))
@@ -826,21 +862,37 @@ impl Bench {
             .x_axis_formatter(|mark, _| tick(mark, "s"))
             .y_axis_formatter(move |mark, _| tick(mark, quantity.unit()))
             .y_axis_min_width(56.0)
-            .include_y(0.0)
-            .allow_drag(!self.select_mode)
-            .auto_bounds([false, !self.y_lock || self.y_fit > 0]);
+            .auto_bounds(false)
+            .allow_double_click_reset(false)
+            // The wheel zooms time; dragging the Y axis zooms Y.
+            .allow_zoom([true, false])
+            // While Y fits, a drag or the wheel moves time only, until it passes the detent.
+            .allow_drag([!self.select_mode, !self.select_mode && !fit])
+            .allow_scroll([true, !fit]);
         let response = plot.show(ui, |plot| {
-            plot.set_auto_bounds([false, !self.y_lock || self.y_fit > 0]);
-            if follow || reset {
-                plot.set_plot_bounds_x(
-                    seconds(interval.start_ns)
-                        ..=seconds(interval.end_ns.max(interval.start_ns + 1)),
-                );
+            let x = match target {
+                Some(interval) => {
+                    let x = seconds(interval.start_ns)
+                        ..=seconds(interval.end_ns.max(interval.start_ns + 1));
+                    plot.set_plot_bounds_x(x.clone());
+                    x
+                }
+                None => plot.plot_bounds().range_x(),
+            };
+            if fit {
+                fitted = y_range(&answer, quantity, &x);
+                if let Some(range) = fitted.clone() {
+                    plot.set_plot_bounds_y(range);
+                }
+            } else if carry != 0.0 {
+                let shift = -f64::from(carry) * plot.transform().dvalue_dpos()[1];
+                plot.translate_bounds(vec2(0.0, shift as f32));
             }
-            if let Some([min, max]) = y_bounds {
-                plot.set_plot_bounds_y(min..=max);
+            draw(plot, &answer.fallback, quantity, color::ACCENT);
+            match &answer.view.samples {
+                Some(samples) => draw_samples(plot, samples, quantity, color::ACCENT, &x),
+                None => draw(plot, &answer.view.envelopes, quantity, color::ACCENT),
             }
-            draw(plot, &answer.view, quantity, color::ACCENT);
             if let Some(selection) = selection {
                 plot.span(
                     Span::new(
@@ -853,53 +905,44 @@ impl Bench {
             pointer = plot.pointer_coordinate().map(|p| nanos(p.x));
         });
         let top = ui.cursor().top();
-        let bounds = Some(*response.transform.bounds());
-        if fresh {
-            self.reset_bounds = false;
+        let bounds = *response.transform.bounds();
+        #[cfg(test)]
+        {
+            self.shown = Some(response.transform);
         }
-        self.y_fit = self.y_fit.saturating_sub(1);
-        if self.y_lock {
-            if let Some(bounds) = bounds {
-                self.y_bounds = Some([bounds.min()[1], bounds.max()[1]]);
-            }
-        } else {
-            self.y_bounds = None;
-        }
+        self.reset_bounds = false;
+        self.y_gesture(ui, &response.response, fitted, bounds.range_y());
+        let shown = Interval::new(nanos(bounds.min()[0]), nanos(bounds.max()[0]));
         if self.select_mode {
             if response.response.drag_started() {
                 self.drag_start = pointer;
-                self.inspect(interval, self.selection);
+                self.inspect(shown, self.selection);
             }
             if response.response.dragged()
                 && let (Some(start), Some(end)) = (self.drag_start, pointer)
             {
                 self.selection = Some(Interval::new(start.min(end), start.max(end)));
-                self.invalidate();
+                self.requery();
             }
             if response.response.drag_stopped() {
                 self.drag_start = None;
             }
         }
         // However the plot's range moved (drag, scroll, wheel or box zoom, in either mode), the
-        // range drawn is the one to query. Not while a new interval waits for its answer, which
-        // moves the plot to it.
-        if self.drag_start.is_none()
-            && !self.reset_bounds
-            && let Some(bounds) = bounds
-        {
-            let shown = Interval::new(nanos(bounds.min()[0]), nanos(bounds.max()[0]));
+        // range drawn is the one to query.
+        if self.drag_start.is_none() {
             let wanted = if follow {
-                interval
+                visible
             } else {
-                self.interval.unwrap_or(interval)
+                self.interval.unwrap_or(visible)
             };
             if differs(shown, wanted) {
                 self.follow = false;
                 self.interval = Some(shown);
-                self.invalidate();
+                self.requery();
             }
         }
-        self.overview(ui, &answer, interval, extent);
+        self.overview(ui, &answer, self.current().unwrap_or(visible), extent);
         if answer.view.lost_pairs > 0 {
             ui.label(
                 text(
@@ -916,6 +959,53 @@ impl Bench {
         if (footer - self.footer).abs() > 0.5 {
             self.footer = footer;
             ui.ctx().request_repaint();
+        }
+    }
+
+    /// Takes Y off the fit once the user moves it: a drag or the wheel past the detent, a drag on
+    /// the Y axis, or a box zoom. A double click fits it again.
+    fn y_gesture(
+        &mut self,
+        ui: &Ui,
+        response: &egui::Response,
+        fitted: Option<RangeInclusive<f64>>,
+        shown: RangeInclusive<f64>,
+    ) {
+        if response.double_clicked() {
+            self.y_fit = true;
+            return;
+        }
+        if !self.y_fit {
+            self.travel = 0.0;
+            return;
+        }
+        if let Some(fitted) = fitted
+            && (fitted.start() - shown.start()).abs() + (fitted.end() - shown.end()).abs()
+                > (fitted.end() - fitted.start()) * 1e-6
+        {
+            self.y_fit = false;
+            return;
+        }
+        let dragging = response.dragged_by(egui::PointerButton::Primary) && !self.select_mode;
+        let scroll = if response.contains_pointer() {
+            ui.input(|i| i.smooth_scroll_delta)
+        } else {
+            Vec2::ZERO
+        };
+        let delta = scroll
+            + if dragging {
+                response.drag_delta()
+            } else {
+                Vec2::ZERO
+            };
+        if !dragging && scroll == Vec2::ZERO {
+            self.travel = 0.0;
+        } else if delta.y.abs() > delta.x.abs() {
+            self.travel += delta.y;
+            if self.travel.abs() > DETENT {
+                self.y_fit = false;
+                self.carry = std::mem::take(&mut self.travel);
+            }
         }
     }
 
@@ -937,7 +1027,12 @@ impl Bench {
                 plot.set_plot_bounds_x(
                     seconds(extent.start_ns)..=seconds(extent.end_ns.max(extent.start_ns + 1)),
                 );
-                draw(plot, &answer.overview, self.quantity, color::TEXT_2);
+                draw(
+                    plot,
+                    &answer.overview.envelopes,
+                    self.quantity,
+                    color::TEXT_2,
+                );
                 plot.span(
                     Span::new(
                         "Visible",
@@ -955,7 +1050,7 @@ impl Bench {
             let start = center.saturating_sub(width / 2).max(extent.start_ns);
             self.interval = Some(Interval::new(start, start.saturating_add(width)));
             self.reset_bounds = true;
-            self.invalidate();
+            self.requery();
         }
         for (is_start, time) in [(true, interval.start_ns), (false, interval.end_ns)] {
             let x = overview.transform.position_from_point_x(seconds(time));
@@ -984,7 +1079,7 @@ impl Bench {
                 });
                 self.follow = false;
                 self.reset_bounds = true;
-                self.invalidate();
+                self.requery();
             }
         }
     }
@@ -1150,46 +1245,114 @@ const READINGS: [(&str, Reading); 9] = [
     ("charge", |_, s| si(s.charge_c(), "C")),
     ("energy", |_, s| si(s.energy_j(), "J")),
 ];
-fn draw(plot: &mut egui_plot::PlotUi<'_>, view: &View, quantity: Quantity, color: Color32) {
-    let mut points = Vec::with_capacity(view.envelopes.len() * 4);
-    let mut previous_end = None;
-    for bin in &view.envelopes {
-        let Some((low, high)) = quantity.extrema(&bin.statistics) else {
+/// Vertical travel, in points, before a drag or the wheel takes Y off the fit, so a pan along time
+/// that wanders a little leaves Y fitted.
+const DETENT: f32 = 12.0;
+
+/// The Y range that shows every bin in `x` and zero, with a margin.
+fn y_range(
+    answer: &Answer,
+    quantity: Quantity,
+    x: &RangeInclusive<f64>,
+) -> Option<RangeInclusive<f64>> {
+    let (start, end) = (nanos(*x.start()), nanos(*x.end()));
+    let (low, high) = answer
+        .view
+        .envelopes
+        .iter()
+        .chain(&answer.fallback)
+        .filter(|bin| bin.interval.end_ns > start && bin.interval.start_ns < end)
+        .filter_map(|bin| quantity.extrema(&bin.statistics))
+        .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))?;
+    let (low, high) = (low.min(0.0), high.max(0.0));
+    let margin = if high > low { (high - low) * 0.05 } else { 1.0 };
+    Some(low - margin..=high + margin)
+}
+
+/// A line as drawn: every point kept. egui_plot otherwise merges points less than a pixel apart into
+/// a filled band, which turns a step's vertical edge into a wedge reaching the next pixel.
+fn trace<'a>(line: Line<'a>, color: Color32) -> Line<'a> {
+    line.color(color).width(1.2).allow_band(false)
+}
+
+/// Each bin's range, from its least reading to its greatest, filled and edged. A pulse narrower
+/// than a bin still reaches its height in the bin that holds it, where a bin's mean would depend on
+/// how much of the pulse falls inside. A run of bins breaks where one was not wholly measured.
+fn draw(plot: &mut PlotUi<'_>, bins: &[Envelope], quantity: Quantity, color: Color32) {
+    let mut first = 0;
+    for next in 1..=bins.len() {
+        let joined = next < bins.len()
+            && !bins[next - 1].gap
+            && !bins[next].gap
+            && bins[next - 1].interval.end_ns == bins[next].interval.start_ns;
+        if joined {
             continue;
-        };
-        if (bin.gap || previous_end != Some(bin.interval.start_ns)) && !points.is_empty() {
-            plot.line(
-                Line::new("Measured envelope", std::mem::take(&mut points))
-                    .color(color)
-                    .width(1.2),
-            );
         }
-        let x = seconds(bin.interval.start_ns + bin.interval.duration_ns() / 2);
-        if !bin.gap {
-            points.push([seconds(bin.interval.start_ns), low]);
+        let mut xs = Vec::new();
+        let mut lows = Vec::new();
+        let mut highs = Vec::new();
+        for bin in &bins[first..next] {
+            let Some((low, high)) = quantity.extrema(&bin.statistics) else {
+                continue;
+            };
+            for time in [bin.interval.start_ns, bin.interval.end_ns] {
+                xs.push(seconds(time));
+                lows.push(low);
+                highs.push(high);
+            }
         }
-        points.push([x, low]);
-        points.push([x, high]);
-        if !bin.gap {
-            points.push([seconds(bin.interval.end_ns), high]);
+        first = next;
+        if xs.is_empty() {
+            continue;
         }
-        if bin.gap {
-            plot.line(
-                Line::new("Partial coverage", std::mem::take(&mut points))
-                    .color(color)
-                    .width(1.2),
-            );
-            previous_end = None;
-        } else {
-            previous_end = Some(bin.interval.end_ns);
+        plot.add(
+            FilledArea::new("Range", &xs, &lows, &highs)
+                .fill_color(color.gamma_multiply(0.45))
+                .allow_hover(false),
+        );
+        for (name, edge) in [("Least", &lows), ("Greatest", &highs)] {
+            let points: Vec<_> = xs.iter().zip(edge.iter()).map(|(&x, &y)| [x, y]).collect();
+            plot.line(trace(Line::new(name, points), color));
         }
     }
-    if !points.is_empty() {
-        plot.line(
-            Line::new("Measured envelope", points)
-                .color(color)
-                .width(1.2),
-        );
+}
+
+/// Each sample held for the time it covers, with a mark where it starts once the marks are far
+/// enough apart to tell.
+fn draw_samples(
+    plot: &mut PlotUi<'_>,
+    samples: &[Supported],
+    quantity: Quantity,
+    color: Color32,
+    x: &RangeInclusive<f64>,
+) {
+    let mut held = Vec::new();
+    let mut previous_end = None;
+    for sample in samples {
+        if previous_end != Some(sample.sample.time_ns) && !held.is_empty() {
+            plot.line(trace(
+                Line::new("Samples", std::mem::take(&mut held)),
+                color,
+            ));
+        }
+        let value = quantity.value(sample);
+        held.push([seconds(sample.sample.time_ns), value]);
+        held.push([seconds(sample.end_ns), value]);
+        previous_end = Some(sample.end_ns);
+    }
+    if !held.is_empty() {
+        plot.line(trace(Line::new("Samples", held), color));
+    }
+    let shown = samples
+        .iter()
+        .filter(|s| (x.start()..=x.end()).contains(&&seconds(s.sample.time_ns)))
+        .count();
+    if shown > 0 && f64::from(plot.transform().frame().width()) / shown as f64 >= 6.0 {
+        let marks: Vec<_> = samples
+            .iter()
+            .map(|s| [seconds(s.sample.time_ns), quantity.value(s)])
+            .collect();
+        plot.points(Points::new("Samples", marks).color(color).radius(2.5));
     }
 }
 #[cfg(test)]
@@ -1199,16 +1362,18 @@ mod tests {
     use verge_probe::capture::CaptureWriter;
     use verge_probe::stream::{End, EndReason, Header, Message, Pair, Pairs};
 
-    fn fixture(path: &Path) {
-        let header:Header=serde_json::from_value(serde_json::json!({"rate":1000,"setting_ma":350,"full_scale_mv":3300,"first_sequence":0,"previous_low":true,
+    /// `count` pairs at `rate`, each pair's current code from `code`; 65535 is 350 mA.
+    fn capture(path: &Path, rate: u32, count: u32, code: impl Fn(u32) -> u16) {
+        let header: Header = serde_json::from_value(serde_json::json!({"rate":rate,"setting_ma":350,"full_scale_mv":3300,"first_sequence":0,"previous_low":true,
             "low":[{"code":0,"current_nanoamps":0},{"code":65535,"current_nanoamps":350000000}],"high":[],"dio_mask":0,"dio_levels":0,"edge_resolution_ns":0})).unwrap();
+        let period = 1_000_000_000 / u64::from(rate);
         let mut writer = CaptureWriter::create(path).unwrap();
         writer.ingest(Message::Header(header)).unwrap();
-        for first in (0..20000u32).step_by(99) {
-            let pairs = (first..(first + 99).min(20000))
+        for first in (0..count).step_by(99) {
+            let pairs = (first..(first + 99).min(count))
                 .map(|i| Pair {
                     voltage_code: 32768,
-                    current_code: if i % 1000 < 30 { 3000 } else { 350 },
+                    current_code: code(i),
                     low: true,
                 })
                 .collect();
@@ -1216,7 +1381,7 @@ mod tests {
                 .ingest(Message::Pairs(Pairs::new(
                     0,
                     first,
-                    u64::from(first) * 1_000_000,
+                    u64::from(first) * period,
                     pairs,
                 )))
                 .unwrap();
@@ -1224,10 +1389,19 @@ mod tests {
         writer
             .ingest(Message::End(End {
                 reason: EndReason::Stopped,
-                last_sequence: 19999,
+                last_sequence: count - 1,
             }))
             .unwrap();
         writer.finish().unwrap();
+    }
+    /// 20 s at 1,000 pairs a second, with a 30 ms pulse each second.
+    fn fixture(path: &Path) {
+        capture(
+            path,
+            1000,
+            20_000,
+            |i| if i % 1000 < 30 { 3000 } else { 350 },
+        );
     }
     fn state(path: &Path) -> Bench {
         let mut bench = Bench::new(path.parent().unwrap());
@@ -1239,6 +1413,8 @@ mod tests {
     fn harness(bench: Bench, wgpu: bool) -> Harness<'static, Bench> {
         let mut builder = Harness::builder()
             .with_size(egui::vec2(1080.0, 700.0))
+            // A frame's time, so two clicks a few frames apart make a double click.
+            .with_step_dt(1.0 / 60.0)
             .with_context_setup(crate::style::install);
         if wgpu {
             builder = builder.wgpu();
@@ -1247,6 +1423,66 @@ mod tests {
             |ui, b: &mut Bench| b.show(ui, &[], &mut None, &mut crate::worker::Manual::default()),
             bench,
         )
+    }
+    /// The middle of the plot, right of the 300-point panel and under the toolbar.
+    const PLOT: egui::Pos2 = egui::pos2(700.0, 300.0);
+    fn press(h: &mut Harness<'_, Bench>, pos: egui::Pos2, pressed: bool) {
+        button(h, egui::PointerButton::Primary, pos, pressed);
+    }
+    fn button(
+        h: &mut Harness<'_, Bench>,
+        button: egui::PointerButton,
+        pos: egui::Pos2,
+        pressed: bool,
+    ) {
+        h.event(egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: Default::default(),
+        });
+        h.step();
+    }
+    /// Drags across the plot by `by`, in `steps` frames, letting queries run between them.
+    fn drag(h: &mut Harness<'_, Bench>, by: Vec2, steps: u32) {
+        drag_with(h, egui::PointerButton::Primary, by, steps, |_| {});
+    }
+    /// As `drag`, with `with`, calling `during` before the button is released.
+    fn drag_with(
+        h: &mut Harness<'_, Bench>,
+        with: egui::PointerButton,
+        by: Vec2,
+        steps: u32,
+        during: impl FnOnce(&mut Harness<'_, Bench>),
+    ) {
+        h.event(egui::Event::PointerMoved(PLOT));
+        h.step();
+        button(h, with, PLOT, true);
+        for step in 1..=steps {
+            h.event(egui::Event::PointerMoved(
+                PLOT + by * step as f32 / steps as f32,
+            ));
+            h.step();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        during(h);
+        button(h, with, PLOT + by, false);
+    }
+    fn shown(h: &Harness<'_, Bench>) -> egui_plot::PlotTransform {
+        h.state().shown.expect("a plot")
+    }
+    /// Steps until the answer on screen is for `visible`.
+    fn answered(h: &mut Harness<'_, Bench>, visible: Interval) -> Arc<Answer> {
+        for _ in 0..400 {
+            h.step();
+            if let Some(answer) = &h.state().answer
+                && answer.visible == visible
+            {
+                return answer.clone();
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!("no answer for {visible:?}");
     }
     fn wait(h: &mut Harness<'_, Bench>) {
         for _ in 0..400 {
@@ -1325,6 +1561,68 @@ mod tests {
         wait(&mut h);
         h.step();
         h.render().unwrap().save(dir.join("bench.png")).unwrap();
+        let visible = Interval::new(5_000_000_000, 5_040_000_000);
+        h.state_mut().inspect(visible, None);
+        answered(&mut h, visible);
+        h.step();
+        h.render()
+            .unwrap()
+            .save(dir.join("bench-samples.png"))
+            .unwrap();
+        // 2 ms of every 10 at 10,000 pairs a second, for 20 s.
+        let path = dir.join("dense.vergecapture");
+        if path.exists() {
+            std::fs::remove_file(&path).unwrap();
+        }
+        capture(&path, 10_000, 200_000, |i| {
+            if i % 100 < 20 { 3000 } else { 350 }
+        });
+        let mut bench = Bench::new(&dir);
+        bench.open(path);
+        let mut h = harness(bench, true);
+        wait(&mut h);
+        h.step();
+        h.render()
+            .unwrap()
+            .save(dir.join("bench-dense.png"))
+            .unwrap();
+        for (name, span) in [("1s", 1_000_000_000), ("100ms", 100_000_000)] {
+            let visible = Interval::new(5_000_000_000, 5_000_000_000 + span);
+            h.state_mut().inspect(visible, None);
+            answered(&mut h, visible);
+            h.step();
+            let file = format!("bench-dense-{name}.png");
+            h.render().unwrap().save(dir.join(file)).unwrap();
+        }
+        // 2 ms of every 10 at 1,000 pairs a second, with noise on both levels.
+        let path = dir.join("marker.vergecapture");
+        if path.exists() {
+            std::fs::remove_file(&path).unwrap();
+        }
+        capture(&path, 1000, 60_000, |i| {
+            let noise = (i.wrapping_mul(2_654_435_761) >> 24) as u16;
+            if i % 10 < 2 {
+                2900 + noise / 2
+            } else {
+                340 + noise / 16
+            }
+        });
+        let mut bench = Bench::new(&dir);
+        bench.open(path);
+        let mut h = harness(bench, true);
+        wait(&mut h);
+        for (name, span) in [
+            ("10s", 10_000_000_000),
+            ("2s", 2_000_000_000),
+            ("500ms", 500_000_000),
+        ] {
+            let visible = Interval::new(20_000_000_000, 20_000_000_000 + span);
+            h.state_mut().inspect(visible, None);
+            answered(&mut h, visible);
+            h.step();
+            let file = format!("bench-marker-{name}.png");
+            h.render().unwrap().save(dir.join(file)).unwrap();
+        }
     }
     #[test]
     fn zooming_the_plot_queries_the_range_it_shows() {
@@ -1334,11 +1632,10 @@ mod tests {
         let mut h = harness(state(&path), false);
         wait(&mut h);
         h.step();
-        let before = h.state().answer.as_ref().unwrap().view.interval;
+        let before = h.state().answer.as_ref().unwrap().visible;
         // In select mode, where only dragging is the selection's, the wheel still zooms.
         h.state_mut().select_mode = true;
-        // The middle of the plot, right of the 300-point panel and under the toolbar.
-        h.event(egui::Event::PointerMoved(egui::pos2(700.0, 300.0)));
+        h.event(egui::Event::PointerMoved(PLOT));
         h.step();
         h.event(egui::Event::Zoom(2.0));
         h.step();
@@ -1348,14 +1645,200 @@ mod tests {
             wanted.duration_ns() < before.duration_ns() * 3 / 4,
             "{wanted:?} from {before:?}"
         );
-        for _ in 0..200 {
+        answered(&mut h, wanted);
+    }
+    #[test]
+    fn moving_the_plot_up_keeps_it_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("demo.vergecapture");
+        fixture(&path);
+        let mut h = harness(state(&path), false);
+        wait(&mut h);
+        h.step();
+        let before = shown(&h);
+        assert!(h.state().y_fit);
+        h.event(egui::Event::PointerMoved(PLOT));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, 80.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            modifiers: Default::default(),
+        });
+        for _ in 0..60 {
             h.step();
-            if h.state().answered == h.state().generation {
+        }
+        assert!(!h.state().y_fit);
+        let moved = shown(&h);
+        assert!(
+            moved.bounds().min()[1] > before.bounds().min()[1],
+            "{:?} from {:?}",
+            moved.bounds(),
+            before.bounds()
+        );
+        // A new answer leaves the range where the wheel left it.
+        let earlier = h.state().answer.clone().unwrap();
+        h.state_mut().requery();
+        for _ in 0..400 {
+            h.step();
+            if !Arc::ptr_eq(h.state().answer.as_ref().unwrap(), &earlier) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(2));
         }
-        assert_eq!(h.state().answer.as_ref().unwrap().view.interval, wanted);
+        assert!(!Arc::ptr_eq(h.state().answer.as_ref().unwrap(), &earlier));
+        h.step();
+        assert_eq!(shown(&h).bounds().range_y(), moved.bounds().range_y());
+        // A double click fits it again.
+        h.event(egui::Event::PointerMoved(PLOT));
+        for _ in 0..2 {
+            press(&mut h, PLOT, true);
+            press(&mut h, PLOT, false);
+        }
+        h.step();
+        assert!(h.state().y_fit);
+        assert_eq!(shown(&h).bounds().range_y(), before.bounds().range_y());
+    }
+    #[test]
+    fn a_drag_along_time_leaves_y_fitted_and_a_vertical_one_moves_it_from_its_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("demo.vergecapture");
+        fixture(&path);
+        let mut h = harness(state(&path), false);
+        wait(&mut h);
+        h.step();
+        let before = shown(&h);
+        drag(&mut h, vec2(-200.0, 6.0), 10);
+        assert!(h.state().y_fit);
+        assert!(!h.state().follow);
+        let panned = shown(&h);
+        assert!(panned.bounds().min()[0] > before.bounds().min()[0]);
+        drag(&mut h, vec2(0.0, 60.0), 6);
+        h.step();
+        assert!(!h.state().y_fit);
+        let moved = shown(&h);
+        // All 60 points, the detent's included.
+        let points = (moved.bounds().min()[1] - panned.bounds().min()[1]) / moved.dvalue_dpos()[1];
+        assert!((points + 60.0).abs() < 1.0, "{points}");
+    }
+    #[test]
+    fn a_box_zoom_leaves_y_alone_until_it_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("demo.vergecapture");
+        fixture(&path);
+        let mut h = harness(state(&path), false);
+        wait(&mut h);
+        h.step();
+        let before = shown(&h);
+        drag_with(
+            &mut h,
+            egui::PointerButton::Secondary,
+            vec2(40.0, 120.0),
+            10,
+            |h| {
+                assert!(h.state().y_fit);
+                assert_eq!(shown(h).bounds().range_y(), before.bounds().range_y());
+            },
+        );
+        h.step();
+        assert!(!h.state().y_fit);
+        assert_ne!(shown(&h).bounds().range_y(), before.bounds().range_y());
+    }
+    #[test]
+    fn a_selection_started_straight_after_a_zoom_keeps_the_zoom() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("demo.vergecapture");
+        fixture(&path);
+        let mut h = harness(state(&path), false);
+        wait(&mut h);
+        h.step();
+        h.state_mut().select_mode = true;
+        h.event(egui::Event::PointerMoved(PLOT));
+        h.step();
+        h.event(egui::Event::Zoom(2.0));
+        h.step();
+        let zoomed = shown(&h).bounds().range_x();
+        drag_with(
+            &mut h,
+            egui::PointerButton::Primary,
+            vec2(60.0, 0.0),
+            3,
+            |_| {},
+        );
+        h.step();
+        // To the nanosecond the selection's interval holds.
+        let after = shown(&h).bounds().range_x();
+        assert!(
+            (after.start() - zoomed.start()).abs() < 1e-6
+                && (after.end() - zoomed.end()).abs() < 1e-6,
+            "{after:?} after zooming to {zoomed:?}"
+        );
+        let selection = h.state().selection.expect("a selection");
+        assert!(
+            selection.start_ns >= nanos(*zoomed.start())
+                && selection.end_ns <= nanos(*zoomed.end())
+        );
+    }
+    #[test]
+    fn answers_arrive_while_the_plot_is_still_moving() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("demo.vergecapture");
+        fixture(&path);
+        let mut h = harness(state(&path), false);
+        wait(&mut h);
+        h.step();
+        h.event(egui::Event::PointerMoved(PLOT));
+        h.step();
+        press(&mut h, PLOT, true);
+        let mut answers = std::collections::HashSet::new();
+        for step in 1..=40 {
+            h.event(egui::Event::PointerMoved(
+                PLOT - vec2(5.0 * step as f32, 0.0),
+            ));
+            h.step();
+            std::thread::sleep(Duration::from_millis(5));
+            let visible = h.state().answer.as_ref().unwrap().visible;
+            answers.insert((visible.start_ns, visible.end_ns));
+        }
+        press(&mut h, PLOT - vec2(200.0, 0.0), false);
+        assert!(
+            answers.len() > 3,
+            "{} answers during the drag",
+            answers.len()
+        );
+    }
+    #[test]
+    fn zoomed_in_the_answer_holds_samples_and_the_overview_fills_around_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("demo.vergecapture");
+        fixture(&path);
+        let mut h = harness(state(&path), false);
+        wait(&mut h);
+        let whole = h.state().answer.clone().unwrap();
+        assert!(whole.view.samples.is_none());
+        let visible = Interval::new(5_000_000_000, 5_050_000_000);
+        h.state_mut().inspect(visible, None);
+        let answer = answered(&mut h, visible);
+        // 50 ms visible, and 50 ms either side.
+        assert_eq!(answer.view.samples.as_ref().map(Vec::len), Some(150));
+        let covered = answer.view.interval;
+        assert!(
+            answer
+                .fallback
+                .iter()
+                .all(|bin| bin.interval.end_ns <= covered.start_ns
+                    || bin.interval.start_ns >= covered.end_ns)
+        );
+        let extent = answer.view.extent;
+        assert_eq!(
+            answer.fallback.first().unwrap().interval.start_ns,
+            extent.start_ns
+        );
+        assert_eq!(
+            answer.fallback.last().unwrap().interval.end_ns,
+            extent.end_ns
+        );
+        assert_eq!(answer.window.samples, 50);
     }
     #[test]
     fn a_capture_that_cannot_be_read_is_asked_for_once() {

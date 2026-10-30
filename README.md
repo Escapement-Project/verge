@@ -354,8 +354,12 @@ already runs a capture, RECORD RUNNING CAPTURE records it at its own rate. STOP 
 capture the window started, and leaves another host's running.
 
 The graph shows current, voltage or power. LIVE follows the newest pairs; INSPECT holds the view
-while recording carries on. Drag or scroll the graph to pan and zoom, or drag the window's marker
-in the overview under it. With SELECT on, dragging across the graph selects an interval; the left
+while recording carries on. Drag or scroll the graph to move along time, and ctrl-scroll or pinch
+to zoom; the window's marker in the overview under it drags too. The vertical axis fits what is
+visible until you move it: drag or scroll up or down, or drag along the axis to zoom it. FIT Y, or a
+double click, fits it again. Zoomed out, each column of the graph spans the lowest to the highest
+reading in its time, so a pulse shorter than a column keeps its height. Zoomed in, the graph marks
+each pair. With SELECT on, dragging across the graph selects an interval; the left
 panel sets its ends exactly and zooms to it. The panel measures the visible window and the
 selection: duration, pairs, minimum, mean and peak current, mean voltage and power, charge and
 energy. It shows how much of each was not measured. Time without measurements adds nothing to

@@ -3,21 +3,28 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use verge_probe::capture::{Archive, Interval, Statistics, View};
+use verge_probe::capture::{Archive, Envelope, Interval, Statistics, View};
 
 pub struct Query {
     pub generation: u64,
     pub path: PathBuf,
+    /// The range on screen; `None` follows the capture's end by `live_span`.
     pub interval: Option<Interval>,
     pub live_span: u64,
     pub selection: Option<Interval>,
     pub pixels: usize,
     pub cancel: Arc<AtomicBool>,
 }
-#[derive(Clone)]
 pub struct Answer {
+    /// The visible range and as much again either side, so a pan or a zoom out has bins to
+    /// draw before its own answer comes back.
     pub view: View,
+    pub visible: Interval,
+    /// The visible range's own statistics.
+    pub window: Statistics,
     pub overview: View,
+    /// The overview's bins where `view` has none of its own, drawn in their place.
+    pub fallback: Vec<Envelope>,
     pub selection: Option<(Interval, Statistics)>,
 }
 struct State {
@@ -94,7 +101,7 @@ impl Queries {
 fn run(query: &Query) -> Result<Answer> {
     let archive = Archive::open(&query.path)?;
     let extent = archive.extent()?;
-    let interval = query.interval.unwrap_or_else(|| {
+    let visible = query.interval.unwrap_or_else(|| {
         Interval::new(
             extent
                 .end_ns
@@ -103,16 +110,45 @@ fn run(query: &Query) -> Result<Answer> {
             extent.end_ns.max(extent.start_ns + 1),
         )
     });
-    let view = archive.view(interval, query.pixels, &query.cancel)?;
+    let width = visible.duration_ns();
+    let around = Interval::new(
+        visible.start_ns.saturating_sub(width),
+        visible.end_ns.saturating_add(width),
+    );
+    let view = archive.view(around, query.pixels.saturating_mul(3), &query.cancel)?;
+    let window = archive.statistics(visible, &query.cancel)?;
     let overview = archive.view(extent, 128, &query.cancel)?;
+    let fallback = overview
+        .envelopes
+        .iter()
+        .flat_map(|bin| outside(bin, around))
+        .collect();
     let selection = query
         .selection
         .map(|i| archive.statistics(i, &query.cancel).map(|s| (i, s)))
         .transpose()?;
     Ok(Answer {
         view,
+        visible,
+        window,
         overview,
+        fallback,
         selection,
+    })
+}
+/// The parts of `bin` before and after `covered`.
+fn outside(bin: &Envelope, covered: Interval) -> impl Iterator<Item = Envelope> + '_ {
+    let interval = bin.interval;
+    [
+        Interval::new(interval.start_ns, interval.end_ns.min(covered.start_ns)),
+        Interval::new(interval.start_ns.max(covered.end_ns), interval.end_ns),
+    ]
+    .into_iter()
+    .filter(|part| part.duration_ns() > 0)
+    .map(|part| Envelope {
+        interval: part,
+        statistics: bin.statistics.clone(),
+        gap: bin.gap,
     })
 }
 impl Drop for Queries {
