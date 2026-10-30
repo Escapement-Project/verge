@@ -230,6 +230,8 @@ fn stream<B: Bus, L: AuxLink>(
                 edges_lost += u64::from(message.lost());
                 writer.send(Output::Edges(message.edges))?;
             }
+            // How markers go into a CSV or a sigrok session is not decided yet.
+            Message::Markers(_) => {}
         }
     }
 }

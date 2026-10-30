@@ -594,7 +594,7 @@ impl Stream {
                         .context("streaming the restarted capture")?;
                 }
             }
-            Message::Edges(_) => {}
+            Message::Edges(_) | Message::Markers(_) => {}
         }
         Ok(())
     }
