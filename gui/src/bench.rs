@@ -475,7 +475,7 @@ impl Bench {
             let reason = self
                 .status
                 .as_ref()
-                .and_then(|s| s.dio_reason.clone().or_else(|| s.error.as_ref().map(|error| if error.contains("Verge Aux") { "Verge Aux is unavailable. Close the program holding it and reconnect.".into() } else { "Reconnect to an available Pro to use DIO.".into() })))
+                .and_then(|s| s.dio_reason.as_ref().map(ToString::to_string))
                 .or_else(|| {
                     chosen.and_then(|unit| {
                         pro::validate(unit, pro::Feature::Dio)
@@ -494,10 +494,7 @@ impl Bench {
                 for output in [false, true] {
                     let selected = (state.outputs & group != 0) == output;
                     let words = format!("{name} {}", if output { "output" } else { "input" });
-                    let response = ui.selectable_label(
-                        selected,
-                        text(Role::Data, if output { "Output" } else { "Input" }),
-                    );
+                    let response = choice(ui, if output { "Output" } else { "Input" }, selected);
                     response.widget_info(|| {
                         egui::WidgetInfo::labeled(
                             egui::Role::Button,
@@ -852,12 +849,18 @@ impl Bench {
             } else {
                 "DIO3"
             };
+            let warning = "Check that the target is not driving these pins. The probe cannot detect contention.";
             egui::Window::new(format!("Drive {group}?"))
-                .collapsible(false).resizable(false).show(ui.ctx(), |ui| {
-                    ui.label(text(Role::Body, "Check that the target is not driving these pins. The probe cannot detect contention."));
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.label(text(Role::Body, warning));
                     ui.horizontal(|ui| {
                         if outline(ui, "Drive pins", true).clicked() {
-                            backend.send(Request::Bench(Command::Dio { change, confirmed: true }));
+                            backend.send(Request::Bench(Command::Dio {
+                                change,
+                                confirmed: true,
+                            }));
                         }
                         if outline(ui, "Keep as inputs", true).clicked() {
                             backend.send(Request::Bench(Command::CancelDio));
@@ -1069,7 +1072,12 @@ impl Bench {
                 self.requery();
             }
         }
-        self.digital_lanes(ui, &answer.digital, &response.transform);
+        self.digital_lanes(
+            ui,
+            &answer.digital,
+            &answer.digital_fallback,
+            &response.transform,
+        );
         self.overview(ui, &answer, self.current().unwrap_or(visible), extent);
         if answer.view.lost_pairs > 0 {
             ui.label(
@@ -1085,8 +1093,13 @@ impl Bench {
                 text(
                     Role::Data,
                     format!(
-                        "{} DIO edge-loss reports in this capture",
-                        answer.digital.loss_events
+                        "{} DIO edge-loss {} in this capture",
+                        answer.digital.loss_events,
+                        if answer.digital.loss_events == 1 {
+                            "report"
+                        } else {
+                            "reports"
+                        }
                     ),
                 )
                 .color(color::ATTENTION),
@@ -1106,6 +1119,7 @@ impl Bench {
         &self,
         ui: &mut Ui,
         digital: &verge_probe::capture::DigitalView,
+        fallback: &[verge_probe::capture::DigitalBin],
         transform: &egui_plot::PlotTransform,
     ) {
         if digital.pins == 0 {
@@ -1143,7 +1157,7 @@ impl Bench {
                 color::TEXT_2,
             );
             let mut previous: Option<(f32, f32)> = None;
-            for bin in &digital.bins {
+            for bin in fallback.iter().chain(&digital.bins) {
                 let left = x(bin.interval.start_ns);
                 let right = x(bin.interval.end_ns);
                 if right < clip.left() || left > clip.right() {
@@ -2095,7 +2109,13 @@ mod tests {
     fn zoomed_in_the_answer_holds_samples_and_the_overview_fills_around_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("demo.vergecapture");
-        fixture(&path);
+        capture_with_dio(
+            &path,
+            1000,
+            20_000,
+            |i| if i % 1000 < 30 { 3000 } else { 350 },
+            true,
+        );
         let mut h = harness(state(&path), false);
         wait(&mut h);
         let whole = h.state().answer.clone().unwrap();
@@ -2121,6 +2141,14 @@ mod tests {
         assert_eq!(
             answer.fallback.last().unwrap().interval.end_ns,
             extent.end_ns
+        );
+        assert!(!answer.digital_fallback.is_empty());
+        assert!(
+            answer
+                .digital_fallback
+                .iter()
+                .all(|bin| bin.interval.end_ns <= covered.start_ns
+                    || bin.interval.start_ns >= covered.end_ns)
         );
         assert_eq!(answer.window.samples, 50);
     }

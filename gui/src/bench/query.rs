@@ -20,6 +20,7 @@ pub struct Answer {
     /// draw before its own answer comes back.
     pub view: View,
     pub digital: DigitalView,
+    pub digital_fallback: Vec<verge_probe::capture::DigitalBin>,
     pub visible: Interval,
     /// The visible range's own statistics.
     pub window: Statistics,
@@ -125,6 +126,19 @@ fn run(query: &Query) -> Result<Answer> {
         .iter()
         .flat_map(|bin| outside(bin, around))
         .collect();
+    let digital_overview = archive.digital(extent, 128, &query.cancel)?;
+    let digital_fallback = digital_overview
+        .bins
+        .iter()
+        .flat_map(|bin| {
+            outside_intervals(bin.interval, around).map(|interval| {
+                verge_probe::capture::DigitalBin {
+                    interval,
+                    ..bin.clone()
+                }
+            })
+        })
+        .collect();
     let selection = query
         .selection
         .map(|i| archive.statistics(i, &query.cancel).map(|s| (i, s)))
@@ -132,6 +146,7 @@ fn run(query: &Query) -> Result<Answer> {
     Ok(Answer {
         view,
         digital,
+        digital_fallback,
         visible,
         window,
         overview,
@@ -141,18 +156,19 @@ fn run(query: &Query) -> Result<Answer> {
 }
 /// The parts of `bin` before and after `covered`.
 fn outside(bin: &Envelope, covered: Interval) -> impl Iterator<Item = Envelope> + '_ {
-    let interval = bin.interval;
+    outside_intervals(bin.interval, covered).map(|part| Envelope {
+        interval: part,
+        statistics: bin.statistics.clone(),
+        gap: bin.gap,
+    })
+}
+fn outside_intervals(interval: Interval, covered: Interval) -> impl Iterator<Item = Interval> {
     [
         Interval::new(interval.start_ns, interval.end_ns.min(covered.start_ns)),
         Interval::new(interval.start_ns.max(covered.end_ns), interval.end_ns),
     ]
     .into_iter()
     .filter(|part| part.duration_ns() > 0)
-    .map(|part| Envelope {
-        interval: part,
-        statistics: bin.statistics.clone(),
-        gap: bin.gap,
-    })
 }
 impl Drop for Queries {
     fn drop(&mut self) {

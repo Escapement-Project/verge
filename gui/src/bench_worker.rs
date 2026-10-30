@@ -30,6 +30,37 @@ pub enum Command {
     Stop,
 }
 
+#[derive(Clone, Debug)]
+pub enum DioUnavailable {
+    Feature(String),
+    Aux,
+    Disconnected,
+}
+impl std::fmt::Display for DioUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Feature(reason) => f.write_str(reason),
+            Self::Aux => {
+                f.write_str("Verge Aux is unavailable. Close the program holding it and reconnect.")
+            }
+            Self::Disconnected => f.write_str("Reconnect to an available Pro to use DIO."),
+        }
+    }
+}
+impl DioUnavailable {
+    pub fn connection(error: &anyhow::Error) -> Self {
+        match error.downcast_ref::<pro::ProError>() {
+            Some(pro::ProError::Open {
+                interface: "Verge Aux",
+                source: verge_probe::bus::BusError::Busy { .. },
+                ..
+            }) => Self::Aux,
+            Some(error) => Self::Feature(error.to_string()),
+            None => Self::Disconnected,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Status {
     pub instance: String,
@@ -44,7 +75,7 @@ pub struct Status {
     pub confirm_off: bool,
     pub error: Option<String>,
     pub dio: Option<DioState>,
-    pub dio_reason: Option<String>,
+    pub dio_reason: Option<DioUnavailable>,
     pub confirm_dio: Option<DioChange>,
     pub edge_losses: u64,
 }
@@ -85,7 +116,7 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
             pro::Feature::Dio,
         )
         .err()
-        .map(|e| e.to_string());
+        .map(|e| DioUnavailable::Feature(e.to_string()));
         session.poll()?;
         Ok(session)
     }

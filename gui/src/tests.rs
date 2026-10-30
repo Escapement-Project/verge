@@ -1960,7 +1960,10 @@ fn bench_dio_explains_each_unavailable_state() {
     for (scenario, reason) in [
         ("ours-pro-old-aux", "predates DIO on Verge Aux"),
         ("ours-pro-j15", "remove J15"),
-        ("ours-pro-aux-taken", "Verge Aux"),
+        (
+            "ours-pro-aux-taken",
+            "Close the program holding it and reconnect.",
+        ),
         ("ours-plain", "not an MCU-Link Pro"),
     ] {
         let mut h = harness(sim_app(SimBus::scenario(scenario).unwrap(), vec![]));

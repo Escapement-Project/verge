@@ -539,6 +539,9 @@ fn serve<B: Bus + Sync, H: Http + Clone + Send + 'static>(
                             }
                             Err(error) => forward.send(Event::Bench(Status {
                                 instance: unit.device.instance.clone(),
+                                dio_reason: Some(crate::bench_worker::DioUnavailable::connection(
+                                    &error,
+                                )),
                                 error: Some(format!("{error:#}")),
                                 ..Status::default()
                             })),
