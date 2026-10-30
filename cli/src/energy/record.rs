@@ -184,7 +184,13 @@ fn stream<B: Bus, L: AuxLink>(
                     continue;
                 };
                 if let Some(next) = next_sequence {
-                    lost += skipped(next, pairs.first_sequence);
+                    let missing = skipped(next, pairs.first_sequence);
+                    lost += missing;
+                    if missing > 0
+                        && let Some(pair) = pairs.pairs.first()
+                    {
+                        converter.discontinuity(pair.low);
+                    }
                 }
                 next_sequence = Some(pairs.first_sequence.wrapping_add(pairs.pairs.len() as u32));
                 converter.add_message(&pairs);
