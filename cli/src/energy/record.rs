@@ -70,17 +70,11 @@ pub fn record<B: Bus, L: AuxLink>(
     // The probe answers before the file is touched, so a refused start leaves an earlier
     // recording there as it was.
     if running {
-        pro.stream_energy_capture(options.dio)
+        pro.stream_energy_capture_identified(options.dio)
             .with_context(|| format!("streaming {name}'s capture"))?;
-    } else if let Err(start) = pro.start_energy_stream(options.rate, options.dio) {
-        // The reply can be lost after the probe started, so stop what this may have started.
-        let start = anyhow!(start).context(format!("starting {name}'s capture"));
-        return Err(match pro.stop_energy_capture() {
-            Err(stop) if !fault(&stop) => {
-                anyhow!("{start:#}; stopping it again failed too: {stop}")
-            }
-            _ => start,
-        });
+    } else {
+        pro.start_energy_stream_identified(options.rate, options.dio)
+            .with_context(|| format!("starting {name}'s capture; completion may be uncertain"))?;
     }
     let started = !running;
     let sink = match Sink::create(&options.out, options.csv) {
@@ -108,10 +102,14 @@ pub fn record<B: Bus, L: AuxLink>(
 /// Leaves the probe as a recording found it: a capture the recording started stops, and the
 /// stream of a capture that ran before ends.
 fn leave<L: AuxLink>(name: &str, pro: &mut VergeControl<'_, Aux<L>>, started: bool) {
+    if !started && let Err(error) = super::bind_attached_capture(pro) {
+        tracing::warn!("could not identify {name}'s attached stream: {error}");
+        return;
+    }
     let left = if started {
-        pro.stop_energy_capture()
+        pro.stop_tracked_energy_capture()
     } else {
-        pro.end_energy_stream()
+        pro.end_tracked_energy_stream()
     };
     if let Err(left) = left {
         tracing::warn!("could not leave {name} as it was: {left}");
@@ -133,7 +131,8 @@ fn stream<B: Bus, L: AuxLink>(
     limit: Option<Duration>,
     cancel: &Cancel,
 ) -> Result<Recorded> {
-    let deadline = limit.map(|limit| bus.now() + limit);
+    let began = bus.now();
+    let deadline = limit.map(|limit| began + limit);
     let mut converter: Option<Converter> = None;
     let mut next_sequence = None;
     let mut lost = 0u64;
@@ -142,14 +141,18 @@ fn stream<B: Bus, L: AuxLink>(
     let mut held: Vec<Sample> = Vec::new();
     let (mut dio, mut edges, mut edges_lost) = (0u8, 0u64, 0u64);
     loop {
+        if converter.is_none() && bus.now().saturating_sub(began) >= END_WAIT {
+            bail!("{name} did not provide its capture header");
+        }
         if asked_at.is_none()
+            && converter.is_some()
             && (cancel.is_cancelled() || deadline.is_some_and(|deadline| bus.now() >= deadline))
         {
             if started {
-                pro.stop_energy_capture()
+                pro.stop_tracked_energy_capture()
                     .with_context(|| format!("stopping {name}'s capture"))?;
             } else {
-                pro.end_energy_stream()
+                pro.end_tracked_energy_stream()
                     .with_context(|| format!("ending {name}'s stream"))?;
             }
             asked_at = Some(bus.now());
@@ -169,6 +172,7 @@ fn stream<B: Bus, L: AuxLink>(
                 if converter.is_some() {
                     bail!("{name} began a second stream before ending the first");
                 }
+                pro.accept_energy_header(&header)?;
                 writer.send(Output::Begin {
                     rate: header.rate,
                     pins: header.dio_mask,
@@ -467,7 +471,15 @@ mod tests {
     struct Playback(std::collections::VecDeque<Option<Vec<u8>>>);
 
     impl AuxLink for Playback {
-        fn write(&mut self, _: &[u8]) -> Result<(), verge_probe::dap::LinkError> {
+        fn write(&mut self, request: &[u8]) -> Result<(), verge_probe::dap::LinkError> {
+            if request == [0x82] {
+                let mut info = b"\x82CJTAG\x06\x00\x00\x01".to_vec();
+                info.extend_from_slice(&0u32.to_le_bytes());
+                info.extend_from_slice(&257u32.to_le_bytes());
+                self.0.push_front(Some(info));
+            } else if request == [0x90, 10, 0] {
+                self.0.push_front(Some(vec![0x90, 0, 0]));
+            }
             Ok(())
         }
 
@@ -479,8 +491,14 @@ mod tests {
         }
     }
 
+    fn playback_control(aux: &mut Aux<Playback>) -> VergeControl<'_, Aux<Playback>> {
+        let mut control = VergeControl::new(aux);
+        control.stream_energy_capture_identified(0).unwrap();
+        control
+    }
+
     fn header() -> Vec<u8> {
-        let mut header = vec![0xA1, 1];
+        let mut header = vec![0xA1, 2];
         header.extend_from_slice(&1000u32.to_le_bytes());
         header.push(1);
         header.extend_from_slice(&3300u16.to_le_bytes());
@@ -495,6 +513,8 @@ mod tests {
         header.extend_from_slice(&table);
         header.extend_from_slice(&table);
         header.extend_from_slice(&[0; 4]);
+        header.extend_from_slice(&[0; 16]);
+        header.extend_from_slice(&1u64.to_le_bytes());
         header
     }
 
@@ -536,7 +556,7 @@ mod tests {
         let recorded = stream(
             &bus,
             "the unit",
-            &mut VergeControl::new(&mut aux),
+            &mut playback_control(&mut aux),
             &writer,
             false,
             None,
@@ -580,7 +600,7 @@ mod tests {
         stream(
             &verge_probe::sim::SimBus::default(),
             "unit",
-            &mut VergeControl::new(&mut aux),
+            &mut playback_control(&mut aux),
             &writer,
             false,
             None,
@@ -641,7 +661,7 @@ mod tests {
         let recorded = stream(
             &verge_probe::sim::SimBus::default(),
             "the unit",
-            &mut VergeControl::new(&mut aux),
+            &mut playback_control(&mut aux),
             &writer,
             false,
             None,
@@ -696,7 +716,7 @@ mod tests {
         let recorded = stream(
             &verge_probe::sim::SimBus::default(),
             "the unit",
-            &mut VergeControl::new(&mut aux),
+            &mut playback_control(&mut aux),
             &writer,
             false,
             None,
@@ -713,7 +733,7 @@ mod tests {
     impl AuxLink for RefuseStart {
         fn write(&mut self, request: &[u8]) -> Result<(), verge_probe::dap::LinkError> {
             let mut request = request.to_vec();
-            if request.starts_with(&[0x90, 5]) {
+            if request.starts_with(&[0x90, 9]) {
                 request[2..6].fill(0);
             }
             self.0.write(&request)
@@ -737,6 +757,89 @@ mod tests {
             limit: Some(Duration::from_millis(300)),
             csv,
             dio: 0,
+        }
+    }
+
+    #[test]
+    fn missing_header_times_out_even_while_pairs_keep_arriving() {
+        struct Headerless {
+            inner: verge_probe::sim::SimAux,
+            bus: verge_probe::sim::SimBus,
+        }
+        impl AuxLink for Headerless {
+            fn write(&mut self, request: &[u8]) -> Result<(), verge_probe::dap::LinkError> {
+                self.inner.write(request)
+            }
+            fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, verge_probe::dap::LinkError> {
+                self.bus.sleep(Duration::from_millis(100));
+                let message = self.inner.read(timeout)?;
+                Ok(if message.first() == Some(&0xa1) {
+                    pairs(1, 1)
+                } else {
+                    message
+                })
+            }
+        }
+        let (bus, device) = pro_link();
+        let mut aux = Aux::open(Headerless {
+            inner: bus.open_aux(&device).unwrap(),
+            bus: bus.clone(),
+        })
+        .unwrap();
+        let mut pro = VergeControl::new(&mut aux);
+        let dir = tempfile::tempdir().unwrap();
+        let result = record(
+            &bus,
+            "unit",
+            &mut pro,
+            &Options {
+                limit: Some(Duration::ZERO),
+                ..options(&dir.path().join("headerless.csv"), true)
+            },
+            &Cancel::new(),
+        )
+        .err()
+        .unwrap();
+        assert!(result.to_string().contains("capture header"), "{result:#}");
+        assert!(bus.now() < Duration::from_secs(4));
+        assert!(bus.log().iter().any(|line| line.contains("AUX 900b")));
+    }
+
+    #[test]
+    fn zero_duration_and_file_failure_end_an_attached_stream() {
+        for file_failure in [false, true] {
+            let bus = verge_probe::sim::SimBus::scenario("ours-pro-energy").unwrap();
+            let device = verge_probe::detect(&bus).unwrap().remove(0).device;
+            let dir = tempfile::tempdir().unwrap();
+            let out = if file_failure {
+                dir.path().to_owned()
+            } else {
+                dir.path().join("empty.csv")
+            };
+            let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+            let mut pro = VergeControl::new(&mut aux);
+            let result = record(
+                &bus,
+                "unit",
+                &mut pro,
+                &Options {
+                    limit: Some(Duration::ZERO),
+                    ..options(&out, true)
+                },
+                &Cancel::new(),
+            );
+            assert_eq!(result.is_err(), file_failure);
+            assert!(matches!(
+                pro.latest_energy_sample().unwrap(),
+                EnergyCaptureSample::Sample(_)
+            ));
+            let log = bus.log();
+            assert!(log.iter().any(|line| line.contains("AUX 900d")), "{log:?}");
+            assert!(
+                !log.iter()
+                    .any(|line| line.contains("AUX 900b") || line.ends_with("AUX 9002")),
+                "{log:?}"
+            );
         }
     }
 
@@ -780,7 +883,11 @@ mod tests {
             .into_iter()
             .filter_map(|line| line.split_once("AUX ").map(|(_, hex)| hex.to_owned()))
             .collect();
-        assert_eq!(log.last().map(String::as_str), Some("9002"), "{log:?}");
+        assert!(
+            log.last()
+                .is_some_and(|hex| hex.starts_with("900b") && hex.len() == 52),
+            "{log:?}"
+        );
     }
 
     #[test]

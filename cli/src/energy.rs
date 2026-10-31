@@ -138,6 +138,22 @@ fn with_pro<B: Bus, T>(
     verge_probe::pro::with_pro(bus, &unit, feature, f)
 }
 
+fn bind_attached_capture<T: verge_probe::pro::ProLink + ?Sized>(
+    pro: &mut VergeControl<'_, T>,
+) -> Result<()> {
+    if pro.tracked_capture_id().is_none() {
+        if !pro.awaiting_energy_header() {
+            bail!("no acknowledged attach is awaiting its capture header");
+        }
+        let message = pro.transport().message(Duration::from_secs(2))?;
+        let Some(verge_probe::stream::Message::Header(header)) = message else {
+            bail!("the attached stream did not provide its capture header");
+        };
+        pro.accept_energy_header(&header)?;
+    }
+    Ok(())
+}
+
 /// Whether the firmware keeps a running total.
 fn keeps_totals<T: VergeTransport + ?Sized>(pro: &mut VergeControl<'_, T>) -> bool {
     pro.info()
@@ -171,7 +187,7 @@ pub fn energy<B: Bus>(
     match command {
         EnergyCommand::Start { rate } => with_pro(bus, serial, energy, |name, pro| {
             let start = pro
-                .start_energy_capture(*rate)
+                .start_energy_capture_identified(*rate)
                 .with_context(|| format!("starting {name}'s capture"))?;
             let actual = start.actual_rate_pairs_per_second;
             let asked = if actual == *rate {
@@ -227,7 +243,13 @@ pub fn energy<B: Bus>(
         }),
         EnergyCommand::Stop => with_pro(bus, serial, energy, |name, pro| {
             // After a fault the stop still stops, and answers with the fault.
-            match pro.stop_energy_capture() {
+            let state = pro.energy_capture_status()?;
+            let stopped = match state.capture_id {
+                Some(id) => pro.stop_energy_capture_if(id),
+                None if !state.running => Ok(()),
+                None => bail!("{name} gave no identity for its running capture"),
+            };
+            match stopped {
                 Ok(()) | Err(CommandError::Firmware(EnergyError::DmaError)) => {}
                 Err(error) => {
                     return Err(error).with_context(|| format!("stopping {name}'s capture"));

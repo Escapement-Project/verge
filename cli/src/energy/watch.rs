@@ -391,28 +391,22 @@ pub fn watch<B: Bus>(
     let streams = pro.transport().streams();
     let started_at = if running {
         if streams {
-            pro.stream_energy_capture(0)
+            pro.stream_energy_capture_identified(0)
                 .with_context(|| format!("streaming {name}'s capture"))?;
         }
         None
     } else {
         let start = if streams {
-            pro.start_energy_stream(options.rate, 0)
+            pro.start_energy_stream_identified(options.rate, 0)
         } else {
-            pro.start_energy_capture(options.rate)
+            pro.start_energy_capture_identified(options.rate)
         };
         match start {
             Ok(start) => Some(start.actual_rate_pairs_per_second),
-            // The reply can be lost after the probe started, so stop what this may have started.
             Err(start) => {
-                let start = anyhow!(start).context(format!("starting {name}'s capture"));
-                let stop = pro.stop_energy_capture();
-                return Err(match stop {
-                    Err(stop) if !fault(&stop) => {
-                        anyhow!("{start:#}; stopping it again failed too: {stop}")
-                    }
-                    _ => start,
-                });
+                return Err(anyhow!(start).context(format!(
+                    "starting {name}'s capture; completion may be uncertain"
+                )));
             }
         }
     };
@@ -421,12 +415,14 @@ pub fn watch<B: Bus>(
     // The stream ends with the capture this started; one of a capture found running is ended
     // here, which leaves the capture running.
     let stopped = if model.started_here {
-        match pro.stop_energy_capture() {
+        match pro.stop_tracked_energy_capture() {
             Err(ref error) if fault(error) => Ok(()),
             stop => stop,
         }
+        .map_err(anyhow::Error::from)
     } else if streams {
-        pro.end_energy_stream()
+        super::bind_attached_capture(pro)
+            .and_then(|()| pro.end_tracked_energy_stream().map_err(Into::into))
     } else {
         Ok(())
     };
@@ -568,6 +564,7 @@ impl Stream {
     ) -> Result<()> {
         match message {
             Message::Header(header) => {
+                pro.accept_energy_header(&header)?;
                 self.converter = Some(Converter::new(&header));
                 self.rate = header.rate;
                 self.offset = None;
@@ -590,7 +587,7 @@ impl Stream {
                 // Another host's start, which may come before any total shows it.
                 if end.reason == EndReason::Restarted {
                     model.disown();
-                    pro.stream_energy_capture(0)
+                    pro.stream_energy_capture_identified(0)
                         .context("streaming the restarted capture")?;
                 }
             }
@@ -863,9 +860,32 @@ mod tests {
         let ended = watch(&bus, "CJ3E7A91C2", &mut pro, &options, &Cancel::new()).unwrap();
         assert!(ended.running);
         let log = aux_log(&bus);
-        let followed = log.iter().position(|hex| hex == "900600").unwrap();
-        let left = log.iter().rposition(|hex| hex == "9007").unwrap();
+        let followed = log.iter().position(|hex| hex == "900a00").unwrap();
+        let left = log.iter().rposition(|hex| hex.starts_with("900d")).unwrap();
         assert!(followed < left, "{log:?}");
+    }
+
+    #[test]
+    fn zero_duration_attach_still_ends_its_stream() {
+        let (bus, device) = pro_with_a_capture();
+        let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+        let mut pro: Pro<'_> = verge_probe::VergeControl::new(&mut aux);
+        let options = Options {
+            rate: 1000,
+            every: Duration::from_millis(100),
+            window: Duration::from_secs(30),
+            limit: Some(Duration::ZERO),
+        };
+        assert!(
+            watch(&bus, "unit", &mut pro, &options, &Cancel::new())
+                .unwrap()
+                .running
+        );
+        assert!(
+            aux_log(&bus)
+                .iter()
+                .any(|hex| hex.starts_with("900d") && hex.len() == 52)
+        );
     }
 
     /// The waits between reads take the stream: the target's 10 ms wakes at 5 mA show between its
@@ -875,7 +895,7 @@ mod tests {
         let (bus, device) = pro_with_a_capture();
         let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
         let mut pro: Pro<'_> = verge_probe::VergeControl::new(&mut aux);
-        pro.stream_energy_capture(0).unwrap();
+        pro.stream_energy_capture_identified(0).unwrap();
         let mut model = Model::new("CJ3E7A91C2", None, Duration::from_secs(30));
         let options = Options {
             rate: 1000,
@@ -961,7 +981,7 @@ mod tests {
         let log = aux_log(&bus);
         assert!(ended.running, "{log:?}");
         assert!(
-            log.iter().any(|hex| hex == "900600"),
+            log.iter().any(|hex| hex == "900a00"),
             "not followed: {log:?}"
         );
         assert!(!log.iter().any(|hex| hex == "9002"), "{log:?}");
@@ -980,7 +1000,7 @@ mod tests {
             .follow(&mut pro, &mut model, restarted, 1.0)
             .unwrap();
         assert!(model.started_here);
-        assert!(!aux_log(&bus).iter().any(|hex| hex == "900600"));
+        assert!(!aux_log(&bus).iter().any(|hex| hex == "900a00"));
     }
 
     #[test]

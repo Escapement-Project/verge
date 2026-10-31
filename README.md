@@ -368,6 +368,10 @@ energy total, and its calibration can interrupt target power for about 0.2 s. If
 already runs a capture, RECORD RUNNING CAPTURE records it at its own rate. STOP RECORDING stops a
 capture the window started, and leaves another host's running.
 
+Capture start, recording and watch require firmware with conditional capture stop. Each keeps the
+identity of the capture it started or attached to. Cleanup leaves a replacement capture running.
+A lost start reply can leave acquisition running; an explicit attach or `energy stop` resolves it.
+
 The graph shows current, voltage or power. LIVE follows the newest pairs; INSPECT holds the view
 while recording carries on. Drag or scroll the graph to move along time, and ctrl-scroll or pinch
 to zoom; the window's marker in the overview under it drags too. The vertical axis fits what is
