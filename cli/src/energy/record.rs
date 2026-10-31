@@ -10,7 +10,7 @@ use crate::output::outputln;
 use anyhow::{Context, Result, anyhow, bail};
 use verge_probe::aux::{Aux, AuxLink};
 use verge_probe::record::Sink;
-use verge_probe::stream::{Converter, Edge, EndReason, Message, Sample, Total};
+use verge_probe::stream::{Converter, Edge, EndReason, Markers, Message, Sample, Total};
 use verge_probe::{Bus, Cancel, CommandError, EnergyCaptureSample, EnergyError, VergeControl};
 
 pub struct Options {
@@ -230,8 +230,11 @@ fn stream<B: Bus, L: AuxLink>(
                 edges_lost += u64::from(message.lost());
                 writer.send(Output::Edges(message.edges))?;
             }
-            // How markers go into a CSV or a sigrok session is not decided yet.
-            Message::Markers(_) => {}
+            Message::Markers(markers) => {
+                if converter.is_some() {
+                    writer.send(Output::Markers(markers))?;
+                }
+            }
         }
     }
 }
@@ -241,6 +244,7 @@ enum Output {
     Begin { rate: u32, pins: u8, levels: u8 },
     Pairs(Vec<Sample>),
     Edges(Vec<Edge>),
+    Markers(Markers),
 }
 
 /// The file, written on a thread of its own. Writing a sigrok chunk takes long enough that the
@@ -256,9 +260,13 @@ impl Writer {
         let thread = thread::spawn(move || {
             for output in receive {
                 match output {
-                    Output::Begin { rate, pins, levels } => sink.begin(rate, pins, levels)?,
+                    Output::Begin { rate, pins, levels } => {
+                        sink.include_markers()?;
+                        sink.begin(rate, pins, levels)?;
+                    }
                     Output::Pairs(samples) => sink.samples(&samples)?,
                     Output::Edges(edges) => sink.edges(edges),
+                    Output::Markers(markers) => sink.markers(&markers)?,
                 }
             }
             Ok(sink.finish()?)
@@ -545,6 +553,50 @@ mod tests {
             .map(|line| line.split(',').next().unwrap().to_owned())
             .collect();
         assert_eq!(sequences, ["1", "2", "3", "6", "7"]);
+    }
+
+    #[test]
+    fn late_stream_markers_are_exported_in_time_order() {
+        let mut marker = vec![0xa4, 1, 1];
+        marker.extend_from_slice(&500_000u64.to_le_bytes());
+        marker.extend_from_slice(&42u32.to_le_bytes());
+        marker.push(8);
+        marker.extend_from_slice(b"step,one");
+        let mut end = vec![0xa2, 2];
+        end.extend_from_slice(&6u32.to_le_bytes());
+        let messages = [
+            Some(vec![0x90, 0, 0]),
+            None,
+            Some(header()),
+            Some(pairs(1, 3)),
+            Some(pairs(4, 3)),
+            Some(marker),
+            Some(end),
+        ];
+        let mut aux = Aux::open(Playback(messages.into_iter().collect())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("markers.csv");
+        let writer = Writer::spawn(Sink::create(&path, true).unwrap());
+        stream(
+            &verge_probe::sim::SimBus::default(),
+            "unit",
+            &mut VergeControl::new(&mut aux),
+            &writer,
+            false,
+            None,
+            &Cancel::new(),
+        )
+        .unwrap();
+        writer.finish().unwrap();
+        let csv = std::fs::read_to_string(path).unwrap();
+        assert!(csv.contains("marker_number,marker_label,marker_lost"));
+        assert!(csv.contains(",500000,,,42,\"step,one\",1"), "{csv}");
+        let times: Vec<u64> = csv
+            .lines()
+            .skip(1)
+            .map(|row| row.split(',').nth(1).unwrap().parse().unwrap())
+            .collect();
+        assert!(times.windows(2).all(|pair| pair[0] <= pair[1]), "{csv}");
     }
 
     fn header_with_dio(pins: u8, levels: u8) -> Vec<u8> {

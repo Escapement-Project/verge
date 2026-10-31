@@ -1572,7 +1572,12 @@ fn csv_lines(path: &std::path::Path) -> Vec<Vec<u64>> {
         .unwrap()
         .lines()
         .skip(1)
-        .map(|line| line.split(',').map(|v| v.parse().unwrap()).collect())
+        .map(|line| {
+            line.split(',')
+                .take(4)
+                .map(|v| v.parse().unwrap())
+                .collect()
+        })
         .collect()
 }
 
@@ -1592,7 +1597,9 @@ fn energy_record_writes_every_pair_and_leaves_a_running_capture() {
         .stdout
         .clone();
     let text = std::fs::read_to_string(&out).unwrap();
-    assert!(text.starts_with("sequence,time_ns,millivolts,nanoamps\n"));
+    assert!(text.starts_with(
+        "sequence,time_ns,millivolts,nanoamps,marker_number,marker_label,marker_lost\n"
+    ));
     let lines = csv_lines(&out);
     assert!(lines.len() >= 1000, "{} pairs", lines.len());
     assert!(
@@ -1629,7 +1636,7 @@ fn energy_record_lines_up_dio_edges_with_the_pairs() {
     let mut lines = text.lines();
     assert_eq!(
         lines.next(),
-        Some("sequence,time_ns,millivolts,nanoamps,dio3")
+        Some("sequence,time_ns,millivolts,nanoamps,dio3,marker_number,marker_label,marker_lost")
     );
     let rows: Vec<Vec<&str>> = lines.map(|line| line.split(',').collect()).collect();
     let times: Vec<u64> = rows.iter().map(|row| row[1].parse().unwrap()).collect();
