@@ -607,6 +607,87 @@ mod hardware {
         }
         panic!("bench state timeout: {:?}", h.state().bench.status);
     }
+
+    #[test]
+    #[ignore = "uses USB; VERGE_BENCH_SERIAL and VERGE_BENCH_OUT required"]
+    fn bench_markers() {
+        use verge_probe::{DapTransport, Marked};
+        let serial = std::env::var("VERGE_BENCH_SERIAL").expect("explicit Pro serial");
+        let directory =
+            PathBuf::from(std::env::var("VERGE_BENCH_OUT").expect("capture output directory"));
+        std::fs::create_dir_all(&directory).unwrap();
+        let bus = UsbBus::default();
+        let unit = detect_named(&bus, Some(&serial)).unwrap().remove(0);
+        let mut debugger = bus.open_dap(&unit.device).expect("CMSIS-DAP for markers");
+        for rate in [1000, 100_000] {
+            let mut session = Session::open(&bus, &unit).unwrap();
+            assert!(
+                !session.status().capturing,
+                "leave an existing capture to its owner"
+            );
+            assert!(session.status().supply, "target supply must already be on");
+            assert_eq!(session.status().dio.as_ref().unwrap().outputs & 8, 0);
+            let path = directory.join(format!("markers-{rate}.vergecapture"));
+            assert!(session.command(Command::Start {
+                rate,
+                path: path.clone()
+            }));
+            assert!(session.status().error.is_none(), "{:?}", session.status());
+            let mut sent = 0;
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_secs(3) {
+                session.tick().unwrap();
+                if sent < 6 && start.elapsed() >= Duration::from_millis(200 + 300 * u64::from(sent))
+                {
+                    let mut transport = DapTransport(&mut debugger);
+                    let mut control = VergeControl::new(&mut transport);
+                    assert_eq!(
+                        control
+                            .mark(40 + sent, format!("debug step,{sent}").as_bytes())
+                            .unwrap(),
+                        Marked::Sent
+                    );
+                    sent += 1;
+                }
+            }
+            session.close().unwrap();
+            let archive = Archive::open(&path).unwrap();
+            let cancel = AtomicBool::new(false);
+            let extent = archive.extent().unwrap();
+            let markers = archive.markers(extent, None, 20, &cancel).unwrap();
+            assert_eq!((sent, markers.total, markers.loss_events), (6, 6, 0));
+            assert_eq!(
+                markers
+                    .entries
+                    .iter()
+                    .map(|entry| entry.marker.number)
+                    .collect::<Vec<_>>(),
+                (40..46).collect::<Vec<_>>()
+            );
+            let view = archive.view(extent, 800, &cancel).unwrap();
+            assert!(view.statistics.samples >= 2 * u64::from(rate));
+            assert_eq!(view.lost_pairs, 0);
+            assert_eq!(
+                archive.digital(extent, 800, &cancel).unwrap().loss_events,
+                0
+            );
+            for csv in [true, false] {
+                let output =
+                    directory.join(format!("markers-{rate}.{}", if csv { "csv" } else { "sr" }));
+                archive.export(&output, csv, extent, &cancel).unwrap();
+                if csv {
+                    let text = std::fs::read_to_string(output).unwrap();
+                    for n in 0..6 {
+                        assert!(text.contains(&format!("debug step,{n}")));
+                    }
+                }
+            }
+            eprintln!(
+                "markers at {rate} pairs/s: {} pairs, {} lost; {} markers, {} loss reports",
+                view.statistics.samples, view.lost_pairs, markers.total, markers.loss_events
+            );
+        }
+    }
     /// Opt-in; the caller must hold the shared bench and authorize target power cycling.
     #[test]
     #[ignore = "uses USB and target power; VERGE_BENCH_SERIAL and VERGE_BENCH_OUT required"]
@@ -874,6 +955,56 @@ mod dio_tests {
     use std::sync::atomic::AtomicBool;
     use verge_probe::capture::{Archive, Interval};
     use verge_probe::sim::SimBus;
+
+    #[test]
+    fn debugger_markers_survive_gui_recording_and_both_exports() {
+        use verge_probe::{Bus, DapTransport, Marked};
+        let bus = SimBus::scenario("ours-pro").unwrap().paced(0.1);
+        let unit = verge_probe::detect(&bus).unwrap().remove(0);
+        let mut session = Session::open(&bus, &unit).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("markers.vergecapture");
+        assert!(session.command(Command::Start {
+            rate: 1000,
+            path: path.clone()
+        }));
+        for _ in 0..5 {
+            session.tick().unwrap();
+        }
+        {
+            let mut link = bus.open_dap(&unit.device).unwrap();
+            let mut transport = DapTransport(&mut link);
+            let mut control = VergeControl::new(&mut transport);
+            assert_eq!(control.mark(42, b"debug step").unwrap(), Marked::Sent);
+            assert_eq!(control.mark(43, b"resume").unwrap(), Marked::Sent);
+        }
+        for _ in 0..10 {
+            session.tick().unwrap();
+        }
+        session.close().unwrap();
+        let archive = Archive::open(&path).unwrap();
+        let cancel = AtomicBool::new(false);
+        let extent = archive.extent().unwrap();
+        let page = archive.markers(extent, None, 10, &cancel).unwrap();
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|entry| entry.marker.number)
+                .collect::<Vec<_>>(),
+            [42, 43]
+        );
+        for csv in [true, false] {
+            let out = dir
+                .path()
+                .join(if csv { "markers.csv" } else { "markers.sr" });
+            archive.export(&out, csv, extent, &cancel).unwrap();
+            if csv {
+                assert!(std::fs::read_to_string(out).unwrap().contains("debug step"));
+            } else {
+                assert!(std::fs::metadata(out).unwrap().len() > 0);
+            }
+        }
+    }
 
     #[test]
     fn dio_polling_group_confirmation_and_split_refusal() {

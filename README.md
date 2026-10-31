@@ -169,6 +169,18 @@ recording adds up to that total. `--csv` writes one line per pair instead: its s
 time in ns since the capture started, millivolts and nanoamps. A Verge image older than Verge Aux
 cannot record.
 
+Markers from a debug session keep their own times. CSV gives each marker a row with its number
+and label, in time order among pairs and edges. A sigrok session includes `markers.csv`; PulseView
+does not draw it as an annotation track. Resaving with sigrok drops that extra file, so keep the
+original session to retain markers. Labels keep UTF-8 text. Backslashes, control characters
+and other bytes are escaped. `marker_lost` reports missing markers; an empty time means the probe
+reported loss without a marker to locate it. Those unlocated reports apply to the whole capture,
+including a selection export. CSV writes pairs and edges as they arrive, then merges markers when
+recording ends. Before that merge, an interrupted recording keeps the pairs and edges written
+so far. The final CSV rewrite is not atomic. The sigrok
+sidecar also gives each marker's `session_time_ns`, relative to the exported session's first
+sample. It can be negative when a marker precedes that sample.
+
 `read` reads target memory through a probe over SWD, JTAG or two-pin cJTAG, and prints the table
 probe-rs's `read` prints: each line is an address and eight values, four for `b64`. It picks among
 every probe probe-rs can drive, not only MCU-Links. Set the clock in kHz with `--speed`. `--time`
@@ -377,6 +389,10 @@ out, a lane keeps short pulses visible. Missing edges leave breaks and an edge-l
 Exports include DIO levels and a DIO_GAP channel (dio_gap in CSV) for time whose levels are unknown.
 An export keeps whole pairs at its edges, with their own times, so it can start a little before
 the selection.
+
+Markers appear as labelled lines on the graph and in a paged list. Picking a marker centres the
+view on it. SELECT TO NEXT MARKER selects the span to the following marker for measurement.
+The panel reports marker loss. Both export formats keep markers as `energy record` does.
 
 ### Releases
 

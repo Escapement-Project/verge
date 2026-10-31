@@ -93,6 +93,8 @@ pub struct Bench {
     answer: Option<Arc<Answer>>,
     interval: Option<Interval>,
     selection: Option<Interval>,
+    marker_after: Option<verge_probe::capture::MarkerCursor>,
+    marker_selected: Option<verge_probe::capture::MarkerCursor>,
     span: u64,
     follow: bool,
     quantity: Quantity,
@@ -146,6 +148,8 @@ impl Bench {
             answer: None,
             interval: None,
             selection: None,
+            marker_after: None,
+            marker_selected: None,
             span: 10_000_000_000,
             follow: true,
             quantity: Quantity::Current,
@@ -238,6 +242,8 @@ impl Bench {
     }
     fn open(&mut self, path: PathBuf) {
         self.path = Some(path);
+        self.marker_after = None;
+        self.marker_selected = None;
         self.interval = None;
         self.selection = None;
         self.answer = None;
@@ -356,6 +362,8 @@ impl Bench {
                 interval: if self.follow { None } else { self.interval },
                 live_span: self.span,
                 selection: self.selection,
+                marker_after: self.marker_after,
+                marker_selected: self.marker_selected,
                 pixels: ui.available_width().max(64.0) as usize,
                 cancel: Arc::new(AtomicBool::new(false)),
             });
@@ -459,6 +467,7 @@ impl Bench {
             edged(ui, color::ATTENTION, &notice);
         }
         self.dio(ui, chosen, backend);
+        self.markers(ui);
         self.measurements(ui);
         self.kept(ui);
     }
@@ -568,6 +577,101 @@ impl Bench {
             )
             .color(color::TEXT_2),
         );
+    }
+
+    fn markers(&mut self, ui: &mut Ui) {
+        let Some(answer) = self.answer.clone() else {
+            return;
+        };
+        let page = &answer.marker_list;
+        if page.total == 0 && page.loss_events == 0 {
+            return;
+        }
+        ui.add_space(space::L);
+        label(ui, "markers");
+        ui.label(text(Role::Data, format!("{} received", page.total)));
+        if page.loss_events > 0 {
+            ui.label(
+                text(
+                    Role::Body,
+                    format!(
+                        "{} marker-loss {}. Some markers are missing.",
+                        page.loss_events,
+                        if page.loss_events == 1 {
+                            "report"
+                        } else {
+                            "reports"
+                        }
+                    ),
+                )
+                .color(color::ATTENTION),
+            );
+        }
+        ScrollArea::vertical()
+            .id_salt("marker-list")
+            .max_height(150.0)
+            .show(ui, |ui| {
+                for entry in &page.entries {
+                    let cursor = verge_probe::capture::MarkerCursor {
+                        time_ns: entry.marker.time_ns,
+                        id: entry.id,
+                    };
+                    let words = format!(
+                        "{:.6}s · {} · {}",
+                        seconds(entry.marker.time_ns),
+                        entry.marker.number,
+                        verge_probe::record::marker_label(&entry.marker.label)
+                    );
+                    let response = ui.add(
+                        egui::Button::new(text(Role::Data, words))
+                            .selected(self.marker_selected == Some(cursor))
+                            .wrap(),
+                    );
+                    if response.clicked() {
+                        self.marker_selected = Some(cursor);
+                        let width = self
+                            .current()
+                            .map_or(self.span, Interval::duration_ns)
+                            .max(1);
+                        let start = cursor.time_ns.saturating_sub(width / 2);
+                        self.inspect(
+                            Interval::new(start, start.saturating_add(width)),
+                            self.selection,
+                        );
+                    }
+                    if entry.lost_before {
+                        ui.label(
+                            text(Role::Body, "Markers lost before this one")
+                                .color(color::ATTENTION),
+                        );
+                    }
+                }
+            });
+        ui.horizontal(|ui| {
+            if outline(ui, "First", self.marker_after.is_some()).clicked() {
+                self.marker_after = None;
+                self.invalidate();
+            }
+            if outline(ui, "Next", page.next.is_some()).clicked() {
+                self.marker_after = page.next;
+                self.invalidate();
+            }
+        });
+        let successor = answer
+            .marker_successor
+            .as_ref()
+            .filter(|_| answer.marker_selected == self.marker_selected);
+        if outline(
+            ui,
+            "Select to next marker",
+            self.marker_selected.is_some() && successor.is_some(),
+        )
+        .clicked()
+            && let (Some(start), Some(end)) = (self.marker_selected, successor)
+        {
+            self.selection = Some(Interval::new(start.time_ns, end.marker.time_ns));
+            self.invalidate();
+        }
     }
 
     fn supply(&mut self, ui: &mut Ui, status: &Status, backend: &mut dyn Backend) {
@@ -1072,6 +1176,7 @@ impl Bench {
                 self.requery();
             }
         }
+        self.draw_markers(ui, &answer.markers, &response.transform);
         self.digital_lanes(
             ui,
             &answer.digital,
@@ -1112,6 +1217,77 @@ impl Bench {
         if (footer - self.footer).abs() > 0.5 {
             self.footer = footer;
             ui.ctx().request_repaint();
+        }
+    }
+
+    fn draw_markers(
+        &self,
+        ui: &mut Ui,
+        page: &verge_probe::capture::MarkerPage,
+        transform: &egui_plot::PlotTransform,
+    ) {
+        let frame = *transform.frame();
+        let painter = ui.painter().with_clip_rect(frame);
+        let mut occupied = [frame.left() - 1.0; 3];
+        for entry in &page.entries {
+            let x = transform
+                .position_from_point(&egui_plot::PlotPoint::new(
+                    seconds(entry.marker.time_ns),
+                    0.0,
+                ))
+                .x;
+            if x < frame.left() || x > frame.right() {
+                continue;
+            }
+            painter.line_segment(
+                [egui::pos2(x, frame.top()), egui::pos2(x, frame.bottom())],
+                Stroke::new(1.0, color::ATTENTION.gamma_multiply(0.65)),
+            );
+            let label = format!(
+                "{} {}",
+                entry.marker.number,
+                verge_probe::record::marker_label(&entry.marker.label)
+            );
+            let galley = painter.layout_no_wrap(
+                label.clone(),
+                egui::FontId::monospace(11.0),
+                color::ATTENTION,
+            );
+            let left = (x + 3.0)
+                .min(frame.right() - galley.size().x)
+                .max(frame.left());
+            if let Some((row, right)) = occupied
+                .iter_mut()
+                .enumerate()
+                .find(|(_, right)| **right < left)
+            {
+                let pos = egui::pos2(left, frame.top() + 4.0 + row as f32 * 16.0);
+                painter.rect_filled(
+                    egui::Rect::from_min_size(pos, galley.size()),
+                    0,
+                    color::BACKGROUND,
+                );
+                *right = left + galley.size().x + 8.0;
+                painter.galley(pos, galley, color::ATTENTION);
+            }
+            ui.interact(
+                egui::Rect::from_min_max(
+                    egui::pos2(x - 3.0, frame.top()),
+                    egui::pos2(x + 3.0, frame.bottom()),
+                ),
+                ui.scope_id().with(("marker", entry.id)),
+                egui::Sense::hover(),
+            )
+            .on_hover_text(format!("{:.6}s · {label}", seconds(entry.marker.time_ns)));
+        }
+        if page.next.is_some() {
+            painter.text(
+                frame.left_bottom() + vec2(6.0, -6.0),
+                egui::Align2::LEFT_BOTTOM,
+                "More markers: zoom in or use the list",
+                egui::FontId::monospace(11.0),
+                color::ATTENTION,
+            );
         }
     }
 
@@ -1615,6 +1791,16 @@ mod tests {
         capture_with_dio(path, rate, count, code, false);
     }
     fn capture_with_dio(path: &Path, rate: u32, count: u32, code: impl Fn(u32) -> u16, dio: bool) {
+        capture_events(path, rate, count, code, dio, &[]);
+    }
+    fn capture_events(
+        path: &Path,
+        rate: u32,
+        count: u32,
+        code: impl Fn(u32) -> u16,
+        dio: bool,
+        markers: &[verge_probe::stream::Marker],
+    ) {
         let header: Header = serde_json::from_value(serde_json::json!({"rate":rate,"setting_ma":350,"full_scale_mv":3300,"first_sequence":0,"previous_low":true,
             "low":[{"code":0,"current_nanoamps":0},{"code":65535,"current_nanoamps":350000000}],"high":[],"dio_mask":if dio {15} else {0},"dio_levels":if code(0)>1000 {8} else {0},"edge_resolution_ns":11})).unwrap();
         let period = 1_000_000_000 / u64::from(rate);
@@ -1662,6 +1848,18 @@ mod tests {
                         .unwrap();
                 }
             }
+        }
+        for (index, chunk) in markers.chunks(11).enumerate() {
+            writer
+                .ingest(Message::Markers(verge_probe::stream::Markers::new(
+                    if index == 0 {
+                        verge_probe::stream::Markers::LOST
+                    } else {
+                        0
+                    },
+                    chunk.to_vec(),
+                )))
+                .unwrap();
         }
         writer
             .ingest(Message::End(End {
@@ -1806,6 +2004,8 @@ mod tests {
                 path: path.clone(),
                 interval: None,
                 live_span: 10_000_000_000,
+                marker_after: None,
+                marker_selected: None,
                 selection: Some(Interval::new(
                     generation * 1_000_000,
                     generation * 1_000_000 + 1_000_000,
@@ -1876,7 +2076,7 @@ mod tests {
         if path.exists() {
             std::fs::remove_file(&path).unwrap();
         }
-        capture_with_dio(
+        capture_events(
             &path,
             1000,
             60_000,
@@ -1889,6 +2089,28 @@ mod tests {
                 }
             },
             true,
+            &[
+                verge_probe::stream::Marker {
+                    time_ns: 20_050_000_000,
+                    number: 7,
+                    label: b"wake, read sensor".to_vec(),
+                },
+                verge_probe::stream::Marker {
+                    time_ns: 20_200_000_000,
+                    number: 8,
+                    label: b"transmit".to_vec(),
+                },
+                verge_probe::stream::Marker {
+                    time_ns: 21_300_000_000,
+                    number: 9,
+                    label: b"sleep".to_vec(),
+                },
+                verge_probe::stream::Marker {
+                    time_ns: 26_000_000_000,
+                    number: 10,
+                    label: b"label with all thirty-two bytes!!".to_vec(),
+                },
+            ],
         );
         let archive = Archive::open(&path).unwrap();
         for csv in [true, false] {
@@ -1922,6 +2144,90 @@ mod tests {
             h.render().unwrap().save(dir.join(file)).unwrap();
         }
     }
+    #[test]
+    fn marker_pick_centres_view_and_selects_to_next_across_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("markers.vergecapture");
+        let markers: Vec<_> = (0..30)
+            .map(|number| verge_probe::stream::Marker {
+                time_ns: u64::from(number + 1) * 1_000_000_000,
+                number,
+                label: format!("step {number}").into_bytes(),
+            })
+            .collect();
+        capture_events(&path, 1000, 40_000, |_| 350, true, &markers);
+        let mut bench = Bench::new(dir.path());
+        bench.open(path);
+        let mut h = harness(bench, false);
+        wait(&mut h);
+        assert_eq!(
+            h.state().answer.as_ref().unwrap().marker_list.entries.len(),
+            24
+        );
+        h.step();
+        h.get_by_label("24.000000s · 23 · step 23").scroll_to_me();
+        for _ in 0..20 {
+            h.step();
+        }
+        h.get_by_label("24.000000s · 23 · step 23").click();
+        h.step();
+        let wanted = h.state().interval.unwrap();
+        assert_eq!(wanted, Interval::new(19_000_000_000, 29_000_000_000));
+        answered(&mut h, wanted);
+        h.get_by_label("SELECT TO NEXT MARKER").scroll_to_me();
+        h.step();
+        h.get_by_label("SELECT TO NEXT MARKER").click();
+        h.step();
+        for _ in 0..400 {
+            h.step();
+            if h.state()
+                .answer
+                .as_ref()
+                .unwrap()
+                .selection
+                .as_ref()
+                .is_some_and(|(i, _)| *i == Interval::new(24_000_000_000, 25_000_000_000))
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let selection = h
+            .state()
+            .answer
+            .as_ref()
+            .unwrap()
+            .selection
+            .as_ref()
+            .unwrap();
+        assert_eq!(selection.0, Interval::new(24_000_000_000, 25_000_000_000));
+        assert_eq!(selection.1.samples, 1000);
+        h.get_by_label("NEXT").scroll_to_me();
+        h.step();
+        h.get_by_label("NEXT").click();
+        h.step();
+        for _ in 0..400 {
+            h.step();
+            if h.state()
+                .answer
+                .as_ref()
+                .unwrap()
+                .marker_list
+                .entries
+                .first()
+                .is_some_and(|m| m.marker.number == 24)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            h.state().answer.as_ref().unwrap().marker_list.entries.len(),
+            6
+        );
+        assert_eq!(h.state().answer.as_ref().unwrap().marker_list.total, 30);
+    }
+
     #[test]
     fn zooming_the_plot_queries_the_range_it_shows() {
         let dir = tempfile::tempdir().unwrap();

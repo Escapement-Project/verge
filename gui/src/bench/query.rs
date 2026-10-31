@@ -12,6 +12,8 @@ pub struct Query {
     pub interval: Option<Interval>,
     pub live_span: u64,
     pub selection: Option<Interval>,
+    pub marker_after: Option<verge_probe::capture::MarkerCursor>,
+    pub marker_selected: Option<verge_probe::capture::MarkerCursor>,
     pub pixels: usize,
     pub cancel: Arc<AtomicBool>,
 }
@@ -21,6 +23,10 @@ pub struct Answer {
     pub view: View,
     pub digital: DigitalView,
     pub digital_fallback: Vec<verge_probe::capture::DigitalBin>,
+    pub markers: verge_probe::capture::MarkerPage,
+    pub marker_list: verge_probe::capture::MarkerPage,
+    pub marker_successor: Option<verge_probe::capture::StoredMarker>,
+    pub marker_selected: Option<verge_probe::capture::MarkerCursor>,
     pub visible: Interval,
     /// The visible range's own statistics.
     pub window: Statistics,
@@ -119,6 +125,18 @@ fn run(query: &Query) -> Result<Answer> {
     );
     let view = archive.view(around, query.pixels.saturating_mul(3), &query.cancel)?;
     let digital = archive.digital(around, query.pixels.saturating_mul(3), &query.cancel)?;
+    let markers = archive.markers(visible, None, 512, &query.cancel)?;
+    let all = Interval::new(0, i64::MAX as u64);
+    let marker_list = archive.markers(all, query.marker_after, 24, &query.cancel)?;
+    let marker_successor = query
+        .marker_selected
+        .map(|cursor| {
+            archive
+                .markers(all, Some(cursor), 1, &query.cancel)
+                .map(|page| page.entries.into_iter().next())
+        })
+        .transpose()?
+        .flatten();
     let window = archive.statistics(visible, &query.cancel)?;
     let overview = archive.view(extent, 128, &query.cancel)?;
     let fallback = overview
@@ -147,6 +165,10 @@ fn run(query: &Query) -> Result<Answer> {
         view,
         digital,
         digital_fallback,
+        markers,
+        marker_list,
+        marker_successor,
+        marker_selected: query.marker_selected,
         visible,
         window,
         overview,
