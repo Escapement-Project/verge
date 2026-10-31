@@ -85,6 +85,7 @@ pub struct Session<L: verge_probe::aux::AuxLink> {
     status: Status,
     recorder: Option<Recorder>,
     owned: bool,
+    capture_id: Option<verge_probe::CaptureId>,
     stopping: Option<Instant>,
     synced: bool,
     poll_at: Instant,
@@ -104,6 +105,7 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
             },
             recorder: None,
             owned: false,
+            capture_id: None,
             stopping: None,
             synced: false,
             poll_at: Instant::now(),
@@ -221,35 +223,19 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
                 }
                 let recorder = Recorder::create(&path)?;
                 let mut control = VergeControl::new(&mut self.aux);
+                let mask = if self.status.dio_reason.is_none() {
+                    0x0f
+                } else {
+                    0
+                };
                 let started = if self.status.capturing {
                     control
-                        .stream_energy_capture(if self.status.dio_reason.is_none() {
-                            0x0f
-                        } else {
-                            0
-                        })
-                        .map(drop)
-                        .map_err(|error| {
-                            let cleanup = control.end_energy_stream();
-                            anyhow::anyhow!(
-                                "attaching to capture: {error}; ending stream: {cleanup:?}"
-                            )
-                        })
+                        .stream_energy_capture_identified(mask)
+                        .map(|()| None)
                 } else {
                     control
-                        .start_energy_stream(
-                            rate,
-                            if self.status.dio_reason.is_none() {
-                                0x0f
-                            } else {
-                                0
-                            },
-                        )
-                        .map(drop)
-                        .map_err(|error| {
-                            let cleanup = control.stop_energy_capture();
-                            anyhow::anyhow!("starting capture: {error}; cleanup: {cleanup:?}")
-                        })
+                        .start_energy_stream_identified(rate, mask)
+                        .map(|start| start.capture_id)
                 };
                 if let Err(error) = started {
                     // Nothing was recorded: leave no empty capture among those kept.
@@ -257,8 +243,9 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
                     if let Err(removing) = verge_probe::capture::remove(&path) {
                         tracing::warn!("removing {}: {removing}", path.display());
                     }
-                    return Err(error);
+                    return Err(error.into());
                 }
+                self.capture_id = started.expect("start/attach succeeded");
                 self.owned = !self.status.capturing;
                 self.recorder = Some(recorder);
                 self.status.path = Some(path);
@@ -288,14 +275,26 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
         if !self.recording() {
             return Ok(());
         }
+        let header_until = Instant::now() + Duration::from_secs(2);
+        while self.capture_id.is_none() && self.recording() && Instant::now() < header_until {
+            self.tick()?;
+        }
+        if !self.recording() {
+            return Ok(());
+        }
+        let id = self
+            .capture_id
+            .ok_or_else(|| anyhow::anyhow!("capture identity has not arrived"))?;
         let mut control = VergeControl::new(&mut self.aux);
-        if self.owned {
-            match control.stop_energy_capture() {
-                Ok(()) | Err(CommandError::Firmware(EnergyError::DmaError)) => {}
-                Err(error) => return Err(error.into()),
-            }
+        let stopped = if self.owned {
+            control.stop_energy_capture_if(id)
         } else {
-            control.end_energy_stream()?;
+            control.end_energy_stream_if(id)
+        };
+        match stopped {
+            Ok(()) | Err(CommandError::Firmware(EnergyError::DmaError)) => {}
+            Err(CommandError::Firmware(EnergyError::StaleCapture)) => self.owned = false,
+            Err(error) => return Err(error.into()),
         }
         self.stopping = Some(Instant::now());
         Ok(())
@@ -310,6 +309,13 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
                     break;
                 };
                 if let Message::Header(header) = &message {
+                    let id = header
+                        .capture_id
+                        .ok_or_else(|| anyhow::anyhow!("stream header has no capture identity"))?;
+                    if self.capture_id.is_some_and(|expected| expected != id) {
+                        bail!("stream header names another capture");
+                    }
+                    self.capture_id = Some(id);
                     self.synced = true;
                     self.status.rate = Some(header.rate);
                     self.stream_mask = header.dio_mask;
@@ -341,6 +347,7 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
                 self.recorder.as_mut().expect("recorder").send(message)?;
                 if let Some(reason) = end {
                     self.owned = false;
+                    self.capture_id = None;
                     self.stopping = None;
                     self.status.recording = false;
                     self.recorder.take().expect("recorder").finish()?;
@@ -368,14 +375,30 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
     }
     pub fn fail(&mut self, error: anyhow::Error) {
         // A restart may already be queued behind the pair whose disk write failed.
-        let drain_until = Instant::now() + Duration::from_millis(50);
+        let pending_attach =
+            self.recorder.is_some() && !self.synced && self.capture_id.is_none() && !self.owned;
+        let drain_until = Instant::now()
+            + if pending_attach {
+                Duration::from_secs(2)
+            } else {
+                Duration::from_millis(50)
+            };
         while Instant::now() < drain_until {
             match self.aux.message(Duration::from_millis(1)) {
+                Ok(Some(Message::Header(header)))
+                    if self.recorder.is_some()
+                        && !self.synced
+                        && self.capture_id.is_none()
+                        && !self.owned =>
+                {
+                    self.capture_id = header.capture_id;
+                }
                 Ok(Some(Message::End(_))) => {
                     self.owned = false;
                     break;
                 }
                 Ok(Some(_)) => {}
+                Ok(None) if pending_attach && self.capture_id.is_none() => {}
                 _ => break,
             }
         }
@@ -385,10 +408,10 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
         self.status.recording = false;
         // The probe first: a disk that failed may also be slow to let the writer finish.
         let mut control = VergeControl::new(&mut self.aux);
-        let cleanup = if owned {
-            control.stop_energy_capture()
-        } else {
-            control.end_energy_stream()
+        let cleanup = match self.capture_id.take() {
+            Some(id) if owned => control.stop_energy_capture_if(id),
+            Some(id) => control.end_energy_stream_if(id),
+            None => Ok(()),
         };
         let written = self.recorder.take().map(Recorder::finish).transpose();
         self.status.connected = false;
@@ -525,6 +548,94 @@ mod tests {
         assert!(!s.owned);
         assert!(s.status().capturing);
     }
+    #[test]
+    fn delayed_attach_header_is_bound_before_stop_or_failure_cleanup() {
+        struct DelayedHeader {
+            link: verge_probe::sim::SimAux,
+            bus: SimBus,
+            pending: Option<(Duration, Vec<u8>)>,
+        }
+        impl verge_probe::aux::AuxLink for DelayedHeader {
+            fn write(&mut self, request: &[u8]) -> Result<(), verge_probe::dap::LinkError> {
+                self.link.write(request)
+            }
+            fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, verge_probe::dap::LinkError> {
+                if let Some((ready, _)) = &self.pending {
+                    if self.bus.now() >= *ready {
+                        return Ok(self.pending.take().unwrap().1);
+                    }
+                    self.bus.sleep(timeout);
+                    return Err(verge_probe::dap::LinkError::Timeout);
+                }
+                let message = self.link.read(timeout)?;
+                if message.first() == Some(&0xa1) {
+                    self.pending = Some((self.bus.now() + Duration::from_millis(100), message));
+                    self.bus.sleep(timeout);
+                    return Err(verge_probe::dap::LinkError::Timeout);
+                }
+                Ok(message)
+            }
+        }
+        for failure in [false, true] {
+            let (bus, original) = session("ours-pro-energy");
+            let status = original.status();
+            drop(original);
+            let device = detect(&bus).unwrap().remove(0).device;
+            let mut s = Session {
+                aux: Aux::open(DelayedHeader {
+                    link: bus.open_aux(&device).unwrap(),
+                    bus: bus.clone(),
+                    pending: None,
+                })
+                .unwrap(),
+                status,
+                recorder: None,
+                owned: false,
+                capture_id: None,
+                stopping: None,
+                synced: false,
+                poll_at: Instant::now(),
+                stream_mask: 0,
+                stream_levels: 0,
+            };
+            let dir = tempfile::tempdir().unwrap();
+            assert!(s.command(Command::Start {
+                rate: 1000,
+                path: dir.path().join("capture.vergecapture")
+            }));
+            assert!(s.capture_id.is_none());
+            if failure {
+                s.fail(anyhow::anyhow!("disk failure"));
+            } else {
+                s.close().unwrap();
+            }
+            let log = bus.log();
+            assert!(log.iter().any(|line| line.contains("AUX 900d")), "{log:?}");
+            assert!(!log.iter().any(|line| line.contains("AUX 900b")), "{log:?}");
+            let mut control = VergeControl::new(&mut s.aux);
+            assert!(control.energy_capture_status().unwrap().running);
+        }
+    }
+
+    #[test]
+    fn attach_failure_before_first_tick_ends_only_its_stream() {
+        let (_bus, mut s) = session("ours-pro-energy");
+        let dir = tempfile::tempdir().unwrap();
+        assert!(s.command(Command::Start {
+            rate: 1000,
+            path: dir.path().join("capture.vergecapture")
+        }));
+        assert!(s.capture_id.is_none());
+        s.fail(anyhow::anyhow!("disk failure before first tick"));
+        let mut control = VergeControl::new(&mut s.aux);
+        assert!(control.energy_capture_status().unwrap().running);
+        assert!(matches!(
+            s.aux.message(Duration::from_millis(50)).unwrap(),
+            Some(Message::End(_))
+        ));
+        assert!(s.aux.message(Duration::from_millis(50)).unwrap().is_none());
+    }
+
     #[test]
     fn a_refused_start_leaves_no_capture_behind() {
         let (_bus, mut s) = session("ours-pro");
