@@ -1114,7 +1114,10 @@ impl Bench {
                 None => plot.plot_bounds().range_x(),
             };
             if fit {
-                fitted = y_range(&answer, quantity, &x);
+                let rows = label_rows(&answer.markers);
+                let height = plot.transform().frame().height();
+                fitted =
+                    y_range(&answer, quantity, &x).map(|range| label_headroom(range, rows, height));
                 if let Some(range) = fitted.clone() {
                     plot.set_plot_bounds_y(range);
                 }
@@ -1228,7 +1231,7 @@ impl Bench {
     ) {
         let frame = *transform.frame();
         let painter = ui.painter().with_clip_rect(frame);
-        let mut occupied = [frame.left() - 1.0; 3];
+        let mut occupied = [frame.left() - 1.0; LABEL_ROWS];
         for entry in &page.entries {
             let x = transform
                 .position_from_point(&egui_plot::PlotPoint::new(
@@ -1239,10 +1242,9 @@ impl Bench {
             if x < frame.left() || x > frame.right() {
                 continue;
             }
-            painter.line_segment(
-                [egui::pos2(x, frame.top()), egui::pos2(x, frame.bottom())],
-                Stroke::new(1.0, color::ATTENTION.gamma_multiply(0.65)),
-            );
+            let line = [egui::pos2(x, frame.top()), egui::pos2(x, frame.bottom())];
+            painter.line_segment(line, Stroke::new(3.0, color::SUNKEN));
+            painter.line_segment(line, Stroke::new(1.0, color::ATTENTION));
             let label = format!(
                 "{} {}",
                 entry.marker.number,
@@ -1261,11 +1263,11 @@ impl Bench {
                 .enumerate()
                 .find(|(_, right)| **right < left)
             {
-                let pos = egui::pos2(left, frame.top() + 4.0 + row as f32 * 16.0);
+                let pos = egui::pos2(left, frame.top() + LABEL_TOP + row as f32 * LABEL_ROW);
                 painter.rect_filled(
                     egui::Rect::from_min_size(pos, galley.size()),
                     0,
-                    color::BACKGROUND,
+                    color::SUNKEN,
                 );
                 *right = left + galley.size().x + 8.0;
                 painter.galley(pos, galley, color::ATTENTION);
@@ -1673,6 +1675,29 @@ const READINGS: [(&str, Reading); 9] = [
 /// that wanders a little leaves Y fitted.
 const DETENT: f32 = 12.0;
 
+/// Marker labels sit in rows across the top of the plot.
+const LABEL_ROWS: usize = 3;
+const LABEL_TOP: f32 = 4.0;
+const LABEL_ROW: f32 = 16.0;
+
+/// The label rows to keep clear: all of them once the capture has a marker, so the fitted range
+/// does not change as markers scroll in and out of view.
+fn label_rows(page: &verge_probe::capture::MarkerPage) -> usize {
+    if page.total > 0 { LABEL_ROWS } else { 0 }
+}
+
+/// `range` raised so that its top lies below `rows` of marker labels in a plot `height` px tall.
+fn label_headroom(range: RangeInclusive<f64>, rows: usize, height: f32) -> RangeInclusive<f64> {
+    let band = f64::from(LABEL_TOP + rows as f32 * LABEL_ROW);
+    let height = f64::from(height);
+    if rows == 0 || height <= 2.0 * band {
+        return range;
+    }
+    let share = band / height;
+    let (low, high) = (*range.start(), *range.end());
+    low..=(high - low * share) / (1.0 - share)
+}
+
 /// The Y range that shows every bin in `x` and zero, with a margin.
 fn y_range(
     answer: &Answer,
@@ -1968,6 +1993,15 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         panic!("archive query did not complete");
+    }
+    #[test]
+    fn fitted_range_leaves_the_label_rows_above_the_trace() {
+        assert_eq!(label_headroom(0.0..=16.0, 0, 200.0), 0.0..=16.0);
+        assert_eq!(label_headroom(0.0..=16.0, 3, 80.0), 0.0..=16.0);
+        let range = label_headroom(-1.0..=16.0, 3, 208.0);
+        let band = f64::from(LABEL_TOP + 3.0 * LABEL_ROW);
+        let below_top = (range.end() - 16.0) / (range.end() - range.start()) * 208.0;
+        assert!((below_top - band).abs() < 1e-9, "{below_top}");
     }
     #[test]
     fn selection_statistics_stay_fixed_when_graph_changes() {
