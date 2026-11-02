@@ -164,8 +164,8 @@ session, which PulseView opens. It has two analog channels: V in volts and mA in
 file stores no units, so sigrok shows both as volts, and the channel names give the units. The
 probe measures nothing for a moment while it reads the target's supply or times a debugger's reads.
 There the last pair repeats and a logic channel, GAP, is high, so the time axis stays true. A pair
-taken as the current range switched carries the next pair's current, as in the probe's total, so the
-recording adds up to that total. `--csv` writes one line per pair instead: its sequence number, its
+taken as the current range switched carries the current the probe's total gives it, from the pairs
+either side, so the recording adds up to that total. `--csv` writes one line per pair instead: its sequence number, its
 time in ns since the capture started, millivolts, nanoamps, and the current range it was read on,
 `low` or `high`. The GUI's CSV export leaves it empty for a capture saved before the column
 existed. The low range lowers the target's supply by up to about 90 mV, so a target can draw a
