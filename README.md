@@ -175,9 +175,13 @@ does not draw it as an annotation track. Resaving with sigrok drops that extra f
 original session to retain markers. Labels keep UTF-8 text. Backslashes, control characters
 and other bytes are escaped. `marker_lost` reports missing markers; an empty time means the probe
 reported loss without a marker to locate it. Those unlocated reports apply to the whole capture,
-including a selection export. CSV writes pairs and edges as they arrive, then merges markers when
-recording ends. Before that merge, an interrupted recording keeps the pairs and edges written
-so far. The final CSV rewrite is not atomic. The sigrok
+including a selection export. CSV writes pairs and edges as they arrive. When recording ends with
+markers to add, verge writes a merged copy beside the file, `<name>.<random>.partial`, and swaps
+it in. Until the swap the file keeps the pairs and edges written so far; a forced quit during the
+merge can leave the `.partial` copy behind. The swap replaces the file, so verge needs to write in
+its directory, and a hard link to it keeps the unmerged pairs. A recording with no markers and no
+marker-loss report has no marker columns. CSV to a pipe or a terminal has none either: verge warns
+at the first marker and leaves the markers out. The sigrok
 sidecar also gives each marker's `session_time_ns`, relative to the exported session's first
 sample. It can be negative when a marker precedes that sample.
 

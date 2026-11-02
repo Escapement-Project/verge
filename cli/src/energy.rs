@@ -95,7 +95,8 @@ pub enum EnergyCommand {
         /// Write CSV instead: one line per pair, its sequence number, its time in ns since the
         /// capture started, millivolts and nanoamps, then the level of each DIO pin recorded. Each
         /// edge of those pins is a line of its own, in time order, with only its time and the
-        /// levels after it. Markers have their own rows, with marker number and label columns.
+        /// levels after it. Markers, if any arrive, are merged in as rows of their own when
+        /// recording ends, with marker number and label columns; not into a pipe or terminal.
         /// Voltage and current are read together at the pair's time.
         #[arg(long)]
         csv: bool,

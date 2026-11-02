@@ -262,6 +262,7 @@ impl Writer {
     fn spawn(mut sink: Sink) -> Writer {
         let (send, receive) = mpsc::channel();
         let thread = thread::spawn(move || {
+            let mut dropped_markers = false;
             for output in receive {
                 match output {
                     Output::Begin { rate, pins, levels } => {
@@ -270,7 +271,14 @@ impl Writer {
                     }
                     Output::Pairs(samples) => sink.samples(&samples)?,
                     Output::Edges(edges) => sink.edges(edges),
-                    Output::Markers(markers) => sink.markers(&markers)?,
+                    Output::Markers(markers) => {
+                        if !sink.markers(&markers)? && !dropped_markers {
+                            dropped_markers = true;
+                            tracing::warn!(
+                                "markers are not recorded: the output is not a regular file"
+                            );
+                        }
+                    }
                 }
             }
             Ok(sink.finish()?)
