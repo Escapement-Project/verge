@@ -318,6 +318,7 @@ mod tests {
             time_ns: time_ms * 1_000_000,
             millivolts,
             nanoamps,
+            range: Some(verge_probe::stream::CurrentRange::Low),
         }
     }
 
@@ -432,13 +433,13 @@ mod tests {
         sink.finish().unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "sequence,time_ns,millivolts,nanoamps,dio1,dio3\n\
-             1,0,3300,7,1,0\n\
-             ,1000000,,,1,1\n\
-             2,1000000,3300,8,1,1\n\
-             ,1500000,,,0,1\n\
-             3,2000000,3300,9,0,1\n\
-             ,2200000,,,0,0\n"
+            "sequence,time_ns,millivolts,nanoamps,range,dio1,dio3\n\
+             1,0,3300,7,low,1,0\n\
+             ,1000000,,,,1,1\n\
+             2,1000000,3300,8,low,1,1\n\
+             ,1500000,,,,0,1\n\
+             3,2000000,3300,9,low,0,1\n\
+             ,2200000,,,,0,0\n"
         );
     }
 
@@ -455,6 +456,7 @@ mod tests {
                 time_ns: u64::from(n) * 10_000,
                 millivolts: 1800,
                 nanoamps: n,
+                range: None,
             })
             .collect();
         sink.samples(&samples).unwrap();
@@ -618,7 +620,7 @@ mod tests {
         writer.finish().unwrap();
         let csv = std::fs::read_to_string(path).unwrap();
         assert!(csv.contains("marker_number,marker_label,marker_lost"));
-        assert!(csv.contains(",500000,,,42,\"step,one\",1"), "{csv}");
+        assert!(csv.contains(",500000,,,,42,\"step,one\",1"), "{csv}");
         let times: Vec<u64> = csv
             .lines()
             .skip(1)
@@ -686,7 +688,7 @@ mod tests {
             .lines()
             .map(|line| {
                 let fields: Vec<&str> = line.split(',').collect();
-                format!("{}@{}={}", fields[0], fields[1], fields[4])
+                format!("{}@{}={}", fields[0], fields[1], fields[5])
             })
             .collect();
         assert_eq!(

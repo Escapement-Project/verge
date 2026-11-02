@@ -998,7 +998,8 @@ mod hardware {
                         continue;
                     }
                     let fields: Vec<_> = line.split(',').collect();
-                    let high = fields[7] == "1";
+                    // sequence, time_ns, millivolts, nanoamps, range, then dio0 to dio3.
+                    let high = fields[8] == "1";
                     if high != levels {
                         edges.push(fields[1].parse::<u64>().unwrap());
                         levels = high;

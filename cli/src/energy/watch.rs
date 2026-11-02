@@ -808,6 +808,7 @@ mod tests {
                 time_ns: u64::from(n) * 1_000_000,
                 millivolts: 3300,
                 nanoamps: if n == 437 { 5_000_000 } else { 20_000 },
+                range: None,
             })
             .collect();
         model.add_pairs(&samples, 0.0);
