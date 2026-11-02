@@ -1352,7 +1352,7 @@ fn energy_watch_starts_a_capture_over_a_fault() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "the capture failed after 17.1 mJ over 10000 pairs, when the ADC overran or its DMA failed. A new capture replaces it.",
+            "the capture failed after 17.1 mJ over 10000 pairs, when the ADC overran, its DMA failed or the probe fell behind reading it. A new capture replaces it.",
         ))
         .stdout(predicate::str::contains("   0.20 s  3.30 V"))
         .stdout(predicate::str::contains("stopped: "))
@@ -1366,7 +1366,7 @@ fn energy_latest_reports_a_fault() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "capture failed: the ADC overran or its DMA failed. A new start clears the fault.",
+            "capture failed: the ADC overran, its DMA failed or the probe fell behind reading it. A new start clears the fault.",
         ));
 }
 
@@ -1377,7 +1377,7 @@ fn energy_stop_after_a_fault_reports_what_was_kept() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "stopped: the capture failed after 17.1 mJ over 10000 pairs, when the ADC overran or its DMA failed.",
+            "stopped: the capture failed after 17.1 mJ over 10000 pairs, when the ADC overran, its DMA failed or the probe fell behind reading it.",
         ));
 }
 

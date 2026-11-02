@@ -204,7 +204,7 @@ pub fn energy<B: Bus>(
             let latest = match pro.latest_energy_sample() {
                 Err(CommandError::Firmware(EnergyError::DmaError)) => {
                     outputln!(
-                        "{name}'s capture failed: the ADC overran or its DMA failed. A new start clears the fault."
+                        "{name}'s capture failed: the ADC overran, its DMA failed or the probe fell behind reading it. A new start clears the fault."
                     );
                     return Ok(());
                 }
@@ -372,7 +372,9 @@ fn record<B: Bus>(
         EndReason::Asked => "the capture keeps running",
         EndReason::Stopped => "the capture stopped",
         EndReason::Restarted => "a new start restarted the capture",
-        EndReason::Failed => "the capture failed: the ADC overran or its DMA failed",
+        EndReason::Failed => {
+            "the capture failed: the ADC overran, its DMA failed or the probe fell behind reading it"
+        }
         EndReason::Other(_) => "the stream ended for a reason this tool does not know",
     };
     outputln!(
@@ -421,7 +423,7 @@ fn describe_total(name: &str, total: EnergyTotal) -> Result<String> {
     Ok(match total {
         EnergyTotal::Total(total) => format!("{} since the start", energy(total)),
         EnergyTotal::Failed(total) => format!(
-            "the capture failed after {}, when the ADC overran or its DMA failed",
+            "the capture failed after {}, when the ADC overran, its DMA failed or the probe fell behind reading it",
             energy(total)
         ),
         EnergyTotal::NoSample => "no calibrated pair yet".to_owned(),

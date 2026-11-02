@@ -481,7 +481,9 @@ fn read(pro: &mut Pro<'_>, at: f64, totals: bool) -> Result<Reading> {
         match pro.read_energy_accumulator().context("reading the total")? {
             EnergyTotal::Total(total) => Some((total.energy_nanojoules, total.integrated_pairs)),
             EnergyTotal::Failed(_) => {
-                bail!("the capture failed: the ADC overran or its DMA failed")
+                bail!(
+                    "the capture failed: the ADC overran, its DMA failed or the probe fell behind reading it"
+                )
             }
             _ => None,
         }
