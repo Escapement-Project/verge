@@ -477,7 +477,7 @@ mod tests {
     }
 
     /// Plays back stream messages, as a probe whose stream ends by itself would send them. `None`
-    /// is a read that times out, as the one that ends the drain on opening. Writes go nowhere.
+    /// is a read that times out, as the ones that end the drains on opening. Writes go nowhere.
     struct Playback(std::collections::VecDeque<Option<Vec<u8>>>);
 
     impl AuxLink for Playback {
@@ -547,8 +547,9 @@ mod tests {
         end.extend_from_slice(&7u32.to_le_bytes());
         let mut replaced = vec![0xA2, 1];
         replaced.extend_from_slice(&40u32.to_le_bytes());
-        // Opening asks for mode 7, then drains until a read times out.
+        // Opening drains until a read times out, asks for mode 7, then drains again.
         let messages = [
+            None,
             Some(vec![0x90, 0, 0]),
             None,
             Some(pairs(30, 2)),
@@ -595,6 +596,7 @@ mod tests {
         let mut end = vec![0xa2, 2];
         end.extend_from_slice(&6u32.to_le_bytes());
         let messages = [
+            None,
             Some(vec![0x90, 0, 0]),
             None,
             Some(header()),
@@ -655,6 +657,7 @@ mod tests {
         let mut end = vec![0xA2, 2];
         end.extend_from_slice(&5u32.to_le_bytes());
         let messages = [
+            None,
             Some(vec![0x90, 0, 0]),
             None,
             Some(header_with_dio(0x01, 0x00)),
@@ -714,6 +717,7 @@ mod tests {
         let mut end = vec![0xA2, 2];
         end.extend_from_slice(&10u32.to_le_bytes());
         let messages = [
+            None,
             Some(vec![0x90, 0, 0]),
             None,
             Some(header()),
@@ -796,6 +800,7 @@ mod tests {
             bus: bus.clone(),
         })
         .unwrap();
+        let opened = bus.now();
         let mut pro = VergeControl::new(&mut aux);
         let dir = tempfile::tempdir().unwrap();
         let result = record(
@@ -811,7 +816,7 @@ mod tests {
         .err()
         .unwrap();
         assert!(result.to_string().contains("capture header"), "{result:#}");
-        assert!(bus.now() < Duration::from_secs(4));
+        assert!(bus.now() - opened < Duration::from_secs(4));
         assert!(bus.log().iter().any(|line| line.contains("AUX 900b")));
     }
 
