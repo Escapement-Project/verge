@@ -31,7 +31,7 @@ pub struct Answer {
     /// The visible range's own statistics.
     pub window: Statistics,
     pub overview: View,
-    /// The overview's bins where `view` has none of its own, drawn in their place.
+    /// Beyond `view`, the overview's bins, and the parts of those `view` cuts, read for their own.
     pub fallback: Vec<Envelope>,
     pub selection: Option<(Interval, Statistics)>,
 }
@@ -138,25 +138,37 @@ fn run(query: &Query) -> Result<Answer> {
         .transpose()?
         .flatten();
     let window = archive.statistics(visible, &query.cancel)?;
+    // An overview bin that `around` cuts holds levels from its part inside, so each part outside is
+    // read again rather than drawn with the whole bin's.
     let overview = archive.view(extent, 128, &query.cancel)?;
-    let fallback = overview
-        .envelopes
-        .iter()
-        .flat_map(|bin| outside(bin, around))
-        .collect();
-    let digital_overview = archive.digital(extent, 128, &query.cancel)?;
-    let digital_fallback = digital_overview
-        .bins
-        .iter()
-        .flat_map(|bin| {
-            outside_intervals(bin.interval, around).map(|interval| {
-                verge_probe::capture::DigitalBin {
+    let mut fallback = Vec::new();
+    for bin in &overview.envelopes {
+        for interval in outside_intervals(bin.interval, around) {
+            if interval == bin.interval {
+                fallback.push(bin.clone());
+                continue;
+            }
+            let statistics = archive.statistics(interval, &query.cancel)?;
+            if statistics.samples > 0 {
+                fallback.push(Envelope {
                     interval,
-                    ..bin.clone()
-                }
-            })
-        })
-        .collect();
+                    gap: statistics.measured_ns < interval.duration_ns(),
+                    statistics,
+                });
+            }
+        }
+    }
+    let digital_overview = archive.digital(extent, 128, &query.cancel)?;
+    let mut digital_fallback = Vec::new();
+    for bin in &digital_overview.bins {
+        for interval in outside_intervals(bin.interval, around) {
+            if interval == bin.interval {
+                digital_fallback.push(bin.clone());
+            } else {
+                digital_fallback.extend(archive.digital(interval, 1, &query.cancel)?.bins);
+            }
+        }
+    }
     let selection = query
         .selection
         .map(|i| archive.statistics(i, &query.cancel).map(|s| (i, s)))
@@ -176,14 +188,7 @@ fn run(query: &Query) -> Result<Answer> {
         selection,
     })
 }
-/// The parts of `bin` before and after `covered`.
-fn outside(bin: &Envelope, covered: Interval) -> impl Iterator<Item = Envelope> + '_ {
-    outside_intervals(bin.interval, covered).map(|part| Envelope {
-        interval: part,
-        statistics: bin.statistics.clone(),
-        gap: bin.gap,
-    })
-}
+/// The parts of `interval` before and after `covered`.
 fn outside_intervals(interval: Interval, covered: Interval) -> impl Iterator<Item = Interval> {
     [
         Interval::new(interval.start_ns, interval.end_ns.min(covered.start_ns)),

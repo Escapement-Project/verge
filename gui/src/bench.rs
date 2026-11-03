@@ -2259,6 +2259,24 @@ mod tests {
             let file = format!("bench-lossy-{name}.png");
             h.render().unwrap().save(dir.join(file)).unwrap();
         }
+        // A pan past what the answer covers, before the next answer lands: high until 10.05 s,
+        // then low.
+        let path = dir.join("step.vergecapture");
+        if path.exists() {
+            std::fs::remove_file(&path).unwrap();
+        }
+        capture(&path, 1000, 20_000, |i| if i < 10_050 { 3000 } else { 350 });
+        let mut bench = Bench::new(&dir);
+        bench.open(path);
+        let mut h = harness(bench, true);
+        wait(&mut h);
+        let visible = Interval::new(9_900_000_000, 10_000_000_000);
+        h.state_mut().inspect(visible, None);
+        answered(&mut h, visible);
+        h.state_mut().interval = Some(Interval::new(10_000_000_000, 10_200_000_000));
+        h.state_mut().reset_bounds = true;
+        h.step();
+        h.render().unwrap().save(dir.join("bench-pan.png")).unwrap();
     }
     /// 2 ms of every 10, with noise on both levels.
     fn noisy_marker(i: u32) -> u16 {
@@ -2582,6 +2600,72 @@ mod tests {
                     || bin.interval.start_ns >= covered.end_ns)
         );
         assert_eq!(answer.window.samples, 50);
+    }
+    #[test]
+    fn the_overview_beside_the_answer_holds_only_its_own_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("step.vergecapture");
+        // High until 10.05 s, then low, with DIO3 following. The overview's bins are 156.25 ms, so
+        // the one from 10.0 s holds both levels.
+        capture_with_dio(
+            &path,
+            1000,
+            20_000,
+            |i| if i < 10_050 { 3000 } else { 350 },
+            true,
+        );
+        let mut h = harness(state(&path), false);
+        wait(&mut h);
+        // The answer covers 9.8 s to 10.1 s: the cut bin's part after it is low throughout.
+        let visible = Interval::new(9_900_000_000, 10_000_000_000);
+        h.state_mut().inspect(visible, None);
+        let answer = answered(&mut h, visible);
+        assert_eq!(answer.view.interval.end_ns, 10_100_000_000);
+        let after = |bin_start: &dyn Fn(u64) -> bool| {
+            answer
+                .fallback
+                .iter()
+                .find(|bin| bin_start(bin.interval.start_ns))
+                .unwrap()
+                .clone()
+        };
+        let beside = after(&|start| start == 10_100_000_000);
+        let later = after(&|start| start > 10_100_000_000);
+        assert_eq!(beside.statistics.max_na, later.statistics.max_na);
+        assert!(!beside.gap);
+        let digital = answer
+            .digital_fallback
+            .iter()
+            .find(|bin| bin.interval.start_ns == 10_100_000_000)
+            .unwrap();
+        assert_eq!((digital.high & 8, digital.low & 8), (0, 8));
+    }
+    #[test]
+    fn a_cut_part_of_the_overview_keeps_its_own_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lossy.vergecapture");
+        // Pairs lost after 10.1 s, inside the overview bin from 10.0 s, and at 15 s; none before.
+        capture_lossy(
+            &path,
+            1000,
+            20_000,
+            |_| 350,
+            &[10_120..10_125, 15_000..15_001],
+        );
+        let mut h = harness(state(&path), false);
+        wait(&mut h);
+        let visible = Interval::new(9_900_000_000, 10_000_000_000);
+        h.state_mut().inspect(visible, None);
+        let answer = answered(&mut h, visible);
+        let part = |start| {
+            answer
+                .fallback
+                .iter()
+                .find(|bin| bin.interval.start_ns == start)
+                .unwrap()
+        };
+        assert!(part(10_100_000_000).gap);
+        assert!(!part(9_687_500_000).gap);
     }
     #[test]
     fn a_capture_that_cannot_be_read_is_asked_for_once() {
