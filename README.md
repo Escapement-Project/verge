@@ -8,8 +8,13 @@ selects an update path for each:
 
 - A unit running Verge restarts into its bootloader on request, without a jumper.
 - A unit running stock V3.122 or later supports the same request that NXP's LinkServer uses.
+- A unit running daplink-rs, a Rust CMSIS-DAP firmware with an MCU-Link build, restarts into
+  its bootloader on its own command.
 - Anything else needs the ISP jumper. Fit it before plugging the unit in, because the bootloader
   reads the pin at startup.
+
+daplink-rs uses Arm's DAPLink USB ID, which other DAPLink probes share. The tool recognises
+daplink-rs's MCU-Link build by its USB strings and ignores every other device with that ID.
 
 Verge releases come from `mculink-verge` on GitHub. The tool verifies signatures and checksums
 before flashing. Stock images come from your local LinkServer installation; we do not distribute
@@ -18,7 +23,8 @@ NXP's firmware.
 ## Boards
 
 Stock reports its board in the USB product string. Verge reports it in its identification reply.
-The tool recognises the standalone MCU-Link and MCU-Link Pro and lists each unit's board.
+daplink-rs does not report it. The tool recognises the standalone MCU-Link and MCU-Link Pro and
+lists each unit's board.
 
 Verge images declare which boards they support (see "Board declarations"). An image without a
 declaration supports only the standalone MCU-Link, matching builds made before declarations were
@@ -482,6 +488,8 @@ interface. These udev rules allow it for the logged-in user:
 # /etc/udev/rules.d/69-mculink-update.rules
 # An MCU-Link running a CMSIS-DAP firmware, stock or Verge
 SUBSYSTEM=="usb", ATTRS{idVendor}=="1fc9", ATTRS{idProduct}=="0143", TAG+="uaccess"
+# daplink-rs, under Arm's DAPLink ID
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0d28", ATTRS{idProduct}=="0204", TAG+="uaccess"
 # The LPC55S69 ROM bootloader, ISP mode
 KERNEL=="hidraw*", ATTRS{idVendor}=="1fc9", ATTRS{idProduct}=="0021", TAG+="uaccess"
 ```

@@ -223,6 +223,18 @@ fn confirming_a_unit_already_in_isp_mode_says_it_may_not_be_an_mculink() {
 }
 
 #[test]
+fn daplink_rs_is_named_and_updates_without_the_jumper() {
+    let mut h = harness(sim_app(SimBus::scenario("daplink-rs").unwrap(), vec![]));
+    until(&mut h, "INSTALL V0.3.0");
+    h.get_by_label("DAPLINK-RS");
+    h.get_by_label("UPDATES WITHOUT THE JUMPER");
+    press(&mut h, "INSTALL V0.3.0");
+    press(&mut h, "CONFIRM");
+    until(&mut h, "DONE");
+    h.get_by_label_contains("runs Verge, build v0.3.0");
+}
+
+#[test]
 fn a_mini_in_isp_mode_leaves_the_other_bootloader_nothing_to_press() {
     let mut h = harness(sim_app(SimBus::scenario("isp-mini").unwrap(), vec![]));
     until(&mut h, "CANNOT UPDATE");
@@ -457,6 +469,9 @@ fn pictures() {
         .click();
     h.step();
     shoot(&mut h, "02-stock-selected");
+    let mut d = rendered(sim_app(SimBus::scenario("daplink-rs").unwrap(), vec![]));
+    until(&mut d, "INSTALL V0.3.0");
+    shoot(&mut d, "02b-daplink-rs-selected");
     press(&mut h, "INSTALL V0.3.0");
     shoot(&mut h, "03-confirm");
 

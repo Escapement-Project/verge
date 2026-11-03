@@ -202,6 +202,10 @@ fn identity(unit: &Unit) -> (&'static str, Glyph, Option<Color32>) {
             firmware: Firmware::Stock { .. },
             ..
         } => ("STOCK", glyph::STOCK, Some(color::TEXT_2)),
+        State::Probe {
+            firmware: Firmware::DaplinkRs { .. },
+            ..
+        } => ("DAPLINK-RS", glyph::STOCK, Some(color::TEXT_2)),
         State::SwdJumper {
             firmware: Jumpered::Ours,
         }
@@ -1254,9 +1258,9 @@ impl VergeApp {
                 }
                 State::Held { .. } => "ANOTHER PROGRAM HOLDS ITS CMSIS-DAP".to_owned(),
                 State::Probe { .. } => match offer(unit, &self.units).best() {
-                    Some(Path::OursJumperFree | Path::StockJumperFree) => {
-                        "UPDATES WITHOUT THE JUMPER"
-                    }
+                    Some(
+                        Path::OursJumperFree | Path::StockJumperFree | Path::DaplinkRsJumperFree,
+                    ) => "UPDATES WITHOUT THE JUMPER",
                     Some(Path::Jumper) => "NEEDS THE ISP JUMPER TO UPDATE",
                     _ => "CANNOT BE UPDATED AS IT IS",
                 }

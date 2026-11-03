@@ -12,6 +12,7 @@ use verge_probe::batch::{
     ArmError, Armed, Batch, Entry, Filter, Observer, Record, RecordWriter, Status, Tally,
     open_record,
 };
+use verge_probe::dap::EntryError;
 use verge_probe::progress::{Cancel, Progress, Step};
 use verge_probe::release::{Download, GitHub, Http, Release, ReleaseError};
 use verge_probe::source::{self, LoadError, Loaded, Source};
@@ -276,7 +277,10 @@ fn update_error(error: &UpdateError) -> JobError {
             false,
         ),
         UpdateError::Ambiguous { .. } => (Some("Look at what is attached now."), false),
-        UpdateError::NoBootloader(_) | UpdateError::OursEntry(_) | UpdateError::StockEntry(_) => {
+        UpdateError::Entry(EntryError::DaplinkRsBusy) => {
+            (Some("Try again once it has finished."), false)
+        }
+        UpdateError::NoBootloader(_) | UpdateError::OursEntry(_) | UpdateError::Entry(_) => {
             (Some("Use the ISP jumper instead."), false)
         }
         _ => (None, false),

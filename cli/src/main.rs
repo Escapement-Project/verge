@@ -53,9 +53,9 @@ Examples:
 /// Control the Verge firmware, or update it.
 ///
 /// verge updates NXP's stock firmware as well as Verge. It finds every attached MCU-Link, says
-/// what it runs, and picks the best way to update it. A unit running Verge, or stock V3.122 or
-/// later, restarts into its bootloader when asked, so it needs no jumper. Anything else needs the
-/// ISP jumper, fitted before it is plugged in.
+/// what it runs, and picks the best way to update it. A unit running Verge, stock V3.122 or later,
+/// or daplink-rs restarts into its bootloader when asked, so it needs no jumper. Anything else
+/// needs the ISP jumper, fitted before it is plugged in.
 #[derive(Parser)]
 #[command(name = "verge", version, after_help = EXAMPLES)]
 struct Cli {
@@ -1448,6 +1448,13 @@ fn release<B: Bus, H: Http>(
                 Relation::Ahead => format!("runs {build}, newer than this release"),
                 Relation::Unknown => format!("runs {build}, which carries no version to compare"),
             },
+            (
+                None,
+                State::Probe {
+                    firmware: Firmware::DaplinkRs { .. },
+                    ..
+                },
+            ) => "runs daplink-rs; installing this release replaces it".to_owned(),
             (None, State::Probe { .. }) => {
                 "runs stock; installing this release replaces it".to_owned()
             }
