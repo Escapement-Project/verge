@@ -18,7 +18,7 @@ fn tool(scenario: &str) -> Command {
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../verge-probe/tests/fixtures")
+        .join("tests/fixtures")
         .join(name)
 }
 
