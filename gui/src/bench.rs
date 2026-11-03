@@ -1675,6 +1675,9 @@ const READINGS: [(&str, Reading); 9] = [
 /// that wanders a little leaves Y fitted.
 const DETENT: f32 = 12.0;
 
+/// The opacity of a column some of whose time was not measured, against a whole one.
+const PARTLY_MEASURED: f32 = 0.35;
+
 /// Marker labels sit in rows across the top of the plot.
 const LABEL_ROWS: usize = 3;
 const LABEL_TOP: f32 = 4.0;
@@ -1726,7 +1729,8 @@ fn trace<'a>(line: Line<'a>, color: Color32) -> Line<'a> {
 
 /// Each bin's range, from its least reading to its greatest, filled and edged. A pulse narrower
 /// than a bin still reaches its height in the bin that holds it, where a bin's mean would depend on
-/// how much of the pulse falls inside. A run of bins breaks where one was not wholly measured.
+/// how much of the pulse falls inside. A bin not wholly measured is a run of its own, drawn paler, so
+/// a gap narrower than a column still shows.
 fn draw(plot: &mut PlotUi<'_>, bins: &[Envelope], quantity: Quantity, color: Color32) {
     let mut first = 0;
     for next in 1..=bins.len() {
@@ -1737,6 +1741,11 @@ fn draw(plot: &mut PlotUi<'_>, bins: &[Envelope], quantity: Quantity, color: Col
         if joined {
             continue;
         }
+        let color = if bins[first].gap {
+            color.gamma_multiply(PARTLY_MEASURED)
+        } else {
+            color
+        };
         let mut xs = Vec::new();
         let mut lows = Vec::new();
         let mut highs = Vec::new();
@@ -1885,6 +1894,57 @@ mod tests {
                     chunk.to_vec(),
                 )))
                 .unwrap();
+        }
+        writer
+            .ingest(Message::End(End {
+                reason: EndReason::Stopped,
+                last_sequence: count - 1,
+            }))
+            .unwrap();
+        writer.finish().unwrap();
+    }
+    /// Like [`capture`], with the pairs in `lost` never arriving.
+    fn capture_lossy(
+        path: &Path,
+        rate: u32,
+        count: u32,
+        code: impl Fn(u32) -> u16,
+        lost: &[std::ops::Range<u32>],
+    ) {
+        let header: Header = serde_json::from_value(serde_json::json!({"rate":rate,"setting_ma":350,"full_scale_mv":3300,"first_sequence":0,"previous_low":true,
+            "low":[{"code":0,"current_nanoamps":0},{"code":65535,"current_nanoamps":350000000}],"high":[],"dio_mask":0,"dio_levels":0,"edge_resolution_ns":11})).unwrap();
+        let period = 1_000_000_000 / u64::from(rate);
+        let mut writer = CaptureWriter::create(path).unwrap();
+        writer.ingest(Message::Header(header)).unwrap();
+        let mut first = 0;
+        while first < count {
+            if let Some(gap) = lost.iter().find(|gap| gap.contains(&first)) {
+                first = gap.end;
+                continue;
+            }
+            let next_gap = lost
+                .iter()
+                .map(|gap| gap.start)
+                .filter(|&start| start > first)
+                .min()
+                .unwrap_or(count);
+            let end = (first + 99).min(count).min(next_gap);
+            let pairs = (first..end)
+                .map(|i| Pair {
+                    voltage_code: 32768,
+                    current_code: code(i),
+                    low: true,
+                })
+                .collect();
+            writer
+                .ingest(Message::Pairs(Pairs::new(
+                    0,
+                    first,
+                    u64::from(first) * period,
+                    pairs,
+                )))
+                .unwrap();
+            first = end;
         }
         writer
             .ingest(Message::End(End {
@@ -2114,14 +2174,7 @@ mod tests {
             &path,
             1000,
             60_000,
-            |i| {
-                let noise = (i.wrapping_mul(2_654_435_761) >> 24) as u16;
-                if i % 10 < 2 {
-                    2900 + noise / 2
-                } else {
-                    340 + noise / 16
-                }
-            },
+            noisy_marker,
             true,
             &[
                 verge_probe::stream::Marker {
@@ -2176,6 +2229,44 @@ mod tests {
             h.step();
             let file = format!("bench-marker-{name}.png");
             h.render().unwrap().save(dir.join(file)).unwrap();
+        }
+        // The same shape with pairs lost: one, three, and 300 in a run.
+        let path = dir.join("lossy.vergecapture");
+        if path.exists() {
+            std::fs::remove_file(&path).unwrap();
+        }
+        capture_lossy(
+            &path,
+            1000,
+            60_000,
+            noisy_marker,
+            &[20_503..20_506, 21_007..21_008, 24_000..24_300],
+        );
+        let mut bench = Bench::new(&dir);
+        bench.open(path);
+        let mut h = harness(bench, true);
+        wait(&mut h);
+        for (name, start, span) in [
+            ("10s", 20_000_000_000, 10_000_000_000),
+            ("2s", 20_000_000_000, 2_000_000_000),
+            ("500ms", 20_300_000_000, 500_000_000),
+            ("end", 53_300_000_000, 7_000_000_000),
+        ] {
+            let visible = Interval::new(start, start + span);
+            h.state_mut().inspect(visible, None);
+            answered(&mut h, visible);
+            h.step();
+            let file = format!("bench-lossy-{name}.png");
+            h.render().unwrap().save(dir.join(file)).unwrap();
+        }
+    }
+    /// 2 ms of every 10, with noise on both levels.
+    fn noisy_marker(i: u32) -> u16 {
+        let noise = (i.wrapping_mul(2_654_435_761) >> 24) as u16;
+        if i % 10 < 2 {
+            2900 + noise / 2
+        } else {
+            340 + noise / 16
         }
     }
     #[test]
