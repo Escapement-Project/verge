@@ -1051,7 +1051,7 @@ fn cjtag_limits_the_formats_to_oscan1() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "offers two-pin OScan1, until it restarts.",
+            "offers cJTAG OScan1, until it restarts.",
         ));
 }
 
@@ -1062,7 +1062,7 @@ fn cjtag_shows_the_formats() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "offers two-pin OScan1, OScan2, OScan5.",
+            "offers cJTAG OScan1, OScan2, OScan5.",
         ));
 }
 
@@ -1073,7 +1073,7 @@ fn cjtag_limits_the_formats_to_a_set() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "offers two-pin OScan1, OScan5, until it restarts.",
+            "offers cJTAG OScan1, OScan5, until it restarts.",
         ));
 }
 
@@ -1492,7 +1492,7 @@ fn serial_goes_before_the_command_or_after_it() {
             .args(args)
             .assert()
             .success()
-            .stdout(predicate::str::contains("CJ3E7AB3E4 offers two-pin"));
+            .stdout(predicate::str::contains("CJ3E7AB3E4 offers cJTAG"));
     }
 }
 

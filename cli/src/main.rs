@@ -121,10 +121,10 @@ enum Command {
         /// A release tag. The latest release when left out.
         tag: Option<String>,
     },
-    /// Read target memory through a probe over SWD, JTAG or two-pin cJTAG, as probe-rs's read does.
+    /// Read target memory through a probe over SWD, JTAG or cJTAG, as probe-rs's read does.
     ///
     /// Prints probe-rs's hex table on stdout and nothing else: each line is its address and eight
-    /// values, four for b64. Two-pin works on a unit running Verge; `verge cjtag --formats` picks
+    /// values, four for b64. cJTAG works on a unit running Verge; `verge cjtag --formats` picks
     /// which formats it offers the target.
     Read(read::ReadArgs),
     /// Read an image file and say what it puts into flash. Touches no USB device.
@@ -132,7 +132,7 @@ enum Command {
         /// An ELF or S-record file.
         file: PathBuf,
     },
-    /// Show or limit the two-pin (cJTAG) scan formats a unit running Verge offers a host.
+    /// Show or limit the cJTAG scan formats a unit running Verge offers a host.
     ///
     /// A host frames the format it prefers of those both the unit and the target have. --oscan1-only leaves it
     /// OScan1, which is what to look at on an analyser, and --formats picks a set, so that a host
@@ -645,7 +645,7 @@ fn list<B: Bus>(bus: &B, verbose: bool, serial: Option<&str>) -> Result<()> {
             if let Firmware::Ours(ours) = firmware {
                 field("capabilities", Some(&ours.flag_names().join(", ")))?;
                 if let Some(names) = ours.scan_format_names() {
-                    field("two-pin", Some(&names.join(", ")))?;
+                    field("cJTAG", Some(&names.join(", ")))?;
                 }
             }
         }
@@ -1185,7 +1185,7 @@ fn cjtag<B: Bus>(bus: &B, args: &CjtagArgs, serial: Option<&str>) -> Result<()> 
     let serial = unit.serial().unwrap_or("the unit");
     if let State::Held { .. } = unit.state {
         bail!(
-            "another program holds {serial}'s CMSIS-DAP interface, and the two-pin formats are set only through it"
+            "another program holds {serial}'s CMSIS-DAP interface, and the cJTAG formats are set only through it"
         );
     }
     let State::Probe {
@@ -1194,7 +1194,7 @@ fn cjtag<B: Bus>(bus: &B, args: &CjtagArgs, serial: Option<&str>) -> Result<()> 
     } = &unit.state
     else {
         bail!(
-            "{serial} is {}, not running Verge, so it has no two-pin formats to show or limit",
+            "{serial} is {}, not running Verge, so it has no cJTAG formats to show or limit",
             unit.state
         );
     };
@@ -1227,7 +1227,7 @@ fn cjtag<B: Bus>(bus: &B, args: &CjtagArgs, serial: Option<&str>) -> Result<()> 
     } else {
         ""
     };
-    outputln!("{serial} offers two-pin {}{until}.", names.join(", "));
+    outputln!("{serial} offers cJTAG {}{until}.", names.join(", "));
     Ok(())
 }
 

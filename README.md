@@ -104,7 +104,7 @@ verge isp info              # report the ROM bootloader version
 verge batch                 # update each unit as it is plugged in, until Ctrl-C
 verge release               # the latest release, and how each unit compares
 verge inspect image.s19     # what an image puts into flash; touches no USB device
-verge cjtag --oscan1-only   # offer a host two-pin OScan1 alone, until the unit restarts
+verge cjtag --oscan1-only   # offer a host OScan1 alone, until the unit restarts
 verge dio --high all        # drive all four of a Pro's DIO pins high
 verge power on              # switch on a Pro's target supply
 verge energy watch          # a Pro's target current and energy, live
@@ -193,7 +193,7 @@ at the first marker and leaves the markers out. The sigrok
 sidecar also gives each marker's `session_time_ns`, relative to the exported session's first
 sample. It can be negative when a marker precedes that sample.
 
-`read` reads target memory through a probe over SWD, JTAG or two-pin cJTAG, and prints the table
+`read` reads target memory through a probe over SWD, JTAG or cJTAG, and prints the table
 probe-rs's `read` prints: each line is an address and eight values, four for `b64`. It picks among
 every probe probe-rs can drive, not only MCU-Links. Set the clock in kHz with `--speed`. `--time`
 prints the attach and read times on stderr. Like probe-rs's `read`, it resumes any halted core when
