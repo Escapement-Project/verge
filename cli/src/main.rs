@@ -27,7 +27,7 @@ use verge_probe::ids::Role;
 use verge_probe::image::{Image, PAGE};
 use verge_probe::paths::ISP_IDENTITY_WARNING;
 use verge_probe::progress::{Progress, Step};
-use verge_probe::release::{DEFAULT_REPO, GitHub, Http, Repo, Ureq};
+use verge_probe::release::{DEFAULT_REPO, GitHub, Http, ReleaseError, Repo, Ureq};
 #[cfg(feature = "simulate")]
 use verge_probe::sim::http::SimHttp;
 #[cfg(feature = "simulate")]
@@ -687,11 +687,11 @@ fn load<H: Http>(
 ) -> Result<Loaded> {
     let progress = &mut Bars::default();
     source::load_asking(&source.to_core(), github, unit, force, agree, progress)?
-        .map_err(|error| load_error(error, github))
+        .map_err(|error| load_error(error, github.repo()))
 }
 
 /// Why an image did not load, with the flags that change it.
-fn load_error<H: Http>(error: LoadError, github: &GitHub<H>) -> anyhow::Error {
+fn load_error(error: LoadError, repo: &Repo) -> anyhow::Error {
     match error {
         error @ LoadError::AlreadyRuns { .. } => {
             anyhow::anyhow!("{error}. Pass --force to flash it again")
@@ -703,8 +703,19 @@ fn load_error<H: Http>(error: LoadError, github: &GitHub<H>) -> anyhow::Error {
         error @ (LoadError::OtherBoard { .. } | LoadError::NotForBoard { .. }) => {
             anyhow::anyhow!("{error} with --stock")
         }
-        LoadError::Release(error) => anyhow::Error::new(error)
-            .context(format!("looking up Verge releases in {}", github.repo())),
+        LoadError::Release(error) => {
+            let doing = match error {
+                ReleaseError::NotFound { .. }
+                | ReleaseError::Refused(_)
+                | ReleaseError::Unreachable(_)
+                | ReleaseError::Json(_) => "looking up Verge releases in",
+                // The lookup's and the download's, and its message names the URL.
+                ReleaseError::Http(_) => "getting a release from",
+                // After the lookup found the release.
+                _ => "installing a release from",
+            };
+            anyhow::Error::new(error).context(format!("{doing} {repo}"))
+        }
         error => error.into(),
     }
 }
@@ -1544,5 +1555,55 @@ fn explain(error: UpdateError, again: &str, unit: Option<&Unit>) -> anyhow::Erro
     match next {
         Some(next) => anyhow::anyhow!("{error}. {next}"),
         None => anyhow::Error::new(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A release the lookup found and the tool then refused is not a failed lookup.
+    #[test]
+    fn a_refused_release_is_not_called_a_lookup() {
+        use verge_probe::release::HttpError;
+        let repo = Repo::default();
+        let http = || HttpError::Status {
+            status: 502,
+            url: "https://api.github.com/".into(),
+        };
+        let cases = [
+            (
+                ReleaseError::NotFound {
+                    repo: repo.to_string(),
+                    tag: Some("v9.9.9".into()),
+                },
+                "looking up Verge releases in",
+            ),
+            (ReleaseError::Refused(403), "looking up Verge releases in"),
+            (
+                ReleaseError::Unreachable(HttpError::Transport("no route".into())),
+                "looking up Verge releases in",
+            ),
+            (
+                ReleaseError::Json("eof".into()),
+                "looking up Verge releases in",
+            ),
+            (ReleaseError::Http(http()), "getting a release from"),
+            (
+                ReleaseError::SignatureForAnotherRelease {
+                    name: "mculink-verge-v0.0.1.s19.minisig".into(),
+                    signed: "v0.0.0".into(),
+                    tag: "v0.0.1".into(),
+                },
+                "installing a release from",
+            ),
+        ];
+        for (error, doing) in cases {
+            let message = format!("{:#}", load_error(LoadError::Release(error), &repo));
+            assert!(
+                message.starts_with(&format!("{doing} {repo}: ")),
+                "{message}"
+            );
+        }
     }
 }
