@@ -15,7 +15,8 @@ use verge_probe::pro::{Feature, ProLink, check_offered};
 use verge_probe::stream::EndReason;
 use verge_probe::{
     Bus, CalibrationRange, Cancel, CommandError, EnergyAccumulator, EnergyCalibration,
-    EnergyCaptureSample, EnergyError, EnergyTotal, VergeControl, VergeInfo, VergeTransport, dap,
+    EnergyCaptureSample, EnergyError, EnergyRanges, EnergyTotal, VergeControl, VergeInfo,
+    VergeTransport, dap,
 };
 
 #[derive(Args)]
@@ -31,6 +32,45 @@ enum Switch {
     Off,
 }
 
+/// `--range`: verge_probe::EnergyRanges as the command line spells it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum Ranges {
+    #[default]
+    Auto,
+    High,
+}
+
+impl Ranges {
+    /// What a capture on this setting does, as a clause.
+    fn holding(self) -> &'static str {
+        match self {
+            Ranges::Auto => "switching current ranges automatically",
+            Ranges::High => "holding the high range",
+        }
+    }
+}
+
+impl From<Ranges> for EnergyRanges {
+    fn from(ranges: Ranges) -> EnergyRanges {
+        match ranges {
+            Ranges::Auto => EnergyRanges::Auto,
+            Ranges::High => EnergyRanges::High,
+        }
+    }
+}
+
+/// `--range`, for the commands that can start a capture.
+#[derive(Args, Clone, Copy, Debug, Default)]
+pub struct RangeArg {
+    /// Which current ranges a capture this starts uses. auto, the default, switches between the
+    /// low and high ranges as the current moves: it reads currents down to tens of nA, but each
+    /// switch disturbs the reading for about a millisecond. high holds the high range, so the
+    /// reading follows the target undisturbed, but currents under about 0.36 mA in the 350 mA
+    /// setting read unreliably. Either way, a high-range pair under that is marked under range.
+    #[arg(long, value_enum)]
+    pub range: Option<Ranges>,
+}
+
 #[derive(Subcommand)]
 pub enum EnergyCommand {
     /// Start a capture. It runs in the probe until `stop`, the next start or a restart, so a
@@ -42,6 +82,8 @@ pub enum EnergyCommand {
         /// Voltage and current pairs a second, 1 to 100,000.
         #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..=100_000))]
         rate: u32,
+        #[command(flatten)]
+        range: RangeArg,
     },
     /// Show the newest voltage and current pair.
     Latest,
@@ -73,6 +115,8 @@ pub enum EnergyCommand {
         /// Leave after this long instead of waiting for a key.
         #[arg(long = "for", value_name = "DURATION", value_parser = humantime::parse_duration)]
         limit: Option<Duration>,
+        #[command(flatten)]
+        range: RangeArg,
     },
     /// Record every pair of a capture to a sigrok session file, which PulseView opens.
     ///
@@ -106,6 +150,8 @@ pub enum EnergyCommand {
         /// shorter than a pair stretched to one; CSV gives each edge's time.
         #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = crate::parse_dio_pins)]
         dio: Vec<u8>,
+        #[command(flatten)]
+        range: RangeArg,
     },
 }
 
@@ -187,7 +233,10 @@ pub fn energy<B: Bus>(
 ) -> Result<()> {
     let energy = Feature::Energy;
     match command {
-        EnergyCommand::Start { rate } => with_pro(bus, serial, energy, |name, pro| {
+        EnergyCommand::Start { rate, range } => with_pro(bus, serial, energy, |name, pro| {
+            let range = range.range.unwrap_or_default();
+            pro.set_energy_ranges(range.into())
+                .with_context(|| format!("setting {name}'s current ranges"))?;
             let start = pro
                 .start_energy_capture_identified(*rate)
                 .with_context(|| format!("starting {name}'s capture"))?;
@@ -197,7 +246,10 @@ pub fn energy<B: Bus>(
             } else {
                 format!(" (asked for {rate})")
             };
-            outputln!("{name} captures {actual} pairs a second{asked}.");
+            outputln!(
+                "{name} captures {actual} pairs a second{asked}, {}.",
+                range.holding()
+            );
             Ok(())
         }),
         EnergyCommand::Latest => with_pro(bus, serial, energy, |name, pro| {
@@ -304,12 +356,14 @@ pub fn energy<B: Bus>(
             every,
             window,
             limit,
+            range,
         } => with_pro(bus, serial, energy, |name, pro| {
             let options = watch::Options {
                 rate: *rate,
                 every: *every,
                 window: *window,
                 limit: *limit,
+                range: range.range,
             };
             let ended = watch::watch(bus, name, pro, &options, cancel)?;
             let total = match ended.total {
@@ -329,6 +383,7 @@ pub fn energy<B: Bus>(
             limit,
             csv,
             dio,
+            range,
         } => {
             let options = record::Options {
                 out: out.clone(),
@@ -336,6 +391,7 @@ pub fn energy<B: Bus>(
                 limit: *limit,
                 csv: *csv,
                 dio: dio.iter().fold(0, |mask, pin| mask | pin),
+                range: range.range,
             };
             record(bus, serial, &options, cancel)
         }
@@ -381,6 +437,15 @@ fn record<B: Bus>(
         "{name}: {} pairs to {file}, {energy}; {why}.",
         recorded.pairs
     );
+    if recorded.high_range_only {
+        outputln!("The capture held the high range.");
+    }
+    if recorded.under_range > 0 {
+        outputln!(
+            "{} pairs were read under range, too near the high range's floor to trust: the file marks them.",
+            recorded.under_range
+        );
+    }
     if recorded.lost > 0 {
         outputln!(
             "{} pairs were lost: the probe dropped messages this side did not read in time.",
@@ -470,7 +535,47 @@ pub(crate) fn si(value: f64, unit: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::si;
+    use super::{EnergyCommand, RangeArg, Ranges, energy, si};
+    use std::time::Duration;
+    use verge_probe::stream::{Header, Message};
+    use verge_probe::{Bus, Cancel, VergeControl};
+
+    /// Starts a capture on a simulated Pro with `energy start`, after another host asked for the
+    /// high range, and returns the header of a stream of it.
+    fn start(range: Option<Ranges>) -> Header {
+        let bus = verge_probe::sim::SimBus::scenario("ours-pro").unwrap();
+        let device = verge_probe::detect(&bus).unwrap().remove(0).device;
+        let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+        VergeControl::new(&mut aux)
+            .set_energy_ranges(verge_probe::EnergyRanges::High)
+            .unwrap();
+        drop(aux);
+        let command = EnergyCommand::Start {
+            rate: 1000,
+            range: RangeArg { range },
+        };
+        energy(&bus, &command, None, &Cancel::new()).unwrap();
+        let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+        VergeControl::new(&mut aux)
+            .stream_energy_capture_identified(0)
+            .unwrap();
+        loop {
+            match aux.message(Duration::from_secs(1)).unwrap() {
+                Some(Message::Header(header)) => return header,
+                Some(_) => {}
+                None => panic!("no header"),
+            }
+        }
+    }
+
+    /// `energy start` asks for its range every time, so an earlier request by another host does
+    /// not decide it.
+    #[test]
+    fn a_start_uses_the_range_it_was_given() {
+        assert!(start(Some(Ranges::High)).high_range_only);
+        assert!(!start(Some(Ranges::Auto)).high_range_only);
+        assert!(!start(None).high_range_only);
+    }
 
     #[test]
     fn si_keeps_three_significant_figures_across_prefixes() {

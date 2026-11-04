@@ -154,14 +154,38 @@ connection at a fast clock. A stopped capture keeps its total until the next sta
 first, which disconnects J9 from the target for about 0.2 s. A target powered through J9 loses its
 supply for that time.
 
+The probe reads the current on one of two ranges. `--range`, on `energy start`, `watch` and
+`record`, sets how a capture they start uses them:
+
+- **`auto`**, the default, switches between the ranges as the current moves. The low range reads
+  currents down to tens of nA, which a sleeping target needs. But each switch disturbs the reading.
+  When the current falls, the probe moves to the low range within about 2 ms, and the low range's
+  sense resistor lowers the target's supply. For about a millisecond the target's own decoupling
+  then feeds part of its load, so the reading dips below what the target draws. When the current
+  rises again, the decoupling recharges in a few microseconds, and the total misses most of that.
+- **`high`** holds the high range for the whole capture. Nothing switches, so the reading follows
+  what the target draws. But the high range reads small currents unreliably. With the 350 mA
+  jumper setting, that starts under about 0.36 mA: a target asleep at 166 µA read anywhere from
+  137 to 363 µA. Scaled to the 50 mA setting, the limit is about 46 µA, which has not been
+  measured.
+
+Either way, a pair read on the high range under that limit is marked under range. An `auto`
+capture marks the ones it reads after the current falls, before it switches down.
+
+Use `high` to see the shape of a load that stays above the limit. Use `auto` for a target that
+sleeps under it, which only the low range reads reliably. `--range` applies only to a capture the
+command starts: `watch` and `record` show a running capture with the setting it started with, and
+warn if given `--range`.
+
 `energy watch` shows a capture live, and starts one if none runs. Over a capture that a fault
 stopped, it shows that capture's total and then starts a new one, which clears it. It stops only a
 capture it started. The screen shows the newest pair, the total and the mean power, over two graphs.
-Through Verge Aux, the current graph shows every pair, as the lowest and highest in each column. A
-Verge image older than Verge Aux gives only the newest pair at each read, so the graph can miss
-short peaks. The power graph plots each interval's mean from the total, which counts every pair. Q,
-Esc or Ctrl-C leaves, and `--for` leaves after a set time. Where the output is not a terminal, it
-prints a line for each read instead.
+Its title says when the capture holds the high range, and the total's line counts the pairs marked
+under range since the watch began. Through Verge Aux, the current graph shows every pair, as the
+lowest and highest in each column. A Verge image older than Verge Aux gives only the newest pair at
+each read, so the graph can miss short peaks. The power graph plots each interval's mean from the
+total, which counts every pair. Q, Esc or Ctrl-C leaves, and `--for` leaves after a set time. Where
+the output is not a terminal, it prints a line for each read instead.
 
 `energy record --out FILE` saves every pair of a capture. It reads them through Verge Aux, so it
 works while a debugger holds the probe. Like `watch`, it starts a capture if none runs and stops only
@@ -172,9 +196,10 @@ probe measures nothing for a moment while it reads the target's supply or times 
 There the last pair repeats and a logic channel, GAP, is high, so the time axis stays true. A pair
 taken as the current range switched carries the current the probe's total gives it, from the pairs
 either side, so the recording adds up to that total. `--csv` writes one line per pair instead: its sequence number, its
-time in ns since the capture started, millivolts, nanoamps, and the current range it was read on,
-`low` or `high`. The GUI's CSV export leaves it empty for a capture saved before the column
-existed. The low range lowers the target's supply by up to about 90 mV, so a target can draw a
+time in ns since the capture started, millivolts, nanoamps, and the current range it was read on:
+`low`, `high`, or `under` for a pair marked under range. A sigrok session marks those pairs on a
+logic channel of their own, UNDER. The GUI's CSV export leaves the range empty for a capture saved
+before the column existed. The low range lowers the target's supply by up to about 90 mV, so a target can draw a
 little differently on each. A Verge image older than Verge Aux cannot record.
 
 Markers from a debug session keep their own times. CSV gives each marker a row with its number

@@ -1847,6 +1847,7 @@ mod tests {
                     voltage_code: 32768,
                     current_code: code(i),
                     low: true,
+                    under_range: false,
                 })
                 .collect();
             writer
@@ -1934,6 +1935,7 @@ mod tests {
                     voltage_code: 32768,
                     current_code: code(i),
                     low: true,
+                    under_range: false,
                 })
                 .collect();
             writer

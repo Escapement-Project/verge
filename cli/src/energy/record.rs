@@ -20,6 +20,8 @@ pub struct Options {
     pub csv: bool,
     /// The DIO pins whose edges to record, bit `k` for DIO`k`.
     pub dio: u8,
+    /// The current ranges for a capture this starts; automatic unless given.
+    pub range: Option<super::Ranges>,
 }
 
 /// How long a read waits before the limit and Ctrl-C are checked again.
@@ -37,6 +39,10 @@ pub struct Recorded {
     pub dio: u8,
     pub edges: u64,
     pub edges_lost: u64,
+    /// The capture held the high range, as its header says.
+    pub high_range_only: bool,
+    /// Pairs read under range (Sample::under_range).
+    pub under_range: u64,
 }
 
 /// Records the capture that runs, or starts one at `options.rate`, until the limit, Ctrl-C or the
@@ -70,9 +76,16 @@ pub fn record<B: Bus, L: AuxLink>(
     // The probe answers before the file is touched, so a refused start leaves an earlier
     // recording there as it was.
     if running {
+        if options.range.is_some() {
+            tracing::warn!(
+                "{name} already runs a capture, which keeps its current ranges: --range is for a capture this starts"
+            );
+        }
         pro.stream_energy_capture_identified(options.dio)
             .with_context(|| format!("streaming {name}'s capture"))?;
     } else {
+        pro.set_energy_ranges(options.range.unwrap_or_default().into())
+            .with_context(|| format!("setting {name}'s current ranges"))?;
         pro.start_energy_stream_identified(options.rate, options.dio)
             .with_context(|| format!("starting {name}'s capture; completion may be uncertain"))?;
     }
@@ -140,6 +153,11 @@ fn stream<B: Bus, L: AuxLink>(
     // A pairs message's samples wait for the next one: every edge up to them has come by then.
     let mut held: Vec<Sample> = Vec::new();
     let (mut dio, mut edges, mut edges_lost) = (0u8, 0u64, 0u64);
+    let (mut high_range_only, mut under_range) = (false, 0u64);
+    let mut count = |samples: Vec<Sample>| {
+        under_range += samples.iter().filter(|s| s.under_range).count() as u64;
+        samples
+    };
     loop {
         if converter.is_none() && bus.now().saturating_sub(began) >= END_WAIT {
             bail!("{name} did not provide its capture header");
@@ -179,6 +197,7 @@ fn stream<B: Bus, L: AuxLink>(
                     levels: header.dio_levels,
                 })?;
                 dio = header.dio_mask;
+                high_range_only = header.high_range_only;
                 next_sequence = Some(header.first_sequence);
                 converter = Some(Converter::new(&header));
             }
@@ -200,7 +219,7 @@ fn stream<B: Bus, L: AuxLink>(
                 converter.add_message(&pairs);
                 writer.send(Output::Pairs(std::mem::replace(
                     &mut held,
-                    converter.take_samples(),
+                    count(converter.take_samples()),
                 )))?;
             }
             Message::End(end) => {
@@ -213,7 +232,7 @@ fn stream<B: Bus, L: AuxLink>(
                     lost += skipped(next, end.last_sequence.wrapping_add(1));
                 }
                 converter.end();
-                held.extend(converter.take_samples());
+                held.extend(count(converter.take_samples()));
                 writer.send(Output::Pairs(held))?;
                 let total = converter.total();
                 return Ok(Recorded {
@@ -224,6 +243,8 @@ fn stream<B: Bus, L: AuxLink>(
                     dio,
                     edges,
                     edges_lost,
+                    high_range_only,
+                    under_range,
                 });
             }
             Message::Edges(message) => {
@@ -319,6 +340,7 @@ mod tests {
             millivolts,
             nanoamps,
             range: Some(verge_probe::stream::CurrentRange::Low),
+            under_range: false,
         }
     }
 
@@ -359,15 +381,46 @@ mod tests {
         assert_eq!(read(&mut zip, "version"), b"2");
         assert_eq!(read(&mut zip, "logic-1-1"), [0, 0, 0, 1, 1, 0, 0]);
         assert_eq!(
-            floats(&read(&mut zip, "analog-1-2-1")),
+            floats(&read(&mut zip, "analog-1-3-1")),
             [3.3, 3.3, 3.29, 3.29, 3.29, 3.28, 3.28]
         );
         assert_eq!(
-            floats(&read(&mut zip, "analog-1-3-1")),
+            floats(&read(&mut zip, "analog-1-4-1")),
             [0.02, 5.0, 0.001, 0.001, 0.001, 0.002, 0.003]
         );
         let metadata = String::from_utf8(read(&mut zip, "metadata")).unwrap();
         assert!(metadata.contains("samplerate=1 kHz\n"), "{metadata}");
+    }
+
+    /// A pair read under the high range's floor is high on UNDER, the last logic channel; CSV
+    /// names its range `under`.
+    #[test]
+    fn a_pair_under_the_high_range_is_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut samples = [sample(1, 0, 3300, 20_000), sample(2, 1, 3300, 5_000_000)];
+        for s in &mut samples {
+            s.range = Some(verge_probe::stream::CurrentRange::High);
+        }
+        samples[0].under_range = true;
+        let path = dir.path().join("under.sr");
+        let mut sink = Sink::create(&path, false).unwrap();
+        sink.begin(1000, 0, 0).unwrap();
+        sink.samples(&samples).unwrap();
+        sink.finish().unwrap();
+        let mut zip = zip::ZipArchive::new(File::open(&path).unwrap()).unwrap();
+        assert_eq!(read(&mut zip, "logic-1-1"), [2, 0]);
+        let metadata = String::from_utf8(read(&mut zip, "metadata")).unwrap();
+        assert!(metadata.contains("probe2=UNDER\n"), "{metadata}");
+        let path = dir.path().join("under.csv");
+        let mut sink = Sink::create(&path, true).unwrap();
+        sink.begin(1000, 0, 0).unwrap();
+        sink.samples(&samples).unwrap();
+        sink.finish().unwrap();
+        let csv = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            csv.contains("1,0,3300,20000,under\n") && csv.contains("2,1000000,3300,5000000,high\n"),
+            "{csv}"
+        );
     }
 
     fn edge(time_ns: u64, levels: u8) -> Edge {
@@ -403,15 +456,15 @@ mod tests {
         sink.finish().unwrap();
 
         let mut zip = zip::ZipArchive::new(File::open(&path).unwrap()).unwrap();
-        // Bit 0 GAP, bit 1 DIO0, bit 2 DIO3.
+        // Bit 0 GAP, bit 1 DIO0, bit 2 DIO3, bit 3 UNDER.
         assert_eq!(read(&mut zip, "logic-1-1"), [6, 6, 4, 0, 7, 7, 6]);
-        assert_eq!(floats(&read(&mut zip, "analog-1-4-1")).len(), 7);
         assert_eq!(floats(&read(&mut zip, "analog-1-5-1")).len(), 7);
+        assert_eq!(floats(&read(&mut zip, "analog-1-6-1")).len(), 7);
         let metadata = String::from_utf8(read(&mut zip, "metadata")).unwrap();
         assert!(
             metadata.contains(
-                "total probes=3\nsamplerate=1 kHz\ntotal analog=2\nprobe1=GAP\nprobe2=DIO0\n\
-                 probe3=DIO3\nanalog4=V\nanalog5=mA\nunitsize=1\n"
+                "total probes=4\nsamplerate=1 kHz\ntotal analog=2\nprobe1=GAP\nprobe2=DIO0\n\
+                 probe3=DIO3\nprobe4=UNDER\nanalog5=V\nanalog6=mA\nunitsize=1\n"
             ),
             "{metadata}"
         );
@@ -457,6 +510,7 @@ mod tests {
                 millivolts: 1800,
                 nanoamps: n,
                 range: None,
+                under_range: false,
             })
             .collect();
         sink.samples(&samples).unwrap();
@@ -466,7 +520,7 @@ mod tests {
         assert_eq!(read(&mut zip, "logic-1-1").len(), CHUNK);
         assert_eq!(read(&mut zip, "logic-1-2").len(), 3);
         assert_eq!(
-            floats(&read(&mut zip, "analog-1-3-2")),
+            floats(&read(&mut zip, "analog-1-4-2")),
             [
                 CHUNK as f32 / 1e6,
                 (CHUNK + 1) as f32 / 1e6,
@@ -771,6 +825,7 @@ mod tests {
             limit: Some(Duration::from_millis(300)),
             csv,
             dio: 0,
+            range: Default::default(),
         }
     }
 

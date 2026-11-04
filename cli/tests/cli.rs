@@ -1254,7 +1254,20 @@ fn energy_start_reports_the_rate() {
         .args(["energy", "start", "--rate", "2000"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("captures 2000 pairs a second."));
+        .stdout(predicate::str::contains(
+            "captures 2000 pairs a second, switching current ranges automatically.",
+        ));
+}
+
+#[test]
+fn energy_start_reports_the_high_range_held() {
+    tool("ours-pro")
+        .args(["energy", "start", "--range", "high"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "captures 1000 pairs a second, holding the high range.",
+        ));
 }
 
 #[test]
@@ -1470,7 +1483,9 @@ fn energy_falls_back_to_cmsis_dap_when_verge_aux_is_taken() {
         .args(["energy", "start", "--rate", "2000"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("captures 2000 pairs a second."));
+        .stdout(predicate::str::contains(
+            "captures 2000 pairs a second, switching current ranges automatically.",
+        ));
 }
 
 #[test]
@@ -1599,7 +1614,7 @@ fn csv_lines(path: &std::path::Path) -> Vec<Vec<u64>> {
         .skip(1)
         .map(|line| {
             let fields: Vec<&str> = line.split(',').collect();
-            assert!(matches!(fields[4], "low" | "high"), "{line}");
+            assert!(matches!(fields[4], "low" | "high" | "under"), "{line}");
             fields[..4].iter().map(|v| v.parse().unwrap()).collect()
         })
         .collect()
@@ -1708,7 +1723,47 @@ fn energy_record_stops_the_capture_it_started() {
     let mut metadata = String::new();
     std::io::Read::read_to_string(&mut zip.by_name("metadata").unwrap(), &mut metadata).unwrap();
     assert!(metadata.contains("samplerate=2 kHz\n"), "{metadata}");
-    assert!(metadata.contains("analog3=mA\n"), "{metadata}");
+    assert!(metadata.contains("analog4=mA\n"), "{metadata}");
+}
+
+/// `--range high` holds the high range for the capture the recording starts: no pair is read on
+/// the low range, and the simulated target's sleep, under the floor, is marked `under`.
+/// Automatic, the default, reads the sleep on the low range.
+#[test]
+fn energy_record_holds_the_high_range_when_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    for (range, low, under) in [("auto", true, false), ("high", false, true)] {
+        let out = dir.path().join(format!("{range}.csv"));
+        let output = tool("ours-pro")
+            .args([
+                "energy", "record", "--csv", "--for", "500ms", "--range", range, "--out",
+            ])
+            .arg(&out)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let output = String::from_utf8_lossy(&output);
+        assert_eq!(
+            output.contains("The capture held the high range."),
+            !low,
+            "{range}: {output}"
+        );
+        assert_eq!(
+            output.contains("pairs were read under range"),
+            under,
+            "{range}: {output}"
+        );
+        let csv = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(
+            csv.contains(",low"),
+            low,
+            "{range}: {}",
+            &csv[..200.min(csv.len())]
+        );
+        assert_eq!(csv.contains(",under"), under, "{range}");
+    }
 }
 
 #[test]

@@ -30,6 +30,8 @@ pub struct Options {
     pub every: Duration,
     pub window: Duration,
     pub limit: Option<Duration>,
+    /// The current ranges for a capture this starts; automatic unless given.
+    pub range: Option<super::Ranges>,
 }
 
 /// One read of the probe, `at` seconds into the watch.
@@ -79,6 +81,11 @@ pub(crate) struct Model {
     /// Watts over each interval between reads, from the totals.
     power: VecDeque<(f64, f64)>,
     window: f64,
+    /// Whether the capture holds the high range: from the start this watch made, or the stream's
+    /// header. None for a capture found running until its header comes.
+    high_range_only: Option<bool>,
+    /// Streamed pairs of the capture read under range (Sample::under_range).
+    under_range: u64,
 }
 
 impl Model {
@@ -95,6 +102,8 @@ impl Model {
             envelope: VecDeque::new(),
             power: VecDeque::new(),
             window: window.as_secs_f64(),
+            high_range_only: None,
+            under_range: 0,
         }
     }
 
@@ -104,6 +113,8 @@ impl Model {
         self.rate = None;
         self.baseline = None;
         self.previous = None;
+        self.high_range_only = None;
+        self.under_range = 0;
     }
 
     fn slice_width(&self) -> f64 {
@@ -113,6 +124,7 @@ impl Model {
     /// Streamed pairs, whose capture clock reads `offset` seconds behind the watch's.
     fn add_pairs(&mut self, samples: &[Sample], offset: f64) {
         let width = self.slice_width();
+        self.under_range += samples.iter().filter(|s| s.under_range).count() as u64;
         for sample in samples {
             let index = ((offset + sample.time_ns as f64 * 1e-9) / width).floor() as i64;
             let amps = f64::from(sample.nanoamps) * 1e-9;
@@ -215,7 +227,7 @@ impl Model {
 
     fn total_text(&self) -> String {
         let Some((nanojoules, pairs)) = self.last.and_then(|reading| reading.total) else {
-            return "no total yet".to_owned();
+            return "no total yet".to_owned() + &self.under_range_text();
         };
         let mut text = format!("{} over {pairs} pairs", si(nanojoules as f64 * 1e-9, "J"));
         if let Some(watts) = self.mean_power() {
@@ -224,7 +236,15 @@ impl Model {
         if let Some(rate) = self.rate {
             text += &format!(", {rate:.0} pairs a second");
         }
-        text
+        text + &self.under_range_text()
+    }
+
+    /// The pairs read under range since the watch began, as a clause; empty for none.
+    fn under_range_text(&self) -> String {
+        match self.under_range {
+            0 => String::new(),
+            under => format!("; {under} pairs under range since the watch began"),
+        }
     }
 
     /// One read as a line, for output that is not a terminal.
@@ -235,7 +255,11 @@ impl Model {
             .back()
             .filter(|(when, _)| *when == at)
             .map_or_else(|| "-".to_owned(), |(_, watts)| si(*watts, "W"));
-        format!("{at:7.2} s  {}  interval {power}", self.pair_text())
+        format!(
+            "{at:7.2} s  {}  interval {power}{}",
+            self.pair_text(),
+            self.under_range_text()
+        )
     }
 }
 
@@ -257,7 +281,15 @@ pub(crate) fn render(frame: &mut Frame, model: &Model) {
             Line::from(model.total_text()),
             Line::from(leave).style(Style::new().fg(Color::DarkGray)),
         ])
-        .block(Block::bordered().title(format!(" {} energy ", model.name))),
+        .block(Block::bordered().title(format!(
+            " {} energy{} ",
+            model.name,
+            if model.high_range_only == Some(true) {
+                ", high range held"
+            } else {
+                ""
+            }
+        ))),
         header,
     );
     let graph = |title, points, unit, color| Graph {
@@ -390,12 +422,19 @@ pub fn watch<B: Bus>(
     }
     let streams = pro.transport().streams();
     let started_at = if running {
+        if options.range.is_some() {
+            tracing::warn!(
+                "{name} already runs a capture, which keeps its current ranges: --range is for a capture this starts"
+            );
+        }
         if streams {
             pro.stream_energy_capture_identified(0)
                 .with_context(|| format!("streaming {name}'s capture"))?;
         }
         None
     } else {
+        pro.set_energy_ranges(options.range.unwrap_or_default().into())
+            .with_context(|| format!("setting {name}'s current ranges"))?;
         let start = if streams {
             pro.start_energy_stream_identified(options.rate, 0)
         } else {
@@ -411,6 +450,13 @@ pub fn watch<B: Bus>(
         }
     };
     let mut model = Model::new(name, started_at, options.window);
+    if started_at.is_some() {
+        let range = options.range.unwrap_or_default();
+        model.high_range_only = Some(range == super::Ranges::High);
+        if range == super::Ranges::High && !std::io::stdout().is_terminal() {
+            outputln!("{name} holds the high range for this capture.");
+        }
+    }
     let shown = run(bus, pro, &mut model, options, totals, cancel);
     // The stream ends with the capture this started; one of a capture found running is ended
     // here, which leaves the capture running.
@@ -570,6 +616,7 @@ impl Stream {
                 self.converter = Some(Converter::new(&header));
                 self.rate = header.rate;
                 self.offset = None;
+                model.high_range_only = Some(header.high_range_only);
             }
             Message::Pairs(pairs) => {
                 let Some(converter) = &mut self.converter else {
@@ -811,6 +858,7 @@ mod tests {
                 millivolts: 3300,
                 nanoamps: if n == 437 { 5_000_000 } else { 20_000 },
                 range: None,
+                under_range: false,
             })
             .collect();
         model.add_pairs(&samples, 0.0);
@@ -859,6 +907,7 @@ mod tests {
             every: Duration::from_millis(100),
             window: Duration::from_secs(30),
             limit: Some(Duration::from_millis(300)),
+            range: Default::default(),
         };
         let ended = watch(&bus, "CJ3E7A91C2", &mut pro, &options, &Cancel::new()).unwrap();
         assert!(ended.running);
@@ -878,6 +927,7 @@ mod tests {
             every: Duration::from_millis(100),
             window: Duration::from_secs(30),
             limit: Some(Duration::ZERO),
+            range: Default::default(),
         };
         assert!(
             watch(&bus, "unit", &mut pro, &options, &Cancel::new())
@@ -905,6 +955,7 @@ mod tests {
             every: Duration::from_millis(100),
             window: Duration::from_secs(30),
             limit: Some(Duration::from_millis(500)),
+            range: Default::default(),
         };
         run(&bus, &mut pro, &mut model, &options, true, &Cancel::new()).unwrap();
         let highest = model
@@ -932,6 +983,68 @@ mod tests {
             "slices from {} s to {} s",
             first as f64 * width,
             last as f64 * width
+        );
+    }
+
+    /// A watch that starts its capture asks for the range first, and shows it held; one that
+    /// finds a capture running asks for nothing, which would decide the next start's instead.
+    #[test]
+    fn a_watch_asks_for_the_range_only_for_a_capture_it_starts() {
+        for running in [false, true] {
+            let (bus, device) = if running {
+                pro_with_a_capture()
+            } else {
+                let bus = verge_probe::sim::SimBus::scenario("ours-pro").unwrap();
+                let device = verge_probe::detect(&bus).unwrap().remove(0).device;
+                (bus, device)
+            };
+            let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+            let mut pro: Pro<'_> = verge_probe::VergeControl::new(&mut aux);
+            let options = Options {
+                rate: 1000,
+                every: Duration::from_millis(100),
+                window: Duration::from_secs(30),
+                limit: Some(Duration::from_millis(300)),
+                range: Some(super::super::Ranges::High),
+            };
+            watch(&bus, "CJ3E7A91C2", &mut pro, &options, &Cancel::new()).unwrap();
+            let log = aux_log(&bus);
+            let asked = log.iter().position(|hex| hex == "900e01");
+            let started = log.iter().position(|hex| hex.starts_with("9009"));
+            if running {
+                assert!(asked.is_none() && started.is_none(), "{log:?}");
+            } else {
+                assert!(asked.is_some() && asked < started, "{log:?}");
+            }
+        }
+    }
+
+    /// The title says the capture holds the high range, and the total line counts the pairs read
+    /// under range.
+    #[test]
+    fn the_screen_shows_the_high_range_held_and_pairs_under_range() {
+        let mut model = Model::new("CJ3E7A91C2", Some(1000), Duration::from_secs(30));
+        model.high_range_only = Some(true);
+        let samples: Vec<Sample> = (0..10)
+            .map(|n| Sample {
+                sequence: n + 1,
+                time_ns: u64::from(n) * 1_000_000,
+                millivolts: 3300,
+                nanoamps: 200_000,
+                range: Some(verge_probe::stream::CurrentRange::High),
+                under_range: n < 3,
+            })
+            .collect();
+        model.add_pairs(&samples, 0.0);
+        model.update(reading(1.0, 200_000, 1000, 10));
+        let screen = screen(&model);
+        assert!(
+            screen.contains("CJ3E7A91C2 energy, high range held"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("3 pairs under range since the watch began"),
+            "{screen}"
         );
     }
 
@@ -979,6 +1092,7 @@ mod tests {
             every: Duration::from_millis(100),
             window: Duration::from_secs(30),
             limit: Some(Duration::from_millis(300)),
+            range: Default::default(),
         };
         let ended = watch(&bus, "CJ3E7A91C2", &mut pro, &options, &Cancel::new()).unwrap();
         let log = aux_log(&bus);
