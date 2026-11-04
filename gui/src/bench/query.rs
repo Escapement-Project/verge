@@ -34,6 +34,8 @@ pub struct Answer {
     /// Beyond `view`, the overview's bins, and the parts of those `view` cuts, read for their own.
     pub fallback: Vec<Envelope>,
     pub selection: Option<(Interval, Statistics)>,
+    /// The capture held the high range (`Header::high_range_only`).
+    pub high_range_only: bool,
 }
 struct State {
     request: Option<Query>,
@@ -173,6 +175,8 @@ fn run(query: &Query) -> Result<Answer> {
         .selection
         .map(|i| archive.statistics(i, &query.cancel).map(|s| (i, s)))
         .transpose()?;
+    // An archive whose header this cannot read predates the setting.
+    let high_range_only = archive.header().is_ok_and(|header| header.high_range_only);
     Ok(Answer {
         view,
         digital,
@@ -186,6 +190,7 @@ fn run(query: &Query) -> Result<Answer> {
         overview,
         fallback,
         selection,
+        high_range_only,
     })
 }
 /// The parts of `interval` before and after `covered`.

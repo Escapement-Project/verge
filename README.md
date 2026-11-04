@@ -403,10 +403,12 @@ DIO3 changes alone. Switching to output asks first: check that the target is not
 Inputs have pull-downs. Outputs read their own drive. DIO requires current Verge firmware with
 DIO on Aux and J15 removed at startup.
 
-START RECORDING starts a capture at 1 to 100,000 pairs/s and records it. Starting clears the probe's
-energy total, and its calibration can interrupt target power for about 0.2 s. If another host
-already runs a capture, RECORD RUNNING CAPTURE records it at its own rate. STOP RECORDING stops a
-capture the window started, and leaves another host's running.
+START RECORDING starts a capture at 1 to 100,000 pairs/s and records it. AUTO RANGE and HIGH RANGE
+choose the current ranges, as `--range` does for `energy record`. Once the graph shows single pairs,
+a pair marked under range draws pale, and a capture that held the high range says so under the
+graph. Starting clears the probe's energy total, and its calibration can interrupt target power for
+about 0.2 s. If another host already runs a capture, RECORD RUNNING CAPTURE records it at its own
+rate. STOP RECORDING stops a capture the window started, and leaves another host's running.
 
 Capture start, recording and watch require firmware with conditional capture stop. Each keeps the
 identity of the capture it started or attached to. Cleanup leaves a replacement capture running.

@@ -5,11 +5,11 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use verge_probe::aux::Aux;
 use verge_probe::capture::Recorder;
-use verge_probe::pro;
 use verge_probe::stream::{EndReason, Message};
 use verge_probe::{
     Bus, CommandError, DioState, EnergyCaptureSample, EnergyError, Refused, Unit, VergeControl,
 };
+use verge_probe::{EnergyRanges, pro};
 
 #[derive(Clone, Copy, Debug)]
 pub struct DioChange {
@@ -24,9 +24,19 @@ pub enum Command {
     Disconnect,
     CancelSupply,
     CancelDio,
-    Dio { change: DioChange, confirmed: bool },
-    Supply { on: bool, confirmed: bool },
-    Start { rate: u32, path: PathBuf },
+    Dio {
+        change: DioChange,
+        confirmed: bool,
+    },
+    Supply {
+        on: bool,
+        confirmed: bool,
+    },
+    Start {
+        rate: u32,
+        ranges: EnergyRanges,
+        path: PathBuf,
+    },
     Stop,
 }
 
@@ -213,7 +223,7 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
                 self.status.confirm_off = false;
                 self.status.supply = VergeControl::new(&mut self.aux).set_target_power(on)?;
             }
-            Command::Start { rate, path } => {
+            Command::Start { rate, ranges, path } => {
                 if self.recording() {
                     bail!("a recording is already running");
                 }
@@ -233,9 +243,11 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
                         .stream_energy_capture_identified(mask)
                         .map(|()| None)
                 } else {
-                    control
-                        .start_energy_stream_identified(rate, mask)
-                        .map(|start| start.capture_id)
+                    control.set_energy_ranges(ranges).and_then(|()| {
+                        control
+                            .start_energy_stream_identified(rate, mask)
+                            .map(|start| start.capture_id)
+                    })
                 };
                 if let Err(error) = started {
                     // Nothing was recorded: leave no empty capture among those kept.
@@ -497,6 +509,7 @@ mod tests {
         assert!(s.command(Command::Start {
             rate: 1000,
             path: path.clone(),
+            ranges: Default::default(),
         }));
         assert!(!s.owned);
         for _ in 0..3 {
@@ -510,6 +523,40 @@ mod tests {
         let archive = verge_probe::capture::Archive::open(&path).unwrap();
         assert!(archive.extent().unwrap().duration_ns() > 0);
     }
+    /// The panel's range choice reaches the capture it starts: the archive's header says whether
+    /// the capture held the high range, and a held one has no pair read on the low range.
+    #[test]
+    fn a_start_uses_the_range_asked_for() {
+        for ranges in [EnergyRanges::Auto, EnergyRanges::High] {
+            let (_bus, mut s) = session("ours-pro-debugger");
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("capture.vergecapture");
+            assert!(s.command(Command::Start {
+                rate: 1000,
+                path: path.clone(),
+                ranges,
+            }));
+            for _ in 0..3 {
+                s.tick().unwrap();
+            }
+            s.close().unwrap();
+            let archive = verge_probe::capture::Archive::open(&path).unwrap();
+            let high = ranges == EnergyRanges::High;
+            assert_eq!(archive.header().unwrap().high_range_only, high);
+            let extent = archive.extent().unwrap();
+            let samples = archive
+                .view(extent, 8192, &std::sync::atomic::AtomicBool::new(false))
+                .unwrap()
+                .samples
+                .unwrap();
+            let low = samples
+                .iter()
+                .filter(|s| s.sample.range == Some(verge_probe::stream::CurrentRange::Low))
+                .count();
+            assert!(!samples.is_empty());
+            assert_eq!(low == 0, high, "{ranges:?}: {low} of {} low", samples.len());
+        }
+    }
     #[test]
     fn own_capture_stops_and_debugger_does_not_block_aux() {
         let (_bus, mut s) = session("ours-pro-debugger");
@@ -518,6 +565,7 @@ mod tests {
         assert!(s.command(Command::Start {
             rate: 100_000,
             path: path.clone(),
+            ranges: Default::default(),
         }));
         assert!(s.owned);
         for _ in 0..3 {
@@ -535,6 +583,7 @@ mod tests {
         assert!(s.command(Command::Start {
             rate: 1000,
             path: dir.path().join("capture.vergecapture"),
+            ranges: Default::default(),
         }));
         for _ in 0..2 {
             s.tick().unwrap();
@@ -601,7 +650,8 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             assert!(s.command(Command::Start {
                 rate: 1000,
-                path: dir.path().join("capture.vergecapture")
+                path: dir.path().join("capture.vergecapture"),
+                ranges: Default::default(),
             }));
             assert!(s.capture_id.is_none());
             if failure {
@@ -623,7 +673,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(s.command(Command::Start {
             rate: 1000,
-            path: dir.path().join("capture.vergecapture")
+            path: dir.path().join("capture.vergecapture"),
+            ranges: Default::default(),
         }));
         assert!(s.capture_id.is_none());
         s.fail(anyhow::anyhow!("disk failure before first tick"));
@@ -644,6 +695,7 @@ mod tests {
         assert!(s.command(Command::Start {
             rate: 0,
             path: path.clone(),
+            ranges: Default::default(),
         }));
         assert!(s.status().error.is_some());
         assert!(!s.recording());
@@ -741,7 +793,8 @@ mod hardware {
             let path = directory.join(format!("markers-{rate}.vergecapture"));
             assert!(session.command(Command::Start {
                 rate,
-                path: path.clone()
+                path: path.clone(),
+                ranges: Default::default(),
             }));
             assert!(session.status().error.is_none(), "{:?}", session.status());
             let mut sent = 0;
@@ -904,6 +957,7 @@ mod hardware {
             h.state_mut().worker.send(Request::Bench(Command::Start {
                 rate,
                 path: path.clone(),
+                ranges: Default::default(),
             }));
             until(&mut h, |r| r.bench.recording());
             if rate == 1000 {
@@ -1078,7 +1132,8 @@ mod dio_tests {
         let path = dir.path().join("markers.vergecapture");
         assert!(session.command(Command::Start {
             rate: 1000,
-            path: path.clone()
+            path: path.clone(),
+            ranges: Default::default(),
         }));
         for _ in 0..5 {
             session.tick().unwrap();
@@ -1183,7 +1238,8 @@ mod dio_tests {
             let path = dir.path().join("dio.vergecapture");
             assert!(session.command(Command::Start {
                 rate: 1000,
-                path: path.clone()
+                path: path.clone(),
+                ranges: Default::default(),
             }));
             let mut saw_high = false;
             let mut saw_low = false;

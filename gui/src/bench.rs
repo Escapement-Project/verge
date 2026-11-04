@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime};
 use verge_probe::capture::{
     Archive, Envelope, Interval, Statistics, Supported, recovered_sessions,
 };
-use verge_probe::{Unit, pro};
+use verge_probe::{EnergyRanges, Unit, pro};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Quantity {
@@ -80,6 +80,8 @@ pub struct Bench {
     pub status: Option<Status>,
     connection: Option<String>,
     rate: u32,
+    /// The current ranges for a capture the panel starts.
+    ranges: EnergyRanges,
     path: Option<PathBuf>,
     directory: PathBuf,
     recovered: Vec<PathBuf>,
@@ -136,6 +138,7 @@ impl Bench {
             status: None,
             connection: None,
             rate: 1000,
+            ranges: EnergyRanges::Auto,
             path: None,
             directory,
             recovered: Vec::new(),
@@ -293,6 +296,7 @@ impl Bench {
         let path = self.directory.join(format!("capture-{now}.vergecapture"));
         backend.send(Request::Bench(Command::Start {
             rate: self.rate,
+            ranges: self.ranges,
             path,
         }));
         self.start_confirm = false;
@@ -737,6 +741,37 @@ impl Bench {
                 }
             }
         });
+        if !status.capturing {
+            ui.horizontal_wrapped(|ui| {
+                for (ranges, words) in [
+                    (EnergyRanges::Auto, "Auto range"),
+                    (EnergyRanges::High, "High range"),
+                ] {
+                    if choice(ui, words, self.ranges == ranges).clicked() {
+                        self.ranges = ranges;
+                    }
+                }
+            });
+            ui.add(
+                egui::Label::new(
+                    text(
+                        Role::Body,
+                        match self.ranges {
+                            EnergyRanges::Auto => {
+                                "Reads currents down to tens of nA. Each switch to the low range \
+                                 dips the reading for about a millisecond."
+                            }
+                            EnergyRanges::High => {
+                                "Reads the target undisturbed, but currents under about 0.36 mA \
+                                 read unreliably and are marked under range."
+                            }
+                        },
+                    )
+                    .color(color::TEXT_2),
+                )
+                .wrap(),
+            );
+        }
         let words = if status.capturing {
             "Record running capture"
         } else {
@@ -1187,6 +1222,15 @@ impl Bench {
             &response.transform,
         );
         self.overview(ui, &answer, self.current().unwrap_or(visible), extent);
+        if answer.high_range_only {
+            ui.label(
+                text(
+                    Role::Data,
+                    "This capture held the high range: currents under about 0.36 mA read unreliably",
+                )
+                .color(color::TEXT_2),
+            );
+        }
         if answer.view.lost_pairs > 0 {
             ui.label(
                 text(
@@ -1776,7 +1820,8 @@ fn draw(plot: &mut PlotUi<'_>, bins: &[Envelope], quantity: Quantity, color: Col
 }
 
 /// Each sample held for the time it covers, with a mark where it starts once the marks are far
-/// enough apart to tell.
+/// enough apart to tell. A sample read under range, too near the high range's floor to trust,
+/// draws pale.
 fn draw_samples(
     plot: &mut PlotUi<'_>,
     samples: &[Supported],
@@ -1784,33 +1829,46 @@ fn draw_samples(
     color: Color32,
     x: &RangeInclusive<f64>,
 ) {
+    let pale = color.gamma_multiply(PARTLY_MEASURED);
     let mut held = Vec::new();
+    let mut held_under = false;
     let mut previous_end = None;
     for sample in samples {
-        if previous_end != Some(sample.sample.time_ns) && !held.is_empty() {
+        let under = sample.sample.under_range;
+        if (previous_end != Some(sample.sample.time_ns) || under != held_under) && !held.is_empty()
+        {
             plot.line(trace(
                 Line::new("Samples", std::mem::take(&mut held)),
-                color,
+                if held_under { pale } else { color },
             ));
         }
+        held_under = under;
         let value = quantity.value(sample);
         held.push([seconds(sample.sample.time_ns), value]);
         held.push([seconds(sample.end_ns), value]);
         previous_end = Some(sample.end_ns);
     }
     if !held.is_empty() {
-        plot.line(trace(Line::new("Samples", held), color));
+        plot.line(trace(
+            Line::new("Samples", held),
+            if held_under { pale } else { color },
+        ));
     }
     let shown = samples
         .iter()
         .filter(|s| (x.start()..=x.end()).contains(&&seconds(s.sample.time_ns)))
         .count();
     if shown > 0 && f64::from(plot.transform().frame().width()) / shown as f64 >= 6.0 {
-        let marks: Vec<_> = samples
-            .iter()
-            .map(|s| [seconds(s.sample.time_ns), quantity.value(s)])
-            .collect();
-        plot.points(Points::new("Samples", marks).color(color).radius(2.5));
+        for (under, color) in [(false, color), (true, pale)] {
+            let marks: Vec<_> = samples
+                .iter()
+                .filter(|s| s.sample.under_range == under)
+                .map(|s| [seconds(s.sample.time_ns), quantity.value(s)])
+                .collect();
+            if !marks.is_empty() {
+                plot.points(Points::new("Samples", marks).color(color).radius(2.5));
+            }
+        }
     }
 }
 #[cfg(test)]

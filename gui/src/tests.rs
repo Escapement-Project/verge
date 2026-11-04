@@ -700,6 +700,48 @@ fn pictures() {
     shoot(&mut h, "17-bench-recording");
     press(&mut h, "STOP RECORDING");
     until(&mut h, "RECORD RUNNING CAPTURE");
+
+    // A Pro with no capture running offers the current ranges for the one it would start.
+    let http = SimHttp::new(repo());
+    let worker = Worker::spawn(
+        SimBus::scenario("ours-pro").unwrap().paced(1.0),
+        GitHub::new(http, repo(), None),
+        || {},
+    );
+    let app = VergeApp::new(
+        Box::new(worker),
+        Log::default(),
+        Config {
+            repo: repo(),
+            simulated: Some("test".into()),
+            stock_dirs: vec![],
+            record_dir: dir.clone(),
+            cache: None,
+        },
+    );
+    let mut h = rendered(app);
+    until(&mut h, "BENCH");
+    press(&mut h, "BENCH");
+    until(&mut h, "START RECORDING");
+    press(&mut h, "HIGH RANGE");
+    for _ in 0..5 {
+        h.step();
+    }
+    shoot(&mut h, "20-bench-high-range");
+    press(&mut h, "TURN ON");
+    until(&mut h, "TURN OFF");
+    press(&mut h, "START RECORDING");
+    until(&mut h, "START CAPTURE");
+    press(&mut h, "START CAPTURE");
+    until(&mut h, "STOP RECORDING");
+    for _ in 0..200 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    shoot(&mut h, "21-bench-high-range-held");
+    until_contains(&mut h, "This capture held the high range");
+    press(&mut h, "STOP RECORDING");
+    until(&mut h, "START RECORDING");
 }
 
 /// A directory of its own for a test's batch record.
