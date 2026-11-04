@@ -236,6 +236,30 @@ fn an_image_that_never_comes_back_says_what_to_do() {
         .stderr(predicate::str::contains("verge list"));
 }
 
+/// An image built for another USB ID boots on that ID, where the tool does not look: it says
+/// where the unit went rather than that it did not come back.
+#[test]
+fn an_image_on_another_usb_id_says_where_the_unit_went() {
+    use verge_probe::sim::{SimFirmware, firmware_srecord};
+    let image = std::env::temp_dir().join(format!("verge-cli-{}-other-id.s19", std::process::id()));
+    std::fs::write(
+        &image,
+        firmware_srecord(&SimFirmware::OtherId {
+            vid: 0x1209,
+            pid: 0x0001,
+        }),
+    )
+    .unwrap();
+    tool("ours")
+        .args(["update", "--yes", "--file"])
+        .arg(&image)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("came back as 1209:0001 ("))
+        .stderr(predicate::str::contains("did not come back").not());
+    std::fs::remove_file(&image).unwrap();
+}
+
 #[test]
 fn release_compares_each_unit() {
     tool("bench")

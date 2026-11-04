@@ -277,6 +277,12 @@ fn update_error(error: &UpdateError) -> JobError {
             false,
         ),
         UpdateError::Ambiguous { .. } => (Some("Look at what is attached now."), false),
+        UpdateError::OtherId { .. } => (
+            Some(
+                "To bring it back, fit the ISP jumper and flash an image that uses an ID the tool looks for.",
+            ),
+            false,
+        ),
         UpdateError::Entry(EntryError::DaplinkRsBusy) => {
             (Some("Try again once it has finished."), false)
         }

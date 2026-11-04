@@ -1535,6 +1535,10 @@ fn explain(error: UpdateError, again: &str, unit: Option<&Unit>) -> anyhow::Erro
         UpdateError::NoReturn(_) | UpdateError::Ambiguous { .. } => {
             Some("`verge list` shows what is attached now.".to_owned())
         }
+        UpdateError::OtherId { .. } => Some(
+            "To bring it back, fit the ISP jumper and flash an image that uses an ID the tool looks for."
+                .to_owned(),
+        ),
         _ => None,
     };
     match next {
