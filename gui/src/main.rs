@@ -168,6 +168,8 @@ fn main() -> eframe::Result {
         Box::new(move |creation| {
             let ctx = creation.egui_ctx.clone();
             style::install(&ctx);
+            #[cfg(target_os = "linux")]
+            follow_desktop_face(&ctx);
             log.set_repaint(ctx.clone());
             let repaint = {
                 let ctx = ctx.clone();
@@ -197,4 +199,40 @@ fn main() -> eframe::Result {
             Ok(Box::new(VergeApp::new(Box::new(worker), log, config)))
         }),
     )
+}
+
+/// Day or night as the desktop sets it. winit reports no system theme on Linux, so egui would stay
+/// on night there: read the XDG portal's colour-scheme setting at start, then follow its changes
+/// for as long as the app runs. Without a portal (no session bus, or no answer) the face stays on
+/// night, as before.
+#[cfg(target_os = "linux")]
+fn follow_desktop_face(ctx: &egui::Context) {
+    fn apply(ctx: &egui::Context, mode: dark_light::Mode) {
+        match mode {
+            dark_light::Mode::Dark => ctx.set_theme(egui::Theme::Dark),
+            dark_light::Mode::Light => ctx.set_theme(egui::Theme::Light),
+            dark_light::Mode::Unspecified => {}
+        }
+    }
+    match dark_light::detect() {
+        Ok(mode) => apply(ctx, mode),
+        Err(error) => {
+            tracing::debug!("no desktop face: {error}");
+            return;
+        }
+    }
+    let watcher = match dark_light::subscribe() {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            tracing::debug!("no desktop face changes: {error}");
+            return;
+        }
+    };
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        for mode in watcher.iter() {
+            apply(&ctx, mode);
+            ctx.request_repaint();
+        }
+    });
 }

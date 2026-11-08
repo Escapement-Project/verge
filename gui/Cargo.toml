@@ -37,3 +37,6 @@ verge-probe = { path = "../../verge-probe", features = ["simulate"] }
 [[bin]]
 name = "verge-gui"
 path = "src/main.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dark-light = "3.0.0"

@@ -21,14 +21,17 @@ The library and frontends use:
 - `ureq`, `serde_json` and `sha2` for releases, `minisign-verify` for their signatures, `clap` for
   the command line, and `tracing` with `tracing-indicatif` for logs and progress.
 - `dirs` for the cache and data directories.
-- `eframe` and `egui` for the GUI, `rfd` for its file dialog, and `egui_kittest` for GUI tests.
+- `eframe` and `egui` for the GUI, `rfd` for its file dialog, `dark-light` for the desktop's light
+  or dark setting on Linux, and `egui_kittest` for GUI tests.
 
 The GUI takes its colours, type and icon from the Escapement Project's design tokens:
 `gui/src/tokens.rs`, the fonts in `gui/fonts/` and the icons in `gui/icons/` are copies of files
 the project's site repository generates. The fonts are Saira, Hanken Grotesk and Martian Mono,
 under the SIL Open Font License. `gui/fonts/README.md` records their roles and licences, and how
 to check the copies against the site's build. The window shows the day or the night face as the
-system prefers. On Linux winit reports no preference, so there it shows night.
+system prefers, and follows a change while it runs. On Linux, where winit reports no preference,
+it reads the desktop's colour-scheme setting through the XDG portal with `dark-light`; without a
+portal it shows night.
 
 ## Testing
 
