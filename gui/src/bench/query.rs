@@ -152,9 +152,11 @@ fn run(query: &Query) -> Result<Answer> {
             }
             let statistics = archive.statistics(interval, &query.cancel)?;
             if statistics.samples > 0 {
+                let gap = statistics.measured_ns < interval.duration_ns();
                 fallback.push(Envelope {
                     interval,
-                    gap: statistics.measured_ns < interval.duration_ns(),
+                    gap,
+                    lost: gap && !archive.lost_spans(interval, &query.cancel)?.is_empty(),
                     statistics,
                 });
             }

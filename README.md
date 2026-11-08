@@ -420,11 +420,13 @@ to zoom; the window's marker in the overview under it drags too. The vertical ax
 visible until you move it: drag or scroll up or down, or drag along the axis to zoom it. FIT Y, or a
 double click, fits it again. Zoomed out, each column of the graph spans the lowest to the highest
 reading in its time, so a pulse shorter than a column keeps its height. Zoomed in, the graph marks
-each pair. With SELECT on, dragging across the graph selects an interval; the left
-panel sets its ends exactly and zooms to it. The panel measures the visible window and the
-selection: duration, pairs, minimum, mean and peak current, mean voltage and power, charge and
-energy. It shows how much of each was not measured. Time without measurements adds nothing to
-charge or energy. The readings come from the recorded pairs, so zooming does not change them.
+each pair. Where pairs were lost within a capture, the graph shades their time and draws the columns
+around it pale. A pause, as while a debugger holds the conversions, only breaks the trace. With
+SELECT on, dragging across the graph selects an interval; the left panel sets its ends exactly and
+zooms to it. The panel measures the visible window and the selection: duration, pairs, minimum, mean
+and peak current, mean voltage and power, charge and energy. It shows how much of each was not
+measured. Time without measurements adds nothing to charge or energy. The readings come from the
+recorded pairs, so zooming does not change them.
 
 Each recording goes to disk as it arrives, for as long as the disk has room. Recordings stay in a
 `captures` folder in that data directory until discarded. KEPT ON DISK reopens one, including one

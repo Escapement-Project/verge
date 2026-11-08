@@ -1158,6 +1158,7 @@ impl Bench {
                 let shift = -f64::from(carry) * plot.transform().dvalue_dpos()[1];
                 plot.translate_bounds(vec2(0.0, shift as f32));
             }
+            lost_bands(plot, &answer.overview.lost);
             draw(plot, &answer.fallback, quantity, color::ACCENT);
             match &answer.view.samples {
                 Some(samples) => draw_samples(plot, samples, quantity, color::ACCENT, &x),
@@ -1495,6 +1496,7 @@ impl Bench {
                 plot.set_plot_bounds_x(
                     seconds(extent.start_ns)..=seconds(extent.end_ns.max(extent.start_ns + 1)),
                 );
+                lost_bands(plot, &answer.overview.lost);
                 draw(
                     plot,
                     &answer.overview.envelopes,
@@ -1717,7 +1719,8 @@ const READINGS: [(&str, Reading); 9] = [
 /// that wanders a little leaves Y fitted.
 const DETENT: f32 = 12.0;
 
-/// The opacity of a column some of whose time was not measured, against a whole one.
+/// The opacity of a column some of whose pairs were lost, or of a pair read under range, against a
+/// whole one.
 const PARTLY_MEASURED: f32 = 0.35;
 
 /// The time in `interval` that the capture spans and has no reading for. A window reaching before
@@ -1780,8 +1783,9 @@ fn trace<'a>(line: Line<'a>, color: Color32) -> Line<'a> {
 
 /// Each bin's range, from its least reading to its greatest, filled and edged. A pulse narrower
 /// than a bin still reaches its height in the bin that holds it, where a bin's mean would depend on
-/// how much of the pulse falls inside. A bin not wholly measured is a run of its own, drawn paler, so
-/// a gap narrower than a column still shows.
+/// how much of the pulse falls inside. A bin not wholly measured is a run of its own, so a gap
+/// narrower than a column still breaks the line. It draws pale if pairs were lost in it, and at
+/// full strength if the capture only paused, as it does while a debugger holds the conversions.
 fn draw(plot: &mut PlotUi<'_>, bins: &[Envelope], quantity: Quantity, color: Color32) {
     let mut first = 0;
     for next in 1..=bins.len() {
@@ -1792,7 +1796,7 @@ fn draw(plot: &mut PlotUi<'_>, bins: &[Envelope], quantity: Quantity, color: Col
         if joined {
             continue;
         }
-        let color = if bins[first].gap {
+        let color = if bins[first].lost {
             color.gamma_multiply(PARTLY_MEASURED)
         } else {
             color
@@ -1823,6 +1827,29 @@ fn draw(plot: &mut PlotUi<'_>, bins: &[Envelope], quantity: Quantity, color: Col
             let points: Vec<_> = xs.iter().zip(edge.iter()).map(|(&x, &y)| [x, y]).collect();
             plot.line(trace(Line::new(name, points), color));
         }
+    }
+}
+
+/// A band over each span of lost pairs, so that a loss reads apart from a pause at any zoom: both
+/// break the trace, and only a loss is marked. Spans less than a pixel apart share one band, so a
+/// capture that lost pairs thousands of times draws no more bands than the plot has pixels.
+fn lost_bands(plot: &mut PlotUi<'_>, lost: &[Interval]) {
+    let pixel = plot.transform().dvalue_dpos()[0].abs();
+    let shown = plot.plot_bounds().range_x();
+    let mut bands: Vec<(f64, f64)> = Vec::new();
+    for span in lost {
+        let (start, end) = (seconds(span.start_ns), seconds(span.end_ns));
+        if end < *shown.start() || start > *shown.end() {
+            continue;
+        }
+        match bands.last_mut() {
+            Some(band) if start - band.1 < pixel => band.1 = end,
+            _ => bands.push((start, end)),
+        }
+    }
+    for (start, end) in bands {
+        // Unnamed, so egui_plot draws no label over the marker rows.
+        plot.span(Span::new("", start..=end).fill(color::ATTENTION.gamma_multiply(0.2)));
     }
 }
 
@@ -1977,9 +2004,25 @@ mod tests {
         code: impl Fn(u32) -> u16,
         lost: &[std::ops::Range<u32>],
     ) {
+        capture_gaps(path, rate, count, code, lost, &[], 0);
+    }
+    /// Like [`capture_lossy`], with the conversions also held for `hold_ns` before each pair in
+    /// `held`, as a debugger connecting does: time jumps, and no pair goes missing.
+    fn capture_gaps(
+        path: &Path,
+        rate: u32,
+        count: u32,
+        code: impl Fn(u32) -> u16,
+        lost: &[std::ops::Range<u32>],
+        held: &[u32],
+        hold_ns: u64,
+    ) {
         let header: Header = serde_json::from_value(serde_json::json!({"rate":rate,"setting_ma":350,"full_scale_mv":3300,"first_sequence":0,"previous_low":true,
             "low":[{"code":0,"current_nanoamps":0},{"code":65535,"current_nanoamps":350000000}],"high":[],"dio_mask":0,"dio_levels":0,"edge_resolution_ns":11})).unwrap();
         let period = 1_000_000_000 / u64::from(rate);
+        let time = |i: u32| {
+            u64::from(i) * period + held.iter().filter(|&&at| at <= i).count() as u64 * hold_ns
+        };
         let mut writer = CaptureWriter::create(path).unwrap();
         writer.ingest(Message::Header(header)).unwrap();
         let mut first = 0;
@@ -1988,13 +2031,14 @@ mod tests {
                 first = gap.end;
                 continue;
             }
-            let next_gap = lost
+            let next_break = lost
                 .iter()
                 .map(|gap| gap.start)
+                .chain(held.iter().copied())
                 .filter(|&start| start > first)
                 .min()
                 .unwrap_or(count);
-            let end = (first + 99).min(count).min(next_gap);
+            let end = (first + 99).min(count).min(next_break);
             let pairs = (first..end)
                 .map(|i| Pair {
                     voltage_code: 32768,
@@ -2003,13 +2047,13 @@ mod tests {
                     under_range: false,
                 })
                 .collect();
+            let flags = if held.contains(&first) {
+                Pairs::HELD
+            } else {
+                0
+            };
             writer
-                .ingest(Message::Pairs(Pairs::new(
-                    0,
-                    first,
-                    u64::from(first) * period,
-                    pairs,
-                )))
+                .ingest(Message::Pairs(Pairs::new(flags, first, time(first), pairs)))
                 .unwrap();
             first = end;
         }
@@ -2344,6 +2388,49 @@ mod tests {
         h.state_mut().reset_bounds = true;
         h.step();
         h.render().unwrap().save(dir.join("bench-pan.png")).unwrap();
+        // A debug session's shape: 10,000 pairs a second, held 4 ms every 0.3 to 0.8 s while a
+        // debugger connects, and pairs lost twice, 0.6 ms from 15.12 s and 150 ms from 22 s.
+        let path = dir.join("held.vergecapture");
+        if path.exists() {
+            std::fs::remove_file(&path).unwrap();
+        }
+        let mut held = Vec::new();
+        let mut at = 2000u32;
+        while at < 300_000 {
+            held.push(at);
+            at += 3000 + (at.wrapping_mul(2_654_435_761) >> 16) % 5000;
+        }
+        capture_gaps(
+            &path,
+            10_000,
+            300_000,
+            |i| noisy_marker(i / 10) + ((i.wrapping_mul(40_503) >> 12) % 8) as u16,
+            &[151_234..151_240, 220_000..221_500],
+            &held,
+            4_000_000,
+        );
+        let pause = held.iter().find(|&&at| at > 160_000).copied().unwrap();
+        let pause_ns = u64::from(pause) * 100_000
+            + held.iter().filter(|&&at| at < pause).count() as u64 * 4_000_000;
+        let lost_ns =
+            151_234 * 100_000 + held.iter().filter(|&&at| at < 151_234).count() as u64 * 4_000_000;
+        let mut bench = Bench::new(&dir);
+        bench.open(path);
+        let mut h = harness(bench, true);
+        wait(&mut h);
+        for (name, start, span) in [
+            ("all", 0, 32_000_000_000),
+            ("2s", 15_000_000_000, 2_000_000_000),
+            ("loss-20ms", lost_ns - 10_000_000, 20_000_000),
+            ("pause-20ms", pause_ns - 12_000_000, 20_000_000),
+        ] {
+            let visible = Interval::new(start, start + span);
+            h.state_mut().inspect(visible, None);
+            answered(&mut h, visible);
+            h.step();
+            let file = format!("bench-held-{name}.png");
+            h.render().unwrap().save(dir.join(file)).unwrap();
+        }
     }
     /// 2 ms of every 10, with noise on both levels.
     fn noisy_marker(i: u32) -> u16 {
@@ -2731,8 +2818,77 @@ mod tests {
                 .find(|bin| bin.interval.start_ns == start)
                 .unwrap()
         };
-        assert!(part(10_100_000_000).gap);
+        assert!(part(10_100_000_000).gap && part(10_100_000_000).lost);
         assert!(!part(9_687_500_000).gap);
+    }
+    #[test]
+    fn a_pause_leaves_a_gap_and_only_lost_pairs_are_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("held.vergecapture");
+        // Held for 4 ms before pair 10,120, inside the overview bin the window below cuts, and
+        // before 15,000; pairs lost from 17,000 (17.008 s to 17.011 s, after both holds) and at
+        // 18,000 (18.008 s to 18.009 s).
+        capture_gaps(
+            &path,
+            1000,
+            20_000,
+            |_| 350,
+            &[17_000..17_003, 18_000..18_001],
+            &[10_120, 15_000],
+            4_000_000,
+        );
+        let mut h = harness(state(&path), false);
+        wait(&mut h);
+        let visible = Interval::new(9_900_000_000, 10_000_000_000);
+        h.state_mut().inspect(visible, None);
+        let answer = answered(&mut h, visible);
+        let cut = answer
+            .fallback
+            .iter()
+            .find(|bin| bin.interval.start_ns == 10_100_000_000)
+            .unwrap();
+        assert!(cut.gap && !cut.lost);
+        let at = |time: u64| {
+            answer
+                .overview
+                .envelopes
+                .iter()
+                .find(|bin| bin.interval.start_ns <= time && time < bin.interval.end_ns)
+                .unwrap()
+        };
+        for pause in [10_122_000_000, 15_006_000_000] {
+            assert!(at(pause).gap && !at(pause).lost);
+        }
+        assert!(at(17_009_000_000).lost && at(18_008_500_000).lost);
+        let spans: Vec<_> = answer
+            .overview
+            .lost
+            .iter()
+            .map(|span| (span.start_ns, span.end_ns))
+            .collect();
+        assert_eq!(
+            spans,
+            [
+                (17_008_000_000, 17_011_000_000),
+                (18_008_000_000, 18_009_000_000)
+            ]
+        );
+        let lost = [
+            (17_008_000_000, 17_011_000_000),
+            (18_008_000_000, 18_009_000_000),
+        ];
+        assert!(
+            answer
+                .overview
+                .envelopes
+                .iter()
+                .filter(|bin| bin.lost)
+                .all(|bin| {
+                    lost.iter().any(|&(start, end)| {
+                        bin.interval.start_ns < end && bin.interval.end_ns > start
+                    })
+                })
+        );
     }
     #[test]
     fn a_window_past_the_capture_counts_only_the_capture_as_unmeasured() {
