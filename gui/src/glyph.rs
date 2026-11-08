@@ -42,6 +42,30 @@ impl Glyph {
         }
     }
 
+    /// Allocates a square chip of `ground` with a pitch of margin around a glyph `size` across,
+    /// and paints the glyph on it in `color`.
+    pub fn chip(
+        self,
+        ui: &mut egui::Ui,
+        size: f32,
+        ground: Color32,
+        color: Color32,
+    ) -> egui::Response {
+        let pitch = size / 5.0;
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::splat(size + 2.0 * pitch), egui::Sense::hover());
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(crate::style::RADIUS), ground);
+        // Centred on what is drawn: the last cell stops a gap short of the grid's edge.
+        self.paint(
+            ui.painter(),
+            rect.min + Vec2::splat(pitch + pitch / 12.0),
+            size,
+            color,
+        );
+        response
+    }
+
     /// Allocates a square of `size` in `ui` and paints the glyph in it.
     pub fn show(self, ui: &mut egui::Ui, size: f32, color: Color32) -> egui::Response {
         let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::hover());

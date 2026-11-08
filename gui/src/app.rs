@@ -22,7 +22,7 @@ use verge_probe::{Path, Unit, offer};
 
 use crate::glyph::{self, Glyph};
 use crate::log::Log;
-use crate::style::{self, Role, color, space, text};
+use crate::style::{self, Face, Role, Status, space, text};
 use crate::worker::{Backend, BatchEvent, Event, InstallEvent, JobError, ProgressEvent, Request};
 
 mod batch;
@@ -131,7 +131,7 @@ enum Scan {
 enum Action {
     Ready {
         label: String,
-        fill: Color32,
+        fill: Fill,
         source: Source,
         what: String,
     },
@@ -185,37 +185,78 @@ pub struct VergeApp {
     batch_form: BatchForm,
     last_batch: Option<BatchRun>,
     bench: crate::bench::Bench,
+    mark: style::Mark,
 }
 
 fn kib(bytes: u64) -> String {
     format!("{:.1} KiB", bytes as f64 / 1024.0)
 }
 
+/// A filled slab or button: its ground, and the colour of what is drawn on it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Fill {
+    pub ground: Color32,
+    pub on: Color32,
+}
+
+impl Fill {
+    /// Verge's identity: installing it, and an update that finished.
+    pub fn lume(face: &Face) -> Fill {
+        Fill {
+            ground: face.lume,
+            on: face.on_lume,
+        }
+    }
+
+    pub fn status(status: Status, face: &Face) -> Fill {
+        Fill {
+            ground: status.fill(face),
+            on: face.on_status,
+        }
+    }
+
+    /// An action with no identity or status of its own.
+    pub fn ink(face: &Face) -> Fill {
+        Fill {
+            ground: face.ink,
+            on: face.page,
+        }
+    }
+
+    /// Firmware that is not ours.
+    pub fn other(face: &Face) -> Fill {
+        Fill {
+            ground: face.ink_2,
+            on: face.page,
+        }
+    }
+}
+
 /// The unit's state as the slab's word, its glyph and its fill. `None` is a frame, not a fill.
-fn identity(unit: &Unit) -> (&'static str, Glyph, Option<Color32>) {
+fn identity(unit: &Unit, face: &Face) -> (&'static str, Glyph, Option<Fill>) {
     match &unit.state {
         State::Probe {
             firmware: Firmware::Ours(_),
             ..
-        } => ("VERGE", glyph::OURS, Some(color::OURS)),
+        } => ("Verge", glyph::OURS, Some(Fill::lume(face))),
         State::Probe {
             firmware: Firmware::Stock { .. },
             ..
-        } => ("STOCK", glyph::STOCK, Some(color::TEXT_2)),
+        } => ("Stock", glyph::STOCK, Some(Fill::other(face))),
         State::Probe {
             firmware: Firmware::DaplinkRs { .. },
             ..
-        } => ("DAPLINK-RS", glyph::STOCK, Some(color::TEXT_2)),
+        } => ("daplink-rs", glyph::STOCK, Some(Fill::other(face))),
         State::SwdJumper {
             firmware: Jumpered::Ours,
         }
-        | State::Held { .. } => ("VERGE", glyph::OURS, Some(color::OURS)),
+        | State::Held { .. } => ("Verge", glyph::OURS, Some(Fill::lume(face))),
         State::SwdJumper {
             firmware: Jumpered::Stock(_),
-        } => ("STOCK", glyph::STOCK, Some(color::TEXT_2)),
-        State::Unreadable { .. } => ("UNKNOWN", glyph::ATTENTION, None),
-        State::Bootloader => ("ISP MODE", glyph::WAITING, None),
-        State::MiniBootloader => ("MINI", glyph::WAITING, None),
+        } => ("Stock", glyph::STOCK, Some(Fill::other(face))),
+        State::Unreadable { .. } => ("Unknown", glyph::ATTENTION, None),
+        State::Bootloader => ("ISP mode", glyph::WAITING, None),
+        State::MiniBootloader => ("Mini", glyph::WAITING, None),
     }
 }
 
@@ -262,10 +303,11 @@ fn frame(ui: &mut Ui, fill: Option<Color32>, stroke: Stroke, add: impl FnOnce(&m
         });
 }
 
-/// A held notice or a refusal: a line with a coloured left edge.
-pub(crate) fn edged(ui: &mut Ui, edge: Color32, words: &str) {
+/// A held notice or a refusal: a line with an edge in its status's ink.
+pub(crate) fn edged(ui: &mut Ui, status: Status, words: &str) {
+    let face = style::face(ui.ctx());
     let response = Frame::new()
-        .fill(color::SURFACE)
+        .fill(face.raised)
         .inner_margin(Margin {
             left: space::M as i8,
             right: space::S as i8,
@@ -274,19 +316,20 @@ pub(crate) fn edged(ui: &mut Ui, edge: Color32, words: &str) {
         })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(text(Role::Body, words).color(color::TEXT));
+            ui.label(text(Role::Body, words).color(face.ink));
         })
         .response;
     let rect = response.rect;
     ui.painter().rect_filled(
         egui::Rect::from_min_max(rect.min, pos2(rect.min.x + 3.0, rect.max.y)),
         0.0,
-        edge,
+        status.ink(face),
     );
 }
 
 pub(crate) fn label(ui: &mut Ui, words: &str) -> egui::Response {
-    ui.label(text(Role::Label, words.to_uppercase()).color(color::TEXT_2))
+    let face = style::face(ui.ctx());
+    ui.label(text(Role::Label, words).color(face.ink_2))
 }
 
 /// Text that wraps at the edge of the space it is given.
@@ -313,58 +356,75 @@ fn field(ui: &mut Ui, name: &str, add: impl FnOnce(&mut Ui)) {
 /// A step's name on the rail, where a cell has room for one word.
 fn short(step: Step) -> &'static str {
     match step {
-        Step::Download => "DOWNLOAD",
-        Step::EnterBootloader => "ENTER",
-        Step::WaitForBootloader => "WAIT",
-        Step::Connect => "CONNECT",
-        Step::Erase => "ERASE",
-        Step::Write => "WRITE",
-        Step::Verify => "VERIFY",
-        Step::Reset => "RESET",
-        Step::WaitForFirmware => "RETURN",
+        Step::Download => "Download",
+        Step::EnterBootloader => "Enter",
+        Step::WaitForBootloader => "Wait",
+        Step::Connect => "Connect",
+        Step::Erase => "Erase",
+        Step::Write => "Write",
+        Step::Verify => "Verify",
+        Step::Reset => "Reset",
+        Step::WaitForFirmware => "Return",
     }
 }
 
-/// The 48 px action slab: filled and inked when it acts, an outline when it is neutral.
-fn slot(ui: &mut Ui, words: &str, fill: Option<Color32>) -> egui::Response {
-    let words = text(Role::Action, words.to_uppercase());
-    let button = match fill {
-        Some(fill) => egui::Button::new(words.color(color::INK))
-            .fill(fill)
-            .stroke(Stroke::NONE),
-        None => egui::Button::new(words.color(color::TEXT))
-            .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::new(1.0, color::BORDER)),
-    };
-    ui.add_sized(vec2(320.0, style::SLOT_HEIGHT), button)
+/// The wash over a filled button the pointer is on, which egui leaves to the fill it is given.
+fn wash_hovered(ui: &Ui, response: &egui::Response) {
+    if response.hovered() && ui.is_enabled() {
+        let face = style::face(ui.ctx());
+        ui.painter().rect_filled(
+            response.rect,
+            CornerRadius::same(style::RADIUS),
+            face.wash(),
+        );
+    }
 }
 
-/// One of a row of choices: filled with the accent when it is the one chosen.
-pub(crate) fn choice(ui: &mut Ui, words: &str, chosen: bool) -> egui::Response {
-    let rich = text(Role::Action, words.to_uppercase()).color(if chosen {
-        color::INK
+/// The 48 px action slab: filled when it acts, an outline when it is neutral.
+fn slot(ui: &mut Ui, words: &str, fill: Option<Fill>) -> egui::Response {
+    let words = text(Role::Action, words);
+    let button = match fill {
+        Some(fill) => egui::Button::new(words.color(fill.on))
+            .fill(fill.ground)
+            .stroke(Stroke::NONE),
+        None => egui::Button::new(words),
+    };
+    let response = ui.add_sized(vec2(320.0, style::SLOT_HEIGHT), button);
+    if fill.is_some() {
+        wash_hovered(ui, &response);
+    }
+    response
+}
+
+/// One of a row of choices, the chosen one an ink fill with page text.
+pub(crate) fn choice_button(face: &Face, words: &str, chosen: bool) -> egui::Button<'static> {
+    let button = egui::Button::new(text(Role::Action, words)).selected(chosen);
+    if chosen {
+        button.stroke(Stroke::new(1.0, face.ink))
     } else {
-        color::TEXT
-    });
-    let edge = if chosen { color::ACCENT } else { color::BORDER };
-    ui.add(
-        egui::Button::new(rich)
-            .fill(if chosen {
-                color::ACCENT
-            } else {
-                Color32::TRANSPARENT
-            })
-            .stroke(Stroke::new(1.0, edge))
-            .selected(chosen),
-    )
+        button
+    }
+}
+
+pub(crate) fn choice(ui: &mut Ui, words: &str, chosen: bool) -> egui::Response {
+    let face = style::face(ui.ctx());
+    ui.add(choice_button(face, words, chosen))
 }
 
 /// A neutral outlined button.
 pub(crate) fn outline(ui: &mut Ui, words: &str, enabled: bool) -> egui::Response {
-    let button = egui::Button::new(text(Role::Action, words.to_uppercase()).color(color::TEXT))
-        .fill(Color32::TRANSPARENT)
-        .stroke(Stroke::new(1.0, color::BORDER));
-    ui.add_enabled(enabled, button)
+    ui.add_enabled(enabled, egui::Button::new(text(Role::Action, words)))
+}
+
+/// `words` with its first letter capitalised.
+pub(crate) fn sentence_case(words: &str) -> String {
+    let mut chars = words.chars();
+    let mut out: String = chars
+        .next()
+        .map(|c| c.to_uppercase().collect::<String>())
+        .unwrap_or_default();
+    out.extend(chars);
+    out
 }
 
 impl VergeApp {
@@ -397,6 +457,7 @@ impl VergeApp {
             batch_form,
             last_batch: None,
             bench,
+            mark: style::Mark::default(),
         };
         app.backend.send(Request::Detect);
         app.backend.send(Request::Release);
@@ -613,7 +674,7 @@ impl VergeApp {
     }
 
     /// The slot's offer for the selected unit.
-    fn action(&self) -> Action {
+    fn action(&self, face: &Face) -> Action {
         let blocked = |label: &str, reason: String| Action::Blocked {
             label: label.to_owned(),
             reason,
@@ -646,7 +707,7 @@ impl VergeApp {
                         } else {
                             format!("Install {}", release.tag)
                         },
-                        fill: color::OURS,
+                        fill: Fill::lume(face),
                         source: Source::Release(Some(release.tag.clone())),
                         what: format!("release {}", release.tag),
                     },
@@ -666,7 +727,7 @@ impl VergeApp {
                 ),
                 Some(found) => Action::Ready {
                     label: format!("Install stock V{}", found.version),
-                    fill: color::ATTENTION,
+                    fill: Fill::status(Status::Attention, face),
                     source: Source::Stock(found.path.parent().map(std::path::Path::to_path_buf)),
                     what: format!("stock V{}", found.version),
                 },
@@ -680,7 +741,7 @@ impl VergeApp {
                         .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
                     Action::Ready {
                         label: format!("Flash {name}"),
-                        fill: color::ACCENT,
+                        fill: Fill::ink(face),
                         source: Source::File(path.clone()),
                         what: name,
                     }
@@ -698,7 +759,7 @@ impl VergeApp {
             if let Err(error) = checked {
                 return blocked(
                     "Not for this board",
-                    format!("{} Pick STOCK for that.", sentence(&error.to_string())),
+                    format!("{} Pick Stock for that.", sentence(&error.to_string())),
                 );
             }
         }
@@ -811,17 +872,18 @@ impl VergeApp {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
 
+        let face = style::face(&ctx);
         egui::Panel::top("strip")
             .frame(
                 Frame::new()
-                    .fill(color::SURFACE)
+                    .fill(face.surface)
                     .inner_margin(Margin::symmetric(space::M as i8, space::S as i8)),
             )
             .show(ui, |ui| self.strip(ui));
         egui::Panel::bottom("log")
             .frame(
                 Frame::new()
-                    .fill(color::SUNKEN)
+                    .fill(face.surface)
                     .inner_margin(Margin::symmetric(space::M as i8, space::XS as i8)),
             )
             .show(ui, |ui| self.log_drawer(ui));
@@ -843,22 +905,24 @@ impl VergeApp {
                         for (faces, licence) in style::FONT_LICENCES {
                             ui.add_space(space::S);
                             label(ui, faces);
-                            ui.label(text(Role::Data, *licence));
+                            ui.label(text(Role::Code, *licence));
                         }
                     });
                 });
             self.about_open = open;
         }
+        style::focus_ring(&ctx);
     }
 
     /// The Units and Batch views, which scroll in the central panel.
     fn views(&mut self, ui: &mut Ui, now: f64) {
+        let face = style::face(ui.ctx());
         if self.view == View::Units {
             egui::Panel::left("units")
                 .exact_size(300.0)
                 .frame(
                     Frame::new()
-                        .fill(color::SUNKEN)
+                        .fill(face.surface)
                         .inner_margin(Margin::same(space::M as i8)),
                 )
                 .show(ui, |ui| self.unit_list(ui));
@@ -866,7 +930,7 @@ impl VergeApp {
         egui::CentralPanel::default()
             .frame(
                 Frame::new()
-                    .fill(color::BACKGROUND)
+                    .fill(face.page)
                     .inner_margin(Margin::same(space::L as i8)),
             )
             .show(ui, |ui| {
@@ -880,8 +944,10 @@ impl VergeApp {
     }
 
     fn strip(&mut self, ui: &mut Ui) {
+        let face = style::face(ui.ctx());
         ui.horizontal(|ui| {
-            ui.label(text(Role::Title, "VERGE").color(color::TEXT));
+            self.mark.show(ui);
+            ui.label(text(Role::Title, "Verge").color(face.ink));
             ui.add_space(space::M);
             let idle = !self.busy();
             for (view, words) in [
@@ -890,28 +956,8 @@ impl VergeApp {
                 (View::Bench, "Bench"),
             ] {
                 let selected = self.view == view;
-                let button = egui::Button::new(
-                    text(Role::Action, words.to_uppercase()).color(if selected {
-                        color::INK
-                    } else {
-                        color::TEXT
-                    }),
-                )
-                .fill(if selected {
-                    color::ACCENT
-                } else {
-                    Color32::TRANSPARENT
-                })
-                .stroke(Stroke::new(
-                    1.0,
-                    if selected {
-                        color::ACCENT
-                    } else {
-                        color::BORDER
-                    },
-                ))
-                .selected(selected);
-                let response = ui.add_enabled(idle || selected, button);
+                let response =
+                    ui.add_enabled(idle || selected, choice_button(face, words, selected));
                 if response.clicked() && !selected {
                     if self.view == View::Bench {
                         self.bench.disconnect(self.backend.as_mut());
@@ -938,15 +984,12 @@ impl VergeApp {
                 if let Some(scenario) = &self.config.simulated {
                     ui.add_space(space::M);
                     Frame::new()
-                        .stroke(Stroke::new(1.0, color::ATTENTION))
+                        .stroke(Stroke::new(1.0, face.attention_ink))
                         .inner_margin(Margin::symmetric(space::S as i8, 2))
                         .show(ui, |ui| {
                             ui.label(
-                                text(
-                                    Role::Label,
-                                    format!("SIMULATED BENCH: {}", scenario.to_uppercase()),
-                                )
-                                .color(color::ATTENTION),
+                                text(Role::Label, format!("Simulated bench: {scenario}"))
+                                    .color(face.attention_ink),
                             );
                         });
                 }
@@ -961,16 +1004,14 @@ impl VergeApp {
                         egui::Align::Center,
                     );
                 };
-                let tag = |words: &str| {
-                    text(Role::Label, format!("{} ", words.to_uppercase())).color(color::TEXT_2)
-                };
-                add(tag("releases"));
-                add(text(Role::Data, format!("{}  ", self.config.repo)).color(color::TEXT));
+                let tag = |words: &str| text(Role::Label, format!("{words} ")).color(face.ink_2);
+                add(tag("Releases"));
+                add(text(Role::Code, format!("{}  ", self.config.repo)).color(face.ink));
                 match &self.release {
                     None => add(tag("looking up")),
                     Some(Ok(release)) => {
                         add(tag("latest"));
-                        add(text(Role::Data, &release.tag).color(color::TEXT));
+                        add(text(Role::Code, &release.tag).color(face.ink));
                     }
                     Some(Err(_)) => add(tag("none found")),
                 }
@@ -980,7 +1021,7 @@ impl VergeApp {
         if self.close_pending {
             edged(
                 ui,
-                color::ATTENTION,
+                Status::Attention,
                 if matches!(self.operation, Operation::Batch(_)) {
                     "The window closes when the batch's unit under way finishes. The batch takes no new units."
                 } else if self.bench.recording() {
@@ -995,9 +1036,10 @@ impl VergeApp {
     }
 
     fn unit_list(&mut self, ui: &mut Ui) {
+        let face = style::face(ui.ctx());
         ui.horizontal(|ui| {
-            label(ui, "attached");
-            ui.label(text(Role::Label, self.units.len().to_string()).color(color::TEXT));
+            label(ui, "Attached");
+            ui.label(text(Role::Figures, self.units.len().to_string()).color(face.ink));
             if let Scan::Scanning = self.scan {
                 label(ui, "· scanning");
             }
@@ -1005,7 +1047,7 @@ impl VergeApp {
         if let Scan::Failed(error) = &self.scan {
             edged(
                 ui,
-                color::FAULT,
+                Status::Fault,
                 &format!("Could not list USB devices: {error}"),
             );
         }
@@ -1014,25 +1056,30 @@ impl VergeApp {
         let mut clicked = None;
         for unit in &self.units {
             let selected = self.selected.as_deref() == Some(unit.device.instance.as_str());
-            let (word, glyph, fill) = identity(unit);
+            let (word, glyph, fill) = identity(unit, face);
+            // Selected, the row is an ink fill with page text; under the pointer, the wash.
+            let (ink, ink_2) = if selected {
+                (face.page, face.page)
+            } else {
+                (face.ink, face.ink_2)
+            };
+            let ground = ui.painter().add(egui::Shape::Noop);
             let response = Frame::new()
-                .fill(if selected {
-                    color::SURFACE
-                } else {
-                    Color32::TRANSPARENT
-                })
                 .inner_margin(Margin::same(space::S as i8))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        glyph.show(ui, 20.0, fill.unwrap_or(color::TEXT_2));
+                        match fill {
+                            Some(fill) => glyph.chip(ui, 20.0, fill.ground, fill.on),
+                            None => glyph.chip(ui, 20.0, Color32::TRANSPARENT, ink_2),
+                        };
                         ui.vertical(|ui| {
                             let name = match &unit.state {
                                 State::Bootloader => "LPC55S69 bootloader",
                                 State::MiniBootloader => "MCU-Link mini bootloader",
                                 _ => unit.serial().unwrap_or("no serial"),
                             };
-                            ui.label(text(Role::Data, name).color(color::TEXT));
+                            ui.label(text(Role::Code, name).color(ink));
                             let version = version_of(unit)
                                 .map(|v| format!(" {v}"))
                                 .unwrap_or_default();
@@ -1044,20 +1091,12 @@ impl VergeApp {
                                         unit.device.location.as_deref().unwrap_or("?")
                                     ),
                                 )
-                                .color(color::TEXT_2),
+                                .color(ink_2),
                             );
                         });
                     });
                 })
                 .response;
-            if selected {
-                let rect = response.rect;
-                ui.painter().rect_filled(
-                    egui::Rect::from_min_max(rect.min, pos2(rect.min.x + 3.0, rect.max.y)),
-                    0.0,
-                    color::ACCENT,
-                );
-            }
             let response = ui
                 .interact(
                     response.rect,
@@ -1065,6 +1104,23 @@ impl VergeApp {
                     egui::Sense::click(),
                 )
                 .on_hover_text(unit.state.to_string());
+            let under = if selected {
+                Some(face.ink)
+            } else if response.hovered() && idle {
+                Some(face.wash())
+            } else {
+                None
+            };
+            if let Some(under) = under {
+                ui.painter().set(
+                    ground,
+                    egui::Shape::rect_filled(
+                        response.rect,
+                        CornerRadius::same(style::RADIUS),
+                        under,
+                    ),
+                );
+            }
             response.widget_info(|| {
                 egui::WidgetInfo::selected(
                     egui::Role::ListBoxOption,
@@ -1085,13 +1141,12 @@ impl VergeApp {
     }
 
     fn main(&mut self, ui: &mut Ui, now: f64) {
+        let face = style::face(ui.ctx());
         if let Some(job) = self.operation.job() {
             Self::working(ui, job, now);
             ui.add_space(space::L);
             if job.cancel.is_cancelled() {
-                ui.label(
-                    text(Role::Action, "CANCELLING AT THE NEXT SAFE POINT").color(color::TEXT_2),
-                );
+                ui.label(text(Role::Action, "Cancelling at the next safe point").color(face.ink_2));
             } else if slot(ui, "Cancel", None).clicked() {
                 job.cancel.cancel();
             }
@@ -1106,18 +1161,18 @@ impl VergeApp {
             return;
         }
         let Some(unit) = self.selected_unit().cloned() else {
-            frame(ui, None, Stroke::new(1.0, color::BORDER), |ui| {
-                ui.label(text(Role::Display, "NOTHING").color(color::TEXT_2));
+            frame(ui, None, Stroke::new(1.0, face.rule), |ui| {
+                ui.label(text(Role::Display, "Nothing").color(face.ink_2));
                 ui.label(
                     text(
                         Role::Instruction,
                         if self.units.is_empty() {
-                            "PLUG IN AN MCU-LINK"
+                            "Plug in an MCU-Link"
                         } else {
-                            "PICK A UNIT"
+                            "Pick a unit"
                         },
                     )
-                    .color(color::TEXT),
+                    .color(face.ink),
                 );
             });
             return;
@@ -1125,21 +1180,21 @@ impl VergeApp {
         self.unit_slab(ui, &unit);
         ui.add_space(space::M);
         let offer = offer(&unit, &self.units);
-        field(ui, "path", |ui| match offer.best() {
+        field(ui, "Path", |ui| match offer.best() {
             Some(path) => wrapping(
                 ui,
-                text(Role::Body, format!("{path}. {}", path.describe())).color(color::TEXT),
+                text(Role::Body, format!("{path}. {}", path.describe())).color(face.ink),
             ),
-            None => wrapping(ui, text(Role::Body, "None.").color(color::TEXT_2)),
+            None => wrapping(ui, text(Role::Body, "None.").color(face.ink_2)),
         });
         for note in &offer.notes {
-            edged(ui, color::ATTENTION, note);
+            edged(ui, Status::Attention, note);
         }
         ui.add_space(space::M);
         self.image_choice(ui, Some(&unit));
         ui.add_space(space::L);
 
-        let action = self.action();
+        let action = self.action(face);
         // A question asked before the worker stopped, or about a unit no longer selected, no longer
         // stands: confirming it would start an update nothing can run, or one on a unit that left.
         let asked_about_another = self.confirming.as_ref().is_some_and(|question| {
@@ -1176,12 +1231,12 @@ impl VergeApp {
             if let Some(unknown) = unknown {
                 question = format!("{unknown} {question}");
             }
-            edged(ui, color::ATTENTION, &question);
+            edged(ui, Status::Attention, &question);
             ui.add_space(space::S);
             ui.horizontal(|ui| {
                 let fill = match &action {
                     Action::Ready { fill, .. } => *fill,
-                    Action::Blocked { .. } => color::ACCENT,
+                    Action::Blocked { .. } => Fill::ink(face),
                 };
                 if slot(ui, "Confirm", Some(fill)).clicked() {
                     self.start(unit, source, agreed(download.as_ref()), now);
@@ -1214,33 +1269,26 @@ impl VergeApp {
             } => {
                 ui.add_enabled(
                     false,
-                    egui::Button::new(
-                        text(Role::Action, words.to_uppercase()).color(color::TEXT_2),
-                    )
-                    .fill(Color32::TRANSPARENT)
-                    .stroke(Stroke::new(1.0, color::BORDER))
-                    .min_size(vec2(320.0, style::SLOT_HEIGHT)),
+                    egui::Button::new(text(Role::Action, words).color(face.ink_2))
+                        .min_size(vec2(320.0, style::SLOT_HEIGHT)),
                 );
                 if !reason.is_empty() {
-                    wrapping(ui, text(Role::Body, reason).color(color::TEXT_2));
+                    wrapping(ui, text(Role::Body, reason).color(face.ink_2));
                 }
             }
         }
     }
 
     fn unit_slab(&self, ui: &mut Ui, unit: &Unit) {
-        let (word, glyph, fill) = identity(unit);
-        let ink = if fill.is_some() {
-            color::INK
-        } else {
-            color::TEXT
-        };
+        let face = style::face(ui.ctx());
+        let (word, glyph, fill) = identity(unit, face);
+        let ink = fill.map_or(face.ink, |fill| fill.on);
         let stroke = if fill.is_some() {
             Stroke::NONE
         } else {
-            Stroke::new(1.0, color::BORDER)
+            Stroke::new(1.0, face.rule)
         };
-        frame(ui, fill, stroke, |ui| {
+        frame(ui, fill.map(|fill| fill.ground), stroke, |ui| {
             ui.horizontal(|ui| {
                 glyph.show(ui, 48.0, ink);
                 ui.add_space(space::M);
@@ -1251,26 +1299,24 @@ impl VergeApp {
                 }
             });
             let subline = match &unit.state {
-                State::Bootloader => "WAITING FOR AN IMAGE".to_owned(),
-                State::MiniBootloader => "A DIFFERENT BOARD: NOT SUPPORTED".to_owned(),
-                State::Unreadable { reason, .. } => {
-                    format!("COULD NOT ASK: {}", reason.to_uppercase())
-                }
-                State::Held { .. } => "ANOTHER PROGRAM HOLDS ITS CMSIS-DAP".to_owned(),
+                State::Bootloader => "Waiting for an image".to_owned(),
+                State::MiniBootloader => "A different board: not supported".to_owned(),
+                State::Unreadable { reason, .. } => format!("Could not ask: {reason}"),
+                State::Held { .. } => "Another program holds its CMSIS-DAP".to_owned(),
                 State::Probe { .. } => match offer(unit, &self.units).best() {
                     Some(
                         Path::OursJumperFree | Path::StockJumperFree | Path::DaplinkRsJumperFree,
-                    ) => "UPDATES WITHOUT THE JUMPER",
-                    Some(Path::Jumper) => "NEEDS THE ISP JUMPER TO UPDATE",
-                    _ => "CANNOT BE UPDATED AS IT IS",
+                    ) => "Updates without the jumper",
+                    Some(Path::Jumper) => "Needs the ISP jumper to update",
+                    _ => "Cannot be updated as it is",
                 }
                 .to_owned(),
                 State::SwdJumper { .. } => match offer(unit, &self.units).best() {
                     Some(Path::OursJumperFree) => {
-                        "SWD JUMPER FITTED. UPDATES WITHOUT THE ISP JUMPER"
+                        "SWD jumper fitted. Updates without the ISP jumper"
                     }
-                    Some(Path::Jumper) => "SWD JUMPER FITTED. NEEDS THE ISP JUMPER TO UPDATE",
-                    _ => "SWD JUMPER FITTED. CANNOT BE UPDATED AS IT IS",
+                    Some(Path::Jumper) => "SWD jumper fitted. Needs the ISP jumper to update",
+                    _ => "SWD jumper fitted. Cannot be updated as it is",
                 }
                 .to_owned(),
             };
@@ -1284,13 +1330,14 @@ impl VergeApp {
                 facts.extend(identity.product.clone());
                 facts.extend(identity.protocol.as_ref().map(|p| format!("CMSIS-DAP {p}")));
             }
-            wrapping(ui, text(Role::Data, facts.join(" · ")).color(ink));
+            wrapping(ui, text(Role::Code, facts.join(" · ")).color(ink));
         });
     }
 
     fn image_choice(&mut self, ui: &mut Ui, unit: Option<&Unit>) {
         let ctx = ui.ctx().clone();
-        field(ui, "image", |ui| {
+        let face = style::face(&ctx);
+        field(ui, "Image", |ui| {
             ui.horizontal(|ui| {
                 for (choice, words) in [
                     (Choice::Release, "Release"),
@@ -1298,27 +1345,7 @@ impl VergeApp {
                     (Choice::File, "File"),
                 ] {
                     let selected = self.choice == choice;
-                    let rich = text(Role::Action, words.to_uppercase()).color(if selected {
-                        color::INK
-                    } else {
-                        color::TEXT
-                    });
-                    let button = egui::Button::new(rich)
-                        .fill(if selected {
-                            color::ACCENT
-                        } else {
-                            Color32::TRANSPARENT
-                        })
-                        .stroke(Stroke::new(
-                            1.0,
-                            if selected {
-                                color::ACCENT
-                            } else {
-                                color::BORDER
-                            },
-                        ))
-                        .selected(selected);
-                    if ui.add(button).clicked() {
+                    if ui.add(choice_button(face, words, selected)).clicked() {
                         self.choice = choice;
                         self.confirming = None;
                         if choice == Choice::File && self.picked.is_none() {
@@ -1400,65 +1427,64 @@ impl VergeApp {
                     }) => format!("{}: {error}", path.display()),
                 },
             };
-            wrapping(ui, text(Role::Data, detail).color(color::TEXT_2));
+            wrapping(ui, text(Role::Code, detail).color(face.ink_2));
         });
         if let Some(notice) = &self.notice {
-            edged(ui, color::ATTENTION, notice);
+            edged(ui, Status::Attention, notice);
         }
         let release_refused = self.choice == Choice::Release
             && matches!((&self.release, unit.and_then(Unit::build)), (Some(Ok(release)), Some(build))
                 if matches!(build.compare(&release.tag), verge_probe::version::Relation::UpToDate | verge_probe::version::Relation::Ahead));
         if unit.is_some() && (release_refused || (self.force && self.choice == Choice::Release)) {
             Frame::new()
-                .stroke(Stroke::new(1.0, color::ATTENTION))
+                .stroke(Stroke::new(1.0, face.attention_ink))
                 .inner_margin(Margin::same(space::S as i8))
                 .show(ui, |ui| {
                     ui.checkbox(
                         &mut self.force,
-                        text(Role::Body, "Install anyway: flash this release even though the unit runs the same or a newer build").color(color::TEXT),
+                        text(Role::Body, "Install anyway: flash this release even though the unit runs the same or a newer build").color(face.ink),
                     );
                 });
         }
     }
 
     fn working(ui: &mut Ui, job: &Job, now: f64) {
-        frame(ui, None, Stroke::new(2.0, color::TEXT), |ui| {
+        let face = style::face(ui.ctx());
+        frame(ui, None, Stroke::new(2.0, face.ink), |ui| {
             ui.horizontal(|ui| {
-                glyph::WORKING.show(ui, 48.0, color::TEXT);
+                glyph::WORKING.show(ui, 48.0, face.ink);
                 ui.add_space(space::M);
-                ui.label(text(Role::Display, "WORKING").color(color::TEXT));
+                ui.label(text(Role::Display, "Working").color(face.ink));
             });
-            ui.label(text(Role::Instruction, "DO NOT UNPLUG THE UNIT").color(color::TEXT));
+            ui.label(text(Role::Instruction, "Do not unplug the unit").color(face.ink));
             let mut facts = vec![job.target.clone()];
             facts.extend(job.image.clone());
             facts.push(format!("{:.1} s", now - job.started));
-            ui.label(text(Role::Data, facts.join(" · ")).color(color::TEXT_2));
+            ui.label(text(Role::Code, facts.join(" · ")).color(face.ink_2));
             ui.add_space(space::M);
             if let Some(current) = &job.current {
                 ui.horizontal(|ui| {
-                    label(ui, &current.step.to_string());
+                    label(ui, &sentence_case(&current.step.to_string()));
                     if current.step.unit() == StepUnit::Bytes && current.total > 0 {
                         ui.label(
                             text(
-                                Role::Data,
+                                Role::Figures,
                                 format!("{} / {}", kib(current.done), kib(current.total)),
                             )
-                            .color(color::TEXT),
+                            .color(face.ink),
                         );
                     }
                     ui.label(
-                        text(Role::Data, format!("{:.1} s", now - current.since))
-                            .color(color::TEXT_2),
+                        text(Role::Figures, format!("{:.1} s", now - current.since))
+                            .color(face.ink_2),
                     );
                 });
                 if current.step.unit() == StepUnit::Bytes && current.total > 0 {
-                    let fraction = current.done as f32 / current.total as f32;
-                    let (rect, _) = ui
-                        .allocate_exact_size(vec2(ui.available_width(), 8.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 0.0, color::BORDER);
-                    let mut done = rect;
-                    done.set_width(rect.width() * fraction.clamp(0.0, 1.0));
-                    ui.painter().rect_filled(done, 0.0, color::TEXT);
+                    progress(
+                        ui,
+                        current.done as f32 / current.total as f32,
+                        f32::INFINITY,
+                    );
                 }
             }
         });
@@ -1470,7 +1496,7 @@ impl VergeApp {
             job.current.as_ref().map(|c| c.step),
         );
         for note in &job.notes {
-            edged(ui, color::ATTENTION, note);
+            edged(ui, Status::Attention, note);
         }
     }
 
@@ -1479,6 +1505,7 @@ impl VergeApp {
         if rail.is_empty() {
             return;
         }
+        let face = style::face(ui.ctx());
         let width = (ui.available_width() / rail.len() as f32).min(112.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
@@ -1492,19 +1519,19 @@ impl VergeApp {
                         let (rect, response) =
                             ui.allocate_exact_size(vec2(14.0, 14.0), egui::Sense::hover());
                         if seconds.is_some() {
-                            ui.painter().rect_filled(rect, 0.0, color::TEXT);
+                            ui.painter().rect_filled(rect, 0.0, face.ink);
                         } else if current == Some(*step) {
                             ui.painter().rect_stroke(
                                 rect,
                                 0.0,
-                                Stroke::new(2.0, color::ACCENT),
+                                Stroke::new(2.0, face.ink),
                                 egui::StrokeKind::Inside,
                             );
                         } else {
                             ui.painter().rect_stroke(
                                 rect,
                                 0.0,
-                                Stroke::new(1.0, color::BORDER),
+                                Stroke::new(1.0, face.rule),
                                 egui::StrokeKind::Inside,
                             );
                         }
@@ -1513,7 +1540,7 @@ impl VergeApp {
                         });
                         label(ui, short(*step));
                         if let Some(t) = seconds {
-                            ui.label(text(Role::Data, format!("{t:.1} s")).color(color::TEXT_2));
+                            ui.label(text(Role::Figures, format!("{t:.1} s")).color(face.ink_2));
                         }
                     },
                 );
@@ -1522,75 +1549,71 @@ impl VergeApp {
     }
 
     fn result(ui: &mut Ui, ended: &Ended) {
+        let face = style::face(ui.ctx());
         let (word, instruction, glyph, fill) = match &ended.result {
-            Ok(Outcome::Running(_)) => (
-                "DONE",
-                "THE UNIT IS BACK".to_owned(),
-                glyph::DONE,
-                color::OURS,
-            ),
+            Ok(Outcome::Running(_)) => ("Done", "The unit is back", glyph::DONE, Fill::lume(face)),
             Ok(Outcome::JumperStillFitted) => (
-                "FLASHED",
-                "UNPLUG IT, TAKE THE JUMPER OFF, PLUG IT BACK IN".to_owned(),
+                "Flashed",
+                "Unplug it, take the jumper off, plug it back in",
                 glyph::ATTENTION,
-                color::ATTENTION,
+                Fill::status(Status::Attention, face),
             ),
-            Ok(Outcome::NotRestarted { maybe_jumper: false }) => (
-                "FLASHED",
-                "IT DID NOT RESTART: UNPLUG IT AND PLUG IT BACK IN".to_owned(),
+            Ok(Outcome::NotRestarted {
+                maybe_jumper: false,
+            }) => (
+                "Flashed",
+                "It did not restart: unplug it and plug it back in",
                 glyph::ATTENTION,
-                color::ATTENTION,
+                Fill::status(Status::Attention, face),
             ),
             Ok(Outcome::NotRestarted { maybe_jumper: true }) => (
-                "FLASHED",
-                "IT DID NOT RESTART, OR ITS JUMPER IS FITTED: UNPLUG IT, TAKE ANY JUMPER OFF, PLUG IT BACK IN"
-                    .to_owned(),
+                "Flashed",
+                "It did not restart, or its jumper is fitted: unplug it, take any jumper off, plug it back in",
                 glyph::ATTENTION,
-                color::ATTENTION,
+                Fill::status(Status::Attention, face),
             ),
             Err(error) if error.left_in_isp => (
-                "FAILED",
-                "THE UNIT MAY BE IN ISP MODE".to_owned(),
+                "Failed",
+                "The unit may be in ISP mode",
                 glyph::FAILED,
-                color::FAULT,
+                Fill::status(Status::Fault, face),
             ),
             Err(_) => (
-                "FAILED",
-                "NOTHING WAS FLASHED, OR THE UNIT DID NOT RETURN".to_owned(),
+                "Failed",
+                "Nothing was flashed, or the unit did not return",
                 glyph::FAILED,
-                color::FAULT,
+                Fill::status(Status::Fault, face),
             ),
         };
-        frame(ui, Some(fill), Stroke::NONE, |ui| {
+        frame(ui, Some(fill.ground), Stroke::NONE, |ui| {
             ui.horizontal(|ui| {
-                glyph.show(ui, 48.0, color::INK);
+                glyph.show(ui, 48.0, fill.on);
                 ui.add_space(space::M);
-                ui.label(text(Role::Display, word).color(color::INK));
+                ui.label(text(Role::Display, word).color(fill.on));
             });
-            ui.label(text(Role::Instruction, instruction).color(color::INK));
+            wrapping(ui, text(Role::Instruction, instruction).color(fill.on));
             let mut facts = vec![ended.target.clone()];
             facts.extend(ended.image.clone());
             facts.push(format!("{:.1} s", ended.seconds));
-            ui.label(text(Role::Data, facts.join(" · ")).color(color::INK));
+            ui.label(text(Role::Code, facts.join(" · ")).color(fill.on));
             if let Ok(Outcome::Running(unit)) = &ended.result {
                 wrapping(
                     ui,
                     text(
-                        Role::Data,
+                        Role::Code,
                         format!("now {}, which runs {}", unit_name(unit), unit.state),
                     )
-                    .color(color::INK),
+                    .color(fill.on),
                 );
             }
         });
         ui.add_space(space::M);
         if let Err(error) = &ended.result {
             ui.add(
-                egui::Label::new(text(Role::Data, &error.message).color(color::TEXT))
-                    .selectable(true),
+                egui::Label::new(text(Role::Code, &error.message).color(face.ink)).selectable(true),
             );
             if let Some(advice) = error.advice {
-                edged(ui, color::ATTENTION, advice);
+                edged(ui, Status::Attention, advice);
             }
         }
         if !ended.steps.is_empty() {
@@ -1598,17 +1621,18 @@ impl VergeApp {
             Self::rail(ui, &rail, &ended.steps, None);
         }
         for note in &ended.notes {
-            edged(ui, color::ATTENTION, note);
+            edged(ui, Status::Attention, note);
         }
     }
 
     fn log_drawer(&mut self, ui: &mut Ui) {
         let (lines, warnings, errors) = self.log.tail(if self.log_open { 400 } else { 1 });
+        let face = style::face(ui.ctx());
         let level_color = |level: tracing::Level| match level {
-            tracing::Level::ERROR => color::FAULT,
-            tracing::Level::WARN => color::ATTENTION,
-            tracing::Level::INFO => color::TEXT,
-            _ => color::TEXT_2,
+            tracing::Level::ERROR => face.fault_ink,
+            tracing::Level::WARN => face.attention_ink,
+            tracing::Level::INFO => face.ink,
+            _ => face.ink_2,
         };
         if self.log_open {
             ScrollArea::vertical()
@@ -1619,7 +1643,7 @@ impl VergeApp {
                     for line in &lines {
                         ui.add(
                             egui::Label::new(
-                                text(Role::Data, format!("{:<5} {}", line.level, line.text))
+                                text(Role::Code, format!("{:<5} {}", line.level, line.text))
                                     .color(level_color(line.level)),
                             )
                             .selectable(true),
@@ -1628,21 +1652,21 @@ impl VergeApp {
                 });
         }
         ui.horizontal(|ui| {
-            label(ui, "log");
+            label(ui, "Log");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if outline(ui, if self.log_open { "Hide" } else { "Show" }, true).clicked() {
                     self.log_open = !self.log_open;
                 }
                 ui.label(
-                    text(Role::Label, format!("{warnings} WARN · {errors} ERROR"))
-                        .color(color::TEXT_2),
+                    text(Role::Label, format!("{warnings} warn · {errors} error"))
+                        .color(face.ink_2),
                 );
                 if !self.log_open
                     && let Some(line) = lines.last()
                 {
                     ui.add(
                         egui::Label::new(
-                            text(Role::Data, format!("{:<5} {}", line.level, line.text))
+                            text(Role::Code, format!("{:<5} {}", line.level, line.text))
                                 .color(level_color(line.level)),
                         )
                         .truncate(),
@@ -1651,6 +1675,19 @@ impl VergeApp {
             });
         });
     }
+}
+
+/// A bar of `fraction` done, as wide as the space or `max_width`.
+pub(crate) fn progress(ui: &mut Ui, fraction: f32, max_width: f32) {
+    let face = style::face(ui.ctx());
+    let (rect, _) = ui.allocate_exact_size(
+        vec2(ui.available_width().min(max_width), 8.0),
+        egui::Sense::hover(),
+    );
+    ui.painter().rect_filled(rect, 0.0, face.hair);
+    let mut done = rect;
+    done.set_width(rect.width() * fraction.clamp(0.0, 1.0));
+    ui.painter().rect_filled(done, 0.0, face.ink);
 }
 
 /// What to do for a unit that needs the jumper, naming its board and the image to flash once it
@@ -1667,7 +1704,7 @@ fn jumper_advice(unit: &Unit, action: &Action) -> String {
             source: Source::Release(_),
             ..
         } if board != Board::McuLink => format!(
-            "{fit} This unit is {}. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it with STOCK, or with a file built for {}.",
+            "{fit} This unit is {}. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it with Stock, or with a file built for {}.",
             board.a(),
             board.a()
         ),
@@ -1694,12 +1731,7 @@ fn jumper_advice(unit: &Unit, action: &Action) -> String {
 
 /// An error message as a sentence: capitalised, with a full stop.
 pub fn sentence(message: &str) -> String {
-    let mut chars = message.chars();
-    let mut out: String = chars
-        .next()
-        .map(|c| c.to_uppercase().collect::<String>())
-        .unwrap_or_default();
-    out.extend(chars);
+    let mut out = sentence_case(message);
     if !out.ends_with('.') {
         out.push('.');
     }

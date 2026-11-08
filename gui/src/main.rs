@@ -11,7 +11,13 @@ mod log;
 mod style;
 #[cfg(test)]
 mod tests;
+// A copy of the design tokens' generated file, kept byte for byte so that the site's
+// `design/build.py --check` can compare it. Not every role is drawn.
+#[allow(dead_code)]
+mod tokens;
 mod worker;
+
+use std::sync::Arc;
 
 use clap::Parser;
 use tracing_subscriber::Layer;
@@ -113,6 +119,12 @@ fn record_dir() -> std::path::PathBuf {
     }
 }
 
+/// Verge's app icon, the design tokens' 512 px rendering.
+fn icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../icons/verge-512.png"))
+        .expect("the icon is a PNG; tests::the_icon_decodes checks it")
+}
+
 fn main() -> eframe::Result {
     let args = Args::parse();
     let log = log::Log::default();
@@ -146,7 +158,8 @@ fn main() -> eframe::Result {
             .with_title("verge")
             .with_inner_size([1080.0, 700.0])
             .with_min_inner_size([860.0, 560.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(Arc::new(icon())),
         ..Default::default()
     };
     eframe::run_native(

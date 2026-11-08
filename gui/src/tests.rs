@@ -21,7 +21,7 @@ use verge_probe::version::StockVersion;
 
 use crate::app::{Config, VergeApp};
 use crate::log::Log;
-use crate::style::{self, color};
+use crate::style;
 use crate::worker::{BatchEvent, Event, InstallEvent, Manual, ProgressEvent, Shared, Worker};
 
 fn repo() -> Repo {
@@ -157,33 +157,43 @@ fn press(h: &mut Harness<'_, VergeApp>, label: &str) {
     h.step();
 }
 
+/// As [`press`], for the one widget of `role` labelled `label`: the batch view's image choice and
+/// the units it takes are both labelled Stock.
+fn press_as(h: &mut Harness<'_, VergeApp>, role: Role, label: &str) {
+    h.get_by_role_and_label(role, label).scroll_to_me();
+    h.run_steps(20);
+    h.get_by_role_and_label(role, label).click();
+    h.step();
+    h.step();
+}
+
 #[test]
 fn the_bench_is_listed_with_the_release_to_install() {
     let mut h = harness(sim_app(SimBus::scenario("bench").unwrap(), vec![]));
-    until(&mut h, "UPDATE TO V0.3.0");
+    until(&mut h, "Update to v0.3.0");
     h.get_by_role_and_label(Role::ListBoxOption, "CJ3E7A91C2");
     h.get_by_role_and_label(Role::ListBoxOption, "QK7RM2VTX8D41");
     h.get_by_label_contains("runs 14d05d4, which carries no version");
-    h.get_by_label("SIMULATED BENCH: TEST");
+    h.get_by_label("Simulated bench: test");
 }
 
 #[test]
 fn an_update_is_confirmed_runs_and_reports_the_unit_back() {
     let mut h = harness(sim_app(SimBus::scenario("stock").unwrap(), vec![]));
-    until(&mut h, "INSTALL V0.3.0");
-    press(&mut h, "INSTALL V0.3.0");
+    until(&mut h, "Install v0.3.0");
+    press(&mut h, "Install v0.3.0");
     // Nothing runs until the user confirms.
     h.get_by_label_contains(DOWNLOAD);
     h.get_by_label_contains(" KiB), and flash it onto QK7RM2VTX8D41 at 1-1?");
     assert!(!h.state().busy());
-    press(&mut h, "CONFIRM");
+    press(&mut h, "Confirm");
     assert!(h.state().busy());
-    until(&mut h, "DONE");
+    until(&mut h, "Done");
     h.get_by_label_contains("runs Verge, build v0.3.0");
     assert!(!h.state().busy());
-    press(&mut h, "BACK");
+    press(&mut h, "Back");
     // The rescan after the update finds the unit by its port and selects it again.
-    until(&mut h, "VERGE v0.3.0 · 1-1");
+    until(&mut h, "Verge v0.3.0 · 1-1");
 }
 
 /// The second of two units, updated, comes back as a new enumeration with a new serial; the
@@ -191,30 +201,30 @@ fn an_update_is_confirmed_runs_and_reports_the_unit_back() {
 #[test]
 fn the_updated_unit_stays_selected_when_it_returns() {
     let mut h = harness(sim_app(SimBus::scenario("bench").unwrap(), vec![]));
-    until(&mut h, "UPDATE TO V0.3.0");
+    until(&mut h, "Update to v0.3.0");
     h.get_by_role_and_label(Role::ListBoxOption, "QK7RM2VTX8D41")
         .click();
     h.step();
     h.step();
-    press(&mut h, "INSTALL V0.3.0");
-    press(&mut h, "CONFIRM");
-    until(&mut h, "DONE");
-    press(&mut h, "BACK");
+    press(&mut h, "Install v0.3.0");
+    press(&mut h, "Confirm");
+    until(&mut h, "Done");
+    press(&mut h, "Back");
     until_contains(&mut h, "CJ3E7B02F9 · 1-2 · 1fc9:0143");
 }
 
 #[test]
 fn confirming_a_unit_already_in_isp_mode_says_it_may_not_be_an_mculink() {
     let mut h = harness(sim_app(SimBus::scenario("isp").unwrap(), vec![]));
-    until(&mut h, "INSTALL V0.3.0");
-    press(&mut h, "INSTALL V0.3.0");
+    until(&mut h, "Install v0.3.0");
+    press(&mut h, "Install v0.3.0");
     h.get_by_label_contains(&format!(
         "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode. A release says which boards it is built for only once it is downloaded. {DOWNLOAD}"
     ));
     // A jumper-free update restarts a unit it knows, so its confirmation does not say so.
     let mut h = harness(sim_app(SimBus::scenario("ours").unwrap(), vec![]));
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "UPDATE TO V0.3.0");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Update to v0.3.0");
     h.get_by_label_contains("and flash it onto CJ3E7A91C2");
     assert!(
         h.query_by_label_contains("cannot tell an MCU-Link")
@@ -225,28 +235,28 @@ fn confirming_a_unit_already_in_isp_mode_says_it_may_not_be_an_mculink() {
 #[test]
 fn daplink_rs_is_named_and_updates_without_the_jumper() {
     let mut h = harness(sim_app(SimBus::scenario("daplink-rs").unwrap(), vec![]));
-    until(&mut h, "INSTALL V0.3.0");
-    h.get_by_label("DAPLINK-RS");
-    h.get_by_label("UPDATES WITHOUT THE JUMPER");
-    press(&mut h, "INSTALL V0.3.0");
-    press(&mut h, "CONFIRM");
-    until(&mut h, "DONE");
+    until(&mut h, "Install v0.3.0");
+    h.get_by_label("daplink-rs");
+    h.get_by_label("Updates without the jumper");
+    press(&mut h, "Install v0.3.0");
+    press(&mut h, "Confirm");
+    until(&mut h, "Done");
     h.get_by_label_contains("runs Verge, build v0.3.0");
 }
 
 #[test]
 fn a_mini_in_isp_mode_leaves_the_other_bootloader_nothing_to_press() {
     let mut h = harness(sim_app(SimBus::scenario("isp-mini").unwrap(), vec![]));
-    until(&mut h, "CANNOT UPDATE");
+    until(&mut h, "Cannot update");
     h.get_by_label_contains("unplug the mini first");
 }
 
 #[test]
 fn two_units_in_isp_mode_leave_nothing_to_press() {
     let mut h = harness(sim_app(SimBus::scenario("two-isp").unwrap(), vec![]));
-    until(&mut h, "CANNOT UPDATE");
+    until(&mut h, "Cannot update");
     assert!(
-        h.get_by_label("CANNOT UPDATE")
+        h.get_by_label("Cannot update")
             .accesskit_node()
             .is_disabled()
     );
@@ -256,7 +266,7 @@ fn two_units_in_isp_mode_leave_nothing_to_press() {
 #[test]
 fn old_stock_is_sent_to_the_jumper() {
     let mut h = harness(sim_app(SimBus::scenario("stock-old").unwrap(), vec![]));
-    until(&mut h, "NEEDS THE JUMPER");
+    until(&mut h, "Needs the jumper");
     h.get_by_label_contains("NXP added it in V3.122");
 }
 
@@ -274,11 +284,11 @@ fn going_back_to_stock_uses_the_install_on_disk() {
         SimBus::scenario("ours").unwrap(),
         vec![dir.clone()],
     ));
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "STOCK");
-    press(&mut h, "INSTALL STOCK V3.172");
-    press(&mut h, "CONFIRM");
-    until(&mut h, "DONE");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Stock");
+    press(&mut h, "Install stock V3.172");
+    press(&mut h, "Confirm");
+    until(&mut h, "Done");
     h.get_by_label_contains("runs stock V3.172");
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -288,12 +298,12 @@ fn a_unit_on_the_release_needs_install_anyway() {
     let bus = SimBus::default();
     bus.add_ours("v0.3.0");
     let mut h = harness(sim_app(bus, vec![]));
-    until(&mut h, "NOTHING TO UPDATE");
+    until(&mut h, "Nothing to update");
     h.get_by_label_contains("The unit already runs v0.3.0.");
     h.get_by_role(Role::CheckBox).click();
     h.step();
     h.step();
-    h.get_by_label("UPDATE TO V0.3.0");
+    h.get_by_label("Update to v0.3.0");
 }
 
 /// A window whose backend the test drives by hand, showing the one unit of `scenario`.
@@ -349,9 +359,9 @@ fn request_close(h: &mut Harness<'_, VergeApp>) {
 fn the_window_stays_open_while_an_update_writes() {
     let (app, backend) = manual_app("ours", true);
     let mut h = harness(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "CONFIRM");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Update to v0.3.0");
+    press(&mut h, "Confirm");
     assert_eq!(
         backend.lock().unwrap().sent.last().unwrap(),
         "install Release(Some(\"v0.3.0\")) Agreed"
@@ -386,7 +396,7 @@ fn the_window_stays_open_while_an_update_writes() {
 fn an_idle_window_closes_at_once() {
     let (app, _backend) = manual_app("ours", true);
     let mut h = harness(app);
-    until(&mut h, "UPDATE TO V0.3.0");
+    until(&mut h, "Update to v0.3.0");
     request_close(&mut h);
     assert!(!root_commands(&h).contains(&ViewportCommand::CancelClose));
 }
@@ -395,14 +405,14 @@ fn an_idle_window_closes_at_once() {
 fn cancel_asks_the_job_to_stop_at_a_safe_point() {
     let (app, backend) = manual_app("ours", true);
     let mut h = harness(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "CONFIRM");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Update to v0.3.0");
+    press(&mut h, "Confirm");
     let cancel = backend.lock().unwrap().last_cancel.clone().unwrap();
     assert!(!cancel.is_cancelled());
-    press(&mut h, "CANCEL");
+    press(&mut h, "Cancel");
     assert!(cancel.is_cancelled());
-    h.get_by_label("CANCELLING AT THE NEXT SAFE POINT");
+    h.get_by_label("Cancelling at the next safe point");
 }
 
 #[test]
@@ -415,30 +425,74 @@ fn a_release_lookup_that_fails_says_so() {
         .unwrap()
         .queued
         .push_back(Event::Release(Err("GitHub could not be reached".into())));
-    until(&mut h, "NO RELEASE");
+    until(&mut h, "No release");
     h.get_by_label_contains("GitHub could not be reached");
     // Picking the stock unit shows its own state; the release stays unavailable to it.
     h.get_by_role_and_label(Role::ListBoxOption, "QK7RM2VTX8D41")
         .click();
     h.step();
     h.step();
-    until(&mut h, "STOCK V3.172 · 1-2");
+    until(&mut h, "Stock V3.172 · 1-2");
 }
 
 #[test]
-fn ink_reads_on_every_fill() {
-    for (name, fill) in [
-        ("OURS", color::OURS),
-        ("ATTENTION", color::ATTENTION),
-        ("FAULT", color::FAULT),
-        ("ACCENT", color::ACCENT),
-        ("TEXT_2", color::TEXT_2),
+fn every_colour_reads_on_what_it_is_drawn_on() {
+    use crate::app::Fill;
+    use crate::style::Status;
+    for (face_name, face) in [
+        ("day", &crate::tokens::DAY),
+        ("night", &crate::tokens::NIGHT),
     ] {
-        let ratio = style::contrast(color::INK, fill);
-        assert!(ratio >= 4.5, "INK on {name}: {ratio:.1}");
+        for (name, fill) in [
+            ("Verge's", Fill::lume(face)),
+            ("attention's", Fill::status(Status::Attention, face)),
+            ("fault's", Fill::status(Status::Fault, face)),
+            ("an action's", Fill::ink(face)),
+            ("other firmware's", Fill::other(face)),
+        ] {
+            let ratio = style::contrast(fill.on, fill.ground);
+            assert!(
+                ratio >= 4.5,
+                "{face_name}: words on {name} fill are {ratio:.2}:1"
+            );
+        }
+        let pairs = [
+            // Page text on an ink fill: a selected row or choice.
+            ("page on ink", face.page, face.ink, 4.5),
+            // Text on the grounds: the page, the panels, notices and fields.
+            ("ink on page", face.ink, face.page, 7.0),
+            ("ink on surface", face.ink, face.surface, 7.0),
+            ("ink on raised", face.ink, face.raised, 7.0),
+            ("ink on sunken", face.ink, face.sunken, 7.0),
+            ("ink_2 on page", face.ink_2, face.page, 4.5),
+            ("ink_2 on surface", face.ink_2, face.surface, 4.5),
+            ("ink_2 on raised", face.ink_2, face.raised, 4.5),
+            // Status words in the panels and the log.
+            (
+                "attention_ink on surface",
+                face.attention_ink,
+                face.surface,
+                4.5,
+            ),
+            ("fault_ink on surface", face.fault_ink, face.surface, 4.5),
+            // Control outlines and the trace, against the panels and the plot.
+            ("rule on surface", face.rule, face.surface, 3.0),
+            ("rule on raised", face.rule, face.raised, 3.0),
+            (
+                "series_verge on surface",
+                face.series_verge,
+                face.surface,
+                3.0,
+            ),
+        ];
+        for (name, fore, back, least) in pairs {
+            let ratio = style::contrast(fore, back);
+            assert!(
+                ratio >= least,
+                "{face_name}: {name} is {ratio:.2}:1, under {least}:1"
+            );
+        }
     }
-    assert!(style::contrast(color::TEXT, color::BACKGROUND) >= 7.0);
-    assert!(style::contrast(color::TEXT_2, color::BACKGROUND) >= 4.5);
 }
 
 /// Renders the window's states to PNG for a person to look at. Needs a GPU adapter.
@@ -449,10 +503,16 @@ fn ink_reads_on_every_fill() {
 fn pictures() {
     let dir = PathBuf::from(std::env::var("VERGE_GUI_SHOTS").expect("VERGE_GUI_SHOTS"));
     std::fs::create_dir_all(&dir).unwrap();
+    // Each state in both faces, night first, as the harness starts.
     let shoot = |h: &mut Harness<'_, VergeApp>, name: &str| {
+        for (theme, face) in [(egui::Theme::Dark, "night"), (egui::Theme::Light, "day")] {
+            h.ctx.set_theme(theme);
+            h.step();
+            let image = h.render().expect("wgpu renders the window");
+            image.save(dir.join(format!("{name}-{face}.png"))).unwrap();
+        }
+        h.ctx.set_theme(egui::Theme::Dark);
         h.step();
-        let image = h.render().expect("wgpu renders the window");
-        image.save(dir.join(format!("{name}.png"))).unwrap();
     };
     let rendered = |app: VergeApp| {
         Harness::builder()
@@ -463,24 +523,30 @@ fn pictures() {
     };
 
     let mut h = rendered(sim_app(SimBus::scenario("bench").unwrap(), vec![]));
-    until(&mut h, "UPDATE TO V0.3.0");
+    until(&mut h, "Update to v0.3.0");
     shoot(&mut h, "01-ours-selected");
     h.get_by_role_and_label(Role::ListBoxOption, "QK7RM2VTX8D41")
         .click();
     h.step();
     shoot(&mut h, "02-stock-selected");
     let mut d = rendered(sim_app(SimBus::scenario("daplink-rs").unwrap(), vec![]));
-    until(&mut d, "INSTALL V0.3.0");
+    until(&mut d, "Install v0.3.0");
     shoot(&mut d, "02b-daplink-rs-selected");
-    press(&mut h, "INSTALL V0.3.0");
+    // The interaction layer: the pointer on one choice, the focus on the chosen one.
+    d.get_by_label("Stock").hover();
+    d.get_by_label("Release").focus();
+    shoot(&mut d, "02c-hover-and-focus");
+    press(&mut d, "Licences");
+    shoot(&mut d, "02d-licences");
+    press(&mut h, "Install v0.3.0");
     shoot(&mut h, "03-confirm");
 
     // Working, held mid-write by a hand-driven backend.
     let (app, backend) = manual_app("ours", true);
     let mut h = rendered(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "CONFIRM");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Update to v0.3.0");
+    press(&mut h, "Confirm");
     {
         let mut manual = backend.lock().unwrap();
         use verge_probe::progress::Step;
@@ -530,17 +596,17 @@ fn pictures() {
     shoot(&mut h, "05-close-held");
 
     let mut h = rendered(sim_app(SimBus::scenario("stock").unwrap(), vec![]));
-    until(&mut h, "INSTALL V0.3.0");
-    press(&mut h, "INSTALL V0.3.0");
-    press(&mut h, "CONFIRM");
-    until(&mut h, "DONE");
+    until(&mut h, "Install v0.3.0");
+    press(&mut h, "Install v0.3.0");
+    press(&mut h, "Confirm");
+    until(&mut h, "Done");
     shoot(&mut h, "06-done");
 
     let (app, backend) = manual_app("ours", true);
     let mut h = rendered(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "CONFIRM");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Update to v0.3.0");
+    press(&mut h, "Confirm");
     backend
         .lock()
         .unwrap()
@@ -558,12 +624,12 @@ fn pictures() {
     // The batch view: set up, running, and done.
     let (app, backend) = manual_app("ours", true);
     let mut h = rendered(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "BATCH");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Batch");
     shoot(&mut h, "12-batch-setup");
-    press(&mut h, "ARM BATCH");
+    press(&mut h, "Arm batch");
     shoot(&mut h, "13-batch-confirm");
-    press(&mut h, "CONFIRM");
+    press(&mut h, "Confirm");
     {
         use verge_probe::batch::{Record, Tally};
         use verge_probe::progress::Step;
@@ -677,29 +743,29 @@ fn pictures() {
         },
     );
     let mut h = rendered(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "BENCH");
-    until(&mut h, "RECORD RUNNING CAPTURE");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until(&mut h, "Record running capture");
     shoot(&mut h, "16-bench-connected");
-    press(&mut h, "DIO0–2 OUTPUT");
-    until(&mut h, "DRIVE PINS");
+    press(&mut h, "DIO0–2 output");
+    until(&mut h, "Drive pins");
     shoot(&mut h, "18-bench-drive-confirmation");
-    press(&mut h, "DRIVE PINS");
+    press(&mut h, "Drive pins");
     for _ in 0..40 {
         h.step();
         std::thread::sleep(Duration::from_millis(5));
     }
     shoot(&mut h, "19-bench-outputs");
-    press(&mut h, "DIO0–2 INPUT");
-    press(&mut h, "RECORD RUNNING CAPTURE");
-    until(&mut h, "STOP RECORDING");
+    press(&mut h, "DIO0–2 input");
+    press(&mut h, "Record running capture");
+    until(&mut h, "Stop recording");
     for _ in 0..200 {
         h.step();
         std::thread::sleep(Duration::from_millis(10));
     }
     shoot(&mut h, "17-bench-recording");
-    press(&mut h, "STOP RECORDING");
-    until(&mut h, "RECORD RUNNING CAPTURE");
+    press(&mut h, "Stop recording");
+    until(&mut h, "Record running capture");
 
     // A Pro with no capture running offers the current ranges for the one it would start.
     let http = SimHttp::new(repo());
@@ -720,28 +786,28 @@ fn pictures() {
         },
     );
     let mut h = rendered(app);
-    until(&mut h, "BENCH");
-    press(&mut h, "BENCH");
-    until(&mut h, "START RECORDING");
-    press(&mut h, "HIGH RANGE");
+    until(&mut h, "Bench");
+    press(&mut h, "Bench");
+    until(&mut h, "Start recording");
+    press(&mut h, "High range");
     for _ in 0..5 {
         h.step();
     }
     shoot(&mut h, "20-bench-high-range");
-    press(&mut h, "TURN ON");
-    until(&mut h, "TURN OFF");
-    press(&mut h, "START RECORDING");
-    until(&mut h, "START CAPTURE");
-    press(&mut h, "START CAPTURE");
-    until(&mut h, "STOP RECORDING");
+    press(&mut h, "Turn on");
+    until(&mut h, "Turn off");
+    press(&mut h, "Start recording");
+    until(&mut h, "Start capture");
+    press(&mut h, "Start capture");
+    until(&mut h, "Stop recording");
     for _ in 0..200 {
         h.step();
         std::thread::sleep(Duration::from_millis(10));
     }
     shoot(&mut h, "21-bench-high-range-held");
     until_contains(&mut h, "This capture held the high range");
-    press(&mut h, "STOP RECORDING");
-    until(&mut h, "START RECORDING");
+    press(&mut h, "Stop recording");
+    until(&mut h, "Start recording");
 }
 
 /// A directory of its own for a test's batch record.
@@ -774,10 +840,10 @@ fn a_batch_updates_units_as_they_arrive_and_records_each() {
         },
     );
     let mut h = harness(app);
-    until(&mut h, "BATCH");
-    press(&mut h, "BATCH");
-    until(&mut h, "ARM BATCH");
-    press(&mut h, "ARM BATCH");
+    until(&mut h, "Batch");
+    press(&mut h, "Batch");
+    until(&mut h, "Arm batch");
+    press(&mut h, "Arm batch");
     h.get_by_label_contains(DOWNLOAD);
     h.get_by_label_contains(
         " KiB), and flash it onto every full MCU-Link running stock or Verge older than the image, attached from now on?",
@@ -786,14 +852,14 @@ fn a_batch_updates_units_as_they_arrive_and_records_each() {
         h.query_by_label_contains("cannot tell an MCU-Link")
             .is_none()
     );
-    press(&mut h, "CONFIRM");
+    press(&mut h, "Confirm");
     assert!(h.state().busy());
     until(&mut h, "3 updated");
     until(&mut h, "1 current");
     until(&mut h, "1 skipped");
     h.get_by_label("0 failed");
-    press(&mut h, "STOP");
-    until(&mut h, "ENDED");
+    press(&mut h, "Stop");
+    until(&mut h, "Ended");
     assert!(!h.state().busy());
 
     let records: Vec<String> = std::fs::read_dir(&dir)
@@ -829,10 +895,10 @@ fn a_batch_updates_units_as_they_arrive_and_records_each() {
 fn closing_during_a_batch_stops_it_taking_units_and_waits_for_it() {
     let (app, backend) = manual_app("ours", true);
     let mut h = harness(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "BATCH");
-    press(&mut h, "ARM BATCH");
-    press(&mut h, "CONFIRM");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Batch");
+    press(&mut h, "Arm batch");
+    press(&mut h, "Confirm");
     assert!(
         backend
             .lock()
@@ -861,10 +927,10 @@ fn closing_during_a_batch_stops_it_taking_units_and_waits_for_it() {
 fn a_paused_batch_says_why() {
     let (app, backend) = manual_app("ours", true);
     let mut h = harness(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "BATCH");
-    press(&mut h, "ARM BATCH");
-    press(&mut h, "CONFIRM");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Batch");
+    press(&mut h, "Arm batch");
+    press(&mut h, "Confirm");
     backend
         .lock()
         .unwrap()
@@ -876,7 +942,7 @@ fn a_paused_batch_says_why() {
             ),
             ..Default::default()
         })));
-    until(&mut h, "PAUSED");
+    until(&mut h, "Paused");
     h.get_by_label_contains("An MCU-Link mini is in ISP mode at 1-2.");
 }
 
@@ -884,13 +950,13 @@ fn a_paused_batch_says_why() {
 fn a_batch_that_takes_units_in_isp_mode_says_it_may_not_be_flashing_an_mculink() {
     let (app, _backend) = manual_app("ours", true);
     let mut h = harness(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "BATCH");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Batch");
     press(
         &mut h,
         "Units that arrive in ISP mode, as after fitting the jumper",
     );
-    press(&mut h, "ARM BATCH");
+    press(&mut h, "Arm batch");
     h.get_by_label_contains(&format!(
         "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode. {DOWNLOAD}"
     ));
@@ -903,14 +969,14 @@ fn a_batch_that_takes_units_in_isp_mode_says_it_may_not_be_flashing_an_mculink()
 fn a_batch_needs_something_to_take() {
     let (app, _backend) = manual_app("ours", true);
     let mut h = harness(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "BATCH");
-    h.get_by_label("Stock").click();
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Batch");
+    h.get_by_role_and_label(Role::CheckBox, "Stock").click();
     h.step();
-    h.get_by_label("Verge").click();
+    h.get_by_role_and_label(Role::CheckBox, "Verge").click();
     h.step();
     h.step();
-    h.get_by_label("CANNOT ARM");
+    h.get_by_label("Cannot arm");
     h.get_by_label_contains("Tick at least one kind of unit");
 }
 
@@ -939,9 +1005,9 @@ fn a_worker_failure_during_discovery_is_reported() {
 fn a_worker_failure_during_installation_finishes_the_job() {
     let (app, backend) = manual_app("ours", true);
     let mut h = harness(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "CONFIRM");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Update to v0.3.0");
+    press(&mut h, "Confirm");
     backend
         .lock()
         .unwrap()
@@ -951,19 +1017,19 @@ fn a_worker_failure_during_installation_finishes_the_job() {
             advice: None,
             left_in_isp: true,
         }));
-    until(&mut h, "FAILED");
+    until(&mut h, "Failed");
     assert!(!h.state().busy());
-    press(&mut h, "BACK");
-    h.get_by_label("WORKER STOPPED");
+    press(&mut h, "Back");
+    h.get_by_label("Worker stopped");
 }
 
 #[test]
 fn a_worker_failure_withdraws_an_open_install_question() {
     let (app, backend) = manual_app("ours", true);
     let mut h = harness(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "UPDATE TO V0.3.0");
-    h.get_by_label("CONFIRM");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Update to v0.3.0");
+    h.get_by_label("Confirm");
     backend
         .lock()
         .unwrap()
@@ -973,8 +1039,8 @@ fn a_worker_failure_withdraws_an_open_install_question() {
             advice: None,
             left_in_isp: false,
         }));
-    until(&mut h, "WORKER STOPPED");
-    assert!(h.query_by_label("CONFIRM").is_none());
+    until(&mut h, "Worker stopped");
+    assert!(h.query_by_label("Confirm").is_none());
     assert!(!h.state().busy());
 }
 
@@ -1008,9 +1074,9 @@ fn a_question_about_a_unit_that_left_is_withdrawn() {
         },
     );
     let mut h = harness(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "UPDATE TO V0.3.0");
-    h.get_by_label("CONFIRM");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Update to v0.3.0");
+    h.get_by_label("Confirm");
     // The asked-about unit is unplugged; the rescan finds the other, which becomes selected.
     backend
         .lock()
@@ -1018,27 +1084,27 @@ fn a_question_about_a_unit_that_left_is_withdrawn() {
         .queued
         .push_back(Event::Units(Ok(vec![units[1].clone()])));
     h.run_steps(3);
-    assert!(h.query_by_label("CONFIRM").is_none());
-    h.get_by_label("UPDATE TO V0.3.0");
+    assert!(h.query_by_label("Confirm").is_none());
+    h.get_by_label("Update to v0.3.0");
 }
 
 #[test]
 fn an_install_preserves_the_previous_batch_result() {
     let (app, backend) = manual_app("ours", true);
     let mut h = harness(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "BATCH");
-    press(&mut h, "ARM BATCH");
-    press(&mut h, "CONFIRM");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Batch");
+    press(&mut h, "Arm batch");
+    press(&mut h, "Confirm");
     backend
         .lock()
         .unwrap()
         .queued
         .push_back(Event::Batch(BatchEvent::Ended(Ok(Default::default()))));
-    until(&mut h, "ENDED");
-    press(&mut h, "UNITS");
-    press(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "CONFIRM");
+    until(&mut h, "Ended");
+    press(&mut h, "Units");
+    press(&mut h, "Update to v0.3.0");
+    press(&mut h, "Confirm");
     backend
         .lock()
         .unwrap()
@@ -1048,18 +1114,18 @@ fn an_install_preserves_the_previous_batch_result() {
         ))));
     h.run_steps(3);
     assert!(!h.state().busy());
-    press(&mut h, "BATCH");
-    h.get_by_label("ENDED");
+    press(&mut h, "Batch");
+    h.get_by_label("Ended");
 }
 
 #[test]
 fn a_worker_that_dies_during_a_batch_lets_the_window_close() {
     let (app, backend) = manual_app("ours", true);
     let mut h = harness(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "BATCH");
-    press(&mut h, "ARM BATCH");
-    press(&mut h, "CONFIRM");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Batch");
+    press(&mut h, "Arm batch");
+    press(&mut h, "Confirm");
     request_close(&mut h);
     assert!(root_commands(&h).contains(&ViewportCommand::CancelClose));
     backend
@@ -1137,15 +1203,15 @@ fn stop_ends_a_batch_still_loading_its_image() {
     let (app, release) = stalled_app();
     let mut h = harness(app);
     let _free = Free(release);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "BATCH");
-    press(&mut h, "ARM BATCH");
-    press(&mut h, "CONFIRM");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Batch");
+    press(&mut h, "Arm batch");
+    press(&mut h, "Confirm");
     h.run_steps(5);
     h.get_by_label_contains("loading the image");
     assert!(h.state().busy());
-    press(&mut h, "STOP");
-    until(&mut h, "ENDED");
+    press(&mut h, "Stop");
+    until(&mut h, "Ended");
     assert!(!h.state().busy());
 }
 
@@ -1155,10 +1221,10 @@ fn the_window_closes_while_a_batch_loads_its_image() {
     let (app, release) = stalled_app();
     let mut h = harness(app);
     let _free = Free(release);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "BATCH");
-    press(&mut h, "ARM BATCH");
-    press(&mut h, "CONFIRM");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Batch");
+    press(&mut h, "Arm batch");
+    press(&mut h, "Confirm");
     h.run_steps(5);
     request_close(&mut h);
     assert!(root_commands(&h).contains(&ViewportCommand::CancelClose));
@@ -1206,16 +1272,16 @@ fn drop_file(h: &mut Harness<'_, VergeApp>, path: &std::path::Path) {
 fn ours_goes_on_a_pro_only_where_its_image_declares_it() {
     let bus = SimBus::scenario("pro").unwrap();
     let mut h = harness(sim_app(bus.clone(), vec![]));
-    until(&mut h, "INSTALL V0.3.0");
-    press(&mut h, "INSTALL V0.3.0");
-    press(&mut h, "CONFIRM");
-    until(&mut h, "FAILED");
+    until(&mut h, "Install v0.3.0");
+    press(&mut h, "Install v0.3.0");
+    press(&mut h, "Confirm");
+    until(&mut h, "Failed");
     h.get_by_label_contains(
         "the unit is an MCU-Link Pro, and this image is built for the full MCU-Link only",
     );
-    h.get_by_label_contains("Pick STOCK");
+    h.get_by_label_contains("Pick Stock");
     assert!(!bus.log().iter().any(|l| l.contains("DAP 8101")));
-    press(&mut h, "BACK");
+    press(&mut h, "Back");
 
     let dir = record_dir("pro-files");
     let ours = SimFirmware::Ours {
@@ -1230,10 +1296,10 @@ fn ours_goes_on_a_pro_only_where_its_image_declares_it() {
     )
     .unwrap();
     drop_file(&mut h, &plain);
-    until(&mut h, "NOT FOR THIS BOARD");
+    until(&mut h, "Not for this board");
     h.get_by_label_contains("The unit is an MCU-Link Pro");
     drop_file(&mut h, &pro);
-    until(&mut h, "FLASH PRO.S19");
+    until(&mut h, "Flash pro.s19");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -1242,8 +1308,8 @@ fn ours_goes_on_a_pro_only_where_its_image_declares_it() {
 #[test]
 fn a_unit_that_names_no_board_is_asked_about() {
     let mut h = harness(sim_app(SimBus::scenario("unnamed-board").unwrap(), vec![]));
-    until(&mut h, "INSTALL V0.3.0");
-    press(&mut h, "INSTALL V0.3.0");
+    until(&mut h, "Install v0.3.0");
+    press(&mut h, "Install v0.3.0");
     h.get_by_label_contains(&format!(
         "This unit's firmware does not say which board it is, so the tool cannot check that the image is built for it. A release says which boards it is built for only once it is downloaded. {DOWNLOAD}"
     ));
@@ -1299,20 +1365,20 @@ fn a_batch_adds_to_an_existing_record_file() {
     assert_eq!(lines.len(), 3, "{text}");
 }
 
-/// CANCEL while a single update's image is still downloading ends it at once, with nothing
+/// Cancel while a single update's image is still downloading ends it at once, with nothing
 /// flashed.
 #[test]
 fn cancel_ends_an_update_still_loading_its_image() {
     let (app, release) = stalled_app();
     let mut h = harness(app);
     let _free = Free(release);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "CONFIRM");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Update to v0.3.0");
+    press(&mut h, "Confirm");
     h.run_steps(5);
     assert!(h.state().busy());
-    press(&mut h, "CANCEL");
-    until(&mut h, "FAILED");
+    press(&mut h, "Cancel");
+    until(&mut h, "Failed");
     h.get_by_label_contains("cancelled before anything was flashed");
     assert!(!h.state().busy());
 }
@@ -1395,14 +1461,14 @@ fn a_batch_that_cannot_date_ours_cannot_arm() {
         SimBus::scenario("arrivals").unwrap(),
         vec![dir.clone()],
     ));
-    until(&mut h, "BATCH");
-    press(&mut h, "BATCH");
-    press(&mut h, "STOCK");
-    until(&mut h, "CANNOT ARM");
+    until(&mut h, "Batch");
+    press(&mut h, "Batch");
+    press_as(&mut h, Role::Button, "Stock");
+    until(&mut h, "Cannot arm");
     h.get_by_label_contains("The image carries no Verge version");
     h.get_by_label_contains("Tick \"of any build\"");
     press(&mut h, "of any build, not only those older than the image");
-    until(&mut h, "ARM BATCH");
+    until(&mut h, "Arm batch");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -1411,13 +1477,13 @@ fn a_batch_that_cannot_date_ours_cannot_arm() {
 #[test]
 fn a_batch_for_the_pro_does_not_arm_with_an_image_not_built_for_it() {
     let mut h = harness(sim_app(SimBus::scenario("arrivals").unwrap(), vec![]));
-    until(&mut h, "BATCH");
-    press(&mut h, "BATCH");
+    until(&mut h, "Batch");
+    press(&mut h, "Batch");
     press(&mut h, "MCU-Link Pro");
-    press(&mut h, "ARM BATCH");
+    press(&mut h, "Arm batch");
     h.get_by_label_contains("onto every MCU-Link Pro running");
-    press(&mut h, "CONFIRM");
-    until(&mut h, "NOT ARMED");
+    press(&mut h, "Confirm");
+    until(&mut h, "Not armed");
     h.get_by_label_contains(
         "The batch takes the MCU-Link Pro, and the image is built for the full MCU-Link only.",
     );
@@ -1429,9 +1495,9 @@ fn a_batch_for_the_pro_does_not_arm_with_an_image_not_built_for_it() {
 #[test]
 fn the_jumper_advice_names_the_board_and_the_image() {
     let mut h = harness(sim_app(SimBus::scenario("pro-old").unwrap(), vec![]));
-    until(&mut h, "NEEDS THE JUMPER");
+    until(&mut h, "Needs the jumper");
     h.get_by_label_contains(
-        "This unit is an MCU-Link Pro. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it with STOCK, or with a file built for an MCU-Link Pro.",
+        "This unit is an MCU-Link Pro. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it with Stock, or with a file built for an MCU-Link Pro.",
     );
     let dir = record_dir("jumper-files");
     let ours = SimFirmware::Ours {
@@ -1446,9 +1512,9 @@ fn the_jumper_advice_names_the_board_and_the_image() {
     )
     .unwrap();
     drop_file(&mut h, &plain);
-    until(&mut h, "NOT FOR THIS BOARD");
+    until(&mut h, "Not for this board");
     drop_file(&mut h, &pro);
-    until(&mut h, "NEEDS THE JUMPER");
+    until(&mut h, "Needs the jumper");
     h.get_by_label_contains(
         "This unit is an MCU-Link Pro. In ISP mode the tool cannot tell its board, so flash it then with pro.s19, which is built for it.",
     );
@@ -1460,7 +1526,7 @@ fn the_jumper_advice_names_the_board_and_the_image() {
 #[test]
 fn the_question_names_the_boards_a_file_is_built_for() {
     let mut h = harness(sim_app(SimBus::scenario("isp").unwrap(), vec![]));
-    until(&mut h, "INSTALL V0.3.0");
+    until(&mut h, "Install v0.3.0");
     let dir = record_dir("question-file");
     let pro = dir.join("pro.s19");
     std::fs::write(
@@ -1474,8 +1540,8 @@ fn the_question_names_the_boards_a_file_is_built_for() {
     )
     .unwrap();
     drop_file(&mut h, &pro);
-    until(&mut h, "FLASH PRO.S19");
-    press(&mut h, "FLASH PRO.S19");
+    until(&mut h, "Flash pro.s19");
+    press(&mut h, "Flash pro.s19");
     h.get_by_label_contains(
         "board in ISP mode. The image is built for the MCU-Link Pro only. Flash pro.s19",
     );
@@ -1536,7 +1602,7 @@ fn the_worker_refuses_an_undatable_batch_before_loading() {
 #[test]
 fn the_question_names_the_boards_of_the_file_it_flashes() {
     let mut h = harness(sim_app(SimBus::scenario("isp").unwrap(), vec![]));
-    until(&mut h, "INSTALL V0.3.0");
+    until(&mut h, "Install v0.3.0");
     let dir = record_dir("question-two-files");
     let pro = dir.join("pro.s19");
     let plain = dir.join("plain.s19");
@@ -1550,16 +1616,16 @@ fn the_question_names_the_boards_of_the_file_it_flashes() {
     .unwrap();
     std::fs::write(&plain, firmware_srecord(&ours)).unwrap();
     drop_file(&mut h, &pro);
-    until(&mut h, "FLASH PRO.S19");
-    press(&mut h, "FLASH PRO.S19");
+    until(&mut h, "Flash pro.s19");
+    press(&mut h, "Flash pro.s19");
     h.get_by_label_contains("The image is built for the MCU-Link Pro only. Flash pro.s19");
     drop_file(&mut h, &plain);
     h.run();
     let wrong = h
         .query_by_label_contains("The image is built for the full MCU-Link only. Flash pro.s19")
         .is_some();
-    let confirm = h.query_by_label("CONFIRM").is_some();
-    let offered = h.query_by_label("FLASH PLAIN.S19").is_some();
+    let confirm = h.query_by_label("Confirm").is_some();
+    let offered = h.query_by_label("Flash plain.s19").is_some();
     std::fs::remove_dir_all(&dir).unwrap();
     assert!(
         !wrong,
@@ -1573,7 +1639,7 @@ fn the_question_names_the_boards_of_the_file_it_flashes() {
 #[test]
 fn the_jumper_advice_does_not_vouch_for_a_release() {
     let mut h = harness(sim_app(SimBus::scenario("stock-old").unwrap(), vec![]));
-    until(&mut h, "NEEDS THE JUMPER");
+    until(&mut h, "Needs the jumper");
     h.get_by_label_contains(
         "This unit is a full MCU-Link. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it then with release v0.3.0 only if it is built for a full MCU-Link.",
     );
@@ -1633,32 +1699,32 @@ fn a_release_in_the_cache_is_not_asked_about_again() {
     let cache = Cache::at(record_dir("cache-kept"));
     let (app, http) = cached_app("bench", &cache);
     let mut h = harness(app);
-    until(&mut h, "UPDATE TO V0.3.0");
+    until(&mut h, "Update to v0.3.0");
     h.get_by_role_and_label(Role::ListBoxOption, "QK7RM2VTX8D41")
         .click();
     h.step();
     h.step();
-    press(&mut h, "INSTALL V0.3.0");
+    press(&mut h, "Install v0.3.0");
     h.get_by_label_contains(DOWNLOAD);
-    press(&mut h, "CONFIRM");
-    until(&mut h, "DONE");
-    press(&mut h, "BACK");
+    press(&mut h, "Confirm");
+    until(&mut h, "Done");
+    press(&mut h, "Back");
     assert_eq!(downloads(&http), 3);
 
     h.get_by_role_and_label(Role::ListBoxOption, "CJ3E7A91C2")
         .click();
     h.step();
     h.step();
-    press(&mut h, "UPDATE TO V0.3.0");
+    press(&mut h, "Update to v0.3.0");
     h.get_by_label_contains("Flash release v0.3.0 onto CJ3E7A91C2 at");
     assert!(h.query_by_label_contains("Download release").is_none());
-    press(&mut h, "CONFIRM");
-    until(&mut h, "DONE");
-    press(&mut h, "BACK");
+    press(&mut h, "Confirm");
+    until(&mut h, "Done");
+    press(&mut h, "Back");
     assert_eq!(downloads(&http), 3);
 
-    press(&mut h, "BATCH");
-    press(&mut h, "ARM BATCH");
+    press(&mut h, "Batch");
+    press(&mut h, "Arm batch");
     h.get_by_label_contains("Flash release v0.3.0 onto every full MCU-Link");
     assert!(h.query_by_label_contains("Download release").is_none());
     std::fs::remove_dir_all(cache.root()).unwrap();
@@ -1682,21 +1748,21 @@ fn a_cached_copy_that_fails_is_downloaded_again_only_when_asked() {
     std::fs::write(&image, bytes).unwrap();
 
     let mut h = harness(app);
-    until(&mut h, "INSTALL V0.3.0");
-    press(&mut h, "INSTALL V0.3.0");
+    until(&mut h, "Install v0.3.0");
+    press(&mut h, "Install v0.3.0");
     h.get_by_label_contains("Flash release v0.3.0 onto QK7RM2VTX8D41 at 1-1?");
-    press(&mut h, "CONFIRM");
-    until(&mut h, "FAILED");
+    press(&mut h, "Confirm");
+    until(&mut h, "Failed");
     h.get_by_label_contains("the copy of release v0.3.0 in the cache failed its check");
     h.get_by_label_contains("Try again: the question then asks to download the release.");
     assert_eq!(downloads(&http), 3);
-    press(&mut h, "BACK");
+    press(&mut h, "Back");
 
-    until(&mut h, "INSTALL V0.3.0");
-    press(&mut h, "INSTALL V0.3.0");
+    until(&mut h, "Install v0.3.0");
+    press(&mut h, "Install v0.3.0");
     h.get_by_label_contains(DOWNLOAD);
-    press(&mut h, "CONFIRM");
-    until(&mut h, "DONE");
+    press(&mut h, "Confirm");
+    until(&mut h, "Done");
     assert_eq!(downloads(&http), 6);
     std::fs::remove_dir_all(cache.root()).unwrap();
 }
@@ -1709,14 +1775,14 @@ fn a_release_gone_from_the_cache_since_the_question_is_not_downloaded() {
     let (app, http) = cached_app("stock", &cache);
     keep(&http, &cache);
     let mut h = harness(app);
-    until(&mut h, "INSTALL V0.3.0");
-    press(&mut h, "INSTALL V0.3.0");
+    until(&mut h, "Install v0.3.0");
+    press(&mut h, "Install v0.3.0");
     h.get_by_label_contains("Flash release v0.3.0 onto QK7RM2VTX8D41 at 1-1?");
     std::fs::remove_dir_all(cache.root()).unwrap();
     h.run_steps(2);
     h.get_by_label_contains("Flash release v0.3.0 onto QK7RM2VTX8D41 at 1-1?");
-    press(&mut h, "CONFIRM");
-    until(&mut h, "FAILED");
+    press(&mut h, "Confirm");
+    until(&mut h, "Failed");
     h.get_by_label_contains("release v0.3.0 would have to be downloaded, and that was not asked");
     assert_eq!(downloads(&http), 3);
 }
@@ -1736,17 +1802,17 @@ fn another_image_closes_the_arming_question() {
         SimBus::scenario("ours").unwrap(),
         vec![dir.clone()],
     ));
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "BATCH");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Batch");
     // Stock carries no version of ours to compare, so the batch takes ours of any build.
     press(&mut h, "of any build, not only those older than the image");
-    until(&mut h, "ARM BATCH");
-    press(&mut h, "ARM BATCH");
+    until(&mut h, "Arm batch");
+    press(&mut h, "Arm batch");
     h.get_by_label_contains(DOWNLOAD);
-    press(&mut h, "STOCK");
+    press_as(&mut h, Role::Button, "Stock");
     assert!(h.query_by_label_contains("Download release").is_none());
-    assert!(h.query_by_label("CONFIRM").is_none());
-    press(&mut h, "ARM BATCH");
+    assert!(h.query_by_label("Confirm").is_none());
+    press(&mut h, "Arm batch");
     h.get_by_label_contains("Flash stock V3.172 onto every full MCU-Link");
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -1842,20 +1908,20 @@ fn republished_app(name: &str) -> (VergeApp, Arc<std::sync::atomic::AtomicBool>,
 fn a_release_published_again_is_asked_about_after_try_again() {
     let (app, switched, cache) = republished_app("republished");
     let mut h = harness(app);
-    until(&mut h, "INSTALL V0.3.0");
+    until(&mut h, "Install v0.3.0");
     switched.store(true, std::sync::atomic::Ordering::SeqCst);
-    press(&mut h, "INSTALL V0.3.0");
+    press(&mut h, "Install v0.3.0");
     h.get_by_label_contains("Flash release v0.3.0 onto QK7RM2VTX8D41 at 1-1?");
-    press(&mut h, "CONFIRM");
-    until(&mut h, "FAILED");
+    press(&mut h, "Confirm");
+    until(&mut h, "Failed");
     h.get_by_label_contains("would have to be downloaded, and that was not asked");
     h.get_by_label_contains("Try again: the question then asks to download the release.");
-    press(&mut h, "BACK");
-    until(&mut h, "INSTALL V0.3.0");
-    press(&mut h, "INSTALL V0.3.0");
+    press(&mut h, "Back");
+    until(&mut h, "Install v0.3.0");
+    press(&mut h, "Install v0.3.0");
     h.get_by_label_contains(DOWNLOAD);
-    press(&mut h, "CONFIRM");
-    until(&mut h, "DONE");
+    press(&mut h, "Confirm");
+    until(&mut h, "Done");
     std::fs::remove_dir_all(cache.root()).unwrap();
 }
 
@@ -1865,18 +1931,18 @@ fn a_release_published_again_is_asked_about_after_try_again() {
 fn a_batch_of_a_release_published_again_is_asked_about_after_try_again() {
     let (app, switched, cache) = republished_app("republished-batch");
     let mut h = harness(app);
-    until(&mut h, "INSTALL V0.3.0");
+    until(&mut h, "Install v0.3.0");
     switched.store(true, std::sync::atomic::Ordering::SeqCst);
-    press(&mut h, "BATCH");
-    press(&mut h, "ARM BATCH");
+    press(&mut h, "Batch");
+    press(&mut h, "Arm batch");
     h.get_by_label_contains("Flash release v0.3.0 onto every full MCU-Link");
-    press(&mut h, "CONFIRM");
-    until(&mut h, "NOT ARMED");
+    press(&mut h, "Confirm");
+    until(&mut h, "Not armed");
     h.get_by_label_contains("would have to be downloaded, and that was not asked");
     h.get_by_label_contains("Try again: the question then asks to download the release.");
-    press(&mut h, "BACK");
-    until(&mut h, "ARM BATCH");
-    press(&mut h, "ARM BATCH");
+    press(&mut h, "Back");
+    until(&mut h, "Arm batch");
+    press(&mut h, "Arm batch");
     h.get_by_label_contains(DOWNLOAD);
     std::fs::remove_dir_all(cache.root()).unwrap();
 }
@@ -1889,17 +1955,17 @@ fn a_batch_release_gone_from_the_cache_since_its_question_is_not_downloaded() {
     let (app, http) = cached_app("arrivals", &cache);
     keep(&http, &cache);
     let mut h = harness(app);
-    until(&mut h, "BATCH");
-    press(&mut h, "BATCH");
-    until(&mut h, "ARM BATCH");
-    press(&mut h, "ARM BATCH");
+    until(&mut h, "Batch");
+    press(&mut h, "Batch");
+    until(&mut h, "Arm batch");
+    press(&mut h, "Arm batch");
     h.get_by_label_contains("Flash release v0.3.0 onto every full MCU-Link");
     std::fs::remove_dir_all(cache.root()).unwrap();
     h.run_steps(2);
     h.get_by_label_contains("Flash release v0.3.0 onto every full MCU-Link");
     assert!(h.query_by_label_contains("Download release").is_none());
-    press(&mut h, "CONFIRM");
-    until(&mut h, "NOT ARMED");
+    press(&mut h, "Confirm");
+    until(&mut h, "Not armed");
     h.get_by_label_contains("would have to be downloaded, and that was not asked");
     h.get_by_label_contains("Try again: the question then asks to download the release.");
     assert_eq!(downloads(&http), 3);
@@ -1916,8 +1982,8 @@ fn a_kept_copy_that_cannot_be_read_is_asked_about() {
     let image = cache.path(&repo(), "v0.3.0", &release.image.name);
     unreadable(&image);
     let mut h = harness(app);
-    until(&mut h, "INSTALL V0.3.0");
-    press(&mut h, "INSTALL V0.3.0");
+    until(&mut h, "Install v0.3.0");
+    press(&mut h, "Install v0.3.0");
     h.get_by_label_contains(DOWNLOAD);
     std::fs::remove_dir_all(cache.root()).unwrap();
 }
@@ -1967,10 +2033,10 @@ fn a_failed_copy_that_cannot_be_deleted_is_left_to_the_user() {
         return;
     }
     let mut h = harness(app);
-    until(&mut h, "INSTALL V0.3.0");
-    press(&mut h, "INSTALL V0.3.0");
-    press(&mut h, "CONFIRM");
-    until(&mut h, "FAILED");
+    until(&mut h, "Install v0.3.0");
+    press(&mut h, "Install v0.3.0");
+    press(&mut h, "Confirm");
+    until(&mut h, "Failed");
     chmod(&dir, 0o755);
     h.get_by_label_contains("failed its check, and could not be deleted");
     h.get_by_label_contains("Delete that copy, then try again.");
@@ -1987,29 +2053,29 @@ fn bench_supply_controls_use_aux_and_confirm_during_capture() {
         SimBus::scenario("ours-pro-energy").unwrap(),
         vec![],
     ));
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "BENCH");
-    until(&mut h, "RECORD RUNNING CAPTURE");
-    until(&mut h, "DIO0–2 OUTPUT");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until(&mut h, "Record running capture");
+    until(&mut h, "DIO0–2 output");
     // A capture started before the GUI connected still requires confirmation.
-    if h.query_by_label("TURN ON").is_some() {
-        press(&mut h, "TURN ON");
-        until(&mut h, "TURN OFF");
+    if h.query_by_label("Turn on").is_some() {
+        press(&mut h, "Turn on");
+        until(&mut h, "Turn off");
     }
-    press(&mut h, "TURN OFF");
+    press(&mut h, "Turn off");
     until(&mut h, "Turn off target supply?");
-    press(&mut h, "KEEP SUPPLY ON");
+    press(&mut h, "Keep supply on");
     for _ in 0..10 {
         h.step();
     }
     assert!(h.query_by_label("Turn off target supply?").is_none());
-    assert!(h.query_by_label("TURN OFF").is_some());
-    press(&mut h, "TURN OFF");
-    until(&mut h, "TURN OFF SUPPLY");
-    press(&mut h, "TURN OFF SUPPLY");
-    until(&mut h, "TURN ON");
-    press(&mut h, "TURN ON");
-    until(&mut h, "TURN OFF");
+    assert!(h.query_by_label("Turn off").is_some());
+    press(&mut h, "Turn off");
+    until(&mut h, "Turn off supply");
+    press(&mut h, "Turn off supply");
+    until(&mut h, "Turn on");
+    press(&mut h, "Turn on");
+    until(&mut h, "Turn off");
 }
 
 #[test]
@@ -2024,8 +2090,8 @@ fn bench_dio_explains_each_unavailable_state() {
         ("ours-plain", "not an MCU-Link Pro"),
     ] {
         let mut h = harness(sim_app(SimBus::scenario(scenario).unwrap(), vec![]));
-        until(&mut h, "UPDATE TO V0.3.0");
-        press(&mut h, "BENCH");
+        until(&mut h, "Update to v0.3.0");
+        press(&mut h, "Bench");
         for _ in 0..400 {
             h.step();
             if h.query_all_by_label_contains(reason).next().is_some() {
@@ -2037,7 +2103,7 @@ fn bench_dio_explains_each_unavailable_state() {
             h.query_all_by_label_contains(reason).next().is_some(),
             "{scenario}"
         );
-        assert!(h.query_by_label("DIO0–2 OUTPUT").is_none());
+        assert!(h.query_by_label("DIO0–2 output").is_none());
     }
 }
 
@@ -2045,47 +2111,47 @@ fn bench_dio_explains_each_unavailable_state() {
 fn bench_dio_asks_before_driving_and_keeps_inputs_on_cancel() {
     let bus = SimBus::scenario("ours-pro-held").unwrap();
     let mut h = harness(sim_app(bus.clone(), vec![]));
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "BENCH");
-    until(&mut h, "DIO0–2 OUTPUT");
-    h.get_by_label("HIGH");
-    press(&mut h, "DIO0–2 OUTPUT");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until(&mut h, "DIO0–2 output");
+    h.get_by_label("high");
+    press(&mut h, "DIO0–2 output");
     until(&mut h, "Drive DIO0–2?");
     assert!(!bus.log().iter().any(|s| s.contains("AUX 8e0707")));
-    press(&mut h, "KEEP AS INPUTS");
+    press(&mut h, "Keep as inputs");
     for _ in 0..10 {
         h.step();
     }
     assert!(h.query_by_label("Drive DIO0–2?").is_none());
     assert!(!bus.log().iter().any(|s| s.contains("AUX 8e0707")));
-    press(&mut h, "DIO0–2 OUTPUT");
-    until(&mut h, "DRIVE PINS");
-    press(&mut h, "DRIVE PINS");
+    press(&mut h, "DIO0–2 output");
+    until(&mut h, "Drive pins");
+    press(&mut h, "Drive pins");
     for _ in 0..400 {
         h.step();
-        if h.query_all_by_label("SET HIGH").count() == 3 {
+        if h.query_all_by_label("Set high").count() == 3 {
             break;
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(h.query_all_by_label("SET HIGH").count(), 3);
+    assert_eq!(h.query_all_by_label("Set high").count(), 3);
     assert!(bus.log().iter().any(|s| s.contains("AUX 8e0707")));
-    press(&mut h, "DIO0–2 INPUT");
+    press(&mut h, "DIO0–2 input");
     for _ in 0..20 {
         h.step();
         std::thread::sleep(Duration::from_millis(2));
     }
     assert!(h.query_by_label("Drive DIO0–2?").is_none());
-    assert_eq!(h.query_all_by_label("SET HIGH").count(), 0);
+    assert_eq!(h.query_all_by_label("Set high").count(), 0);
 }
 
 #[test]
 fn bench_refuses_older_firmware_and_reaches_a_debugger_held_pro() {
     let mut h = harness(sim_app(SimBus::scenario("ours").unwrap(), vec![]));
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "BENCH");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
     until_contains(&mut h, "which recording needs");
-    assert!(h.query_by_label("START RECORDING").is_none());
+    assert!(h.query_by_label("Start recording").is_none());
     let mut h = harness(sim_app(
         SimBus::scenario("ours-pro-debugger").unwrap(),
         vec![],
@@ -2094,8 +2160,8 @@ fn bench_refuses_older_firmware_and_reaches_a_debugger_held_pro() {
         h.step();
         std::thread::sleep(Duration::from_millis(2));
     }
-    press(&mut h, "BENCH");
-    until(&mut h, "START RECORDING");
+    press(&mut h, "Bench");
+    until(&mut h, "Start recording");
 }
 
 #[test]
@@ -2108,8 +2174,8 @@ fn a_worker_failure_during_recording_unlocks_the_window() {
         .instance
         .clone();
     let mut h = harness(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "BENCH");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
     backend
         .lock()
         .unwrap()
@@ -2133,7 +2199,7 @@ fn a_worker_failure_during_recording_unlocks_the_window() {
         }));
     h.step();
     assert!(!h.state().busy());
-    press(&mut h, "UNITS");
+    press(&mut h, "Units");
     h.step();
 }
 
@@ -2146,8 +2212,8 @@ fn a_session_the_worker_dropped_can_be_reconnected() {
         .instance
         .clone();
     let mut h = harness(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "BENCH");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
     h.step();
     let connects = |backend: &std::sync::Arc<std::sync::Mutex<Manual>>| {
         backend
@@ -2169,8 +2235,8 @@ fn a_session_the_worker_dropped_can_be_reconnected() {
             error: Some("disk full".into()),
             ..Status::default()
         }));
-    until(&mut h, "RECONNECT");
-    press(&mut h, "RECONNECT");
+    until(&mut h, "Reconnect");
+    press(&mut h, "Reconnect");
     h.step();
     assert_eq!(connects(&backend), 2);
 }
@@ -2184,8 +2250,8 @@ fn a_recording_failure_keeps_a_pending_close_open() {
         .instance
         .clone();
     let mut h = harness(app);
-    until(&mut h, "UPDATE TO V0.3.0");
-    press(&mut h, "BENCH");
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
     backend
         .lock()
         .unwrap()
@@ -2213,4 +2279,45 @@ fn a_recording_failure_keeps_a_pending_close_open() {
     assert!(!root_commands(&h).contains(&ViewportCommand::Close));
     assert!(!h.state().busy());
     h.get_by_label("disk full");
+}
+
+#[test]
+fn the_icon_decodes() {
+    let icon = crate::icon();
+    assert_eq!((icon.width, icon.height), (512, 512));
+    assert_eq!(icon.rgba.len(), 512 * 512 * 4);
+}
+
+/// Focus is a ring of ink just outside the widget, drawn over everything on its layer, so it shows
+/// on a chosen button's ink fill as well as on an outline.
+#[test]
+fn the_focused_widget_has_an_ink_ring_outside_it() {
+    let mut h = harness(sim_app(SimBus::scenario("bench").unwrap(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    let ink = crate::tokens::NIGHT.ink;
+    let rings = |h: &Harness<'_, VergeApp>, around: egui::Rect| {
+        h.output()
+            .shapes
+            .iter()
+            .filter(|clipped| {
+                matches!(&clipped.shape, egui::Shape::Rect(rect)
+                    if rect.stroke.width == crate::tokens::FOCUS_WIDTH
+                        && rect.stroke.color == ink
+                        && rect.rect.contains_rect(around)
+                        && rect.rect != around)
+            })
+            .count()
+    };
+    for label in ["Release", "Rescan"] {
+        let around = h.get_by_label(label).rect();
+        assert_eq!(
+            rings(&h, around),
+            0,
+            "{label} has a ring before it has focus"
+        );
+        h.get_by_label(label).focus();
+        h.step();
+        h.step();
+        assert_eq!(rings(&h, around), 1, "{label} has no ring with focus");
+    }
 }

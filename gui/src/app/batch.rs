@@ -13,10 +13,11 @@ use verge_probe::source::{ImageVersion, Source};
 use verge_probe::version::StockVersion;
 
 use super::{
-    Choice, Current, Picked, VergeApp, edged, field, frame, kib, label, outline, slot, wrapping,
+    Choice, Current, Fill, Picked, VergeApp, edged, field, frame, kib, label, outline, progress,
+    sentence_case, slot, wrapping,
 };
 use crate::glyph::{self, Glyph};
-use crate::style::{Role, color, space, text};
+use crate::style::{self, Face, Role, Status, space, text};
 use crate::worker::{BatchEvent, BatchState, ProgressEvent, Request, arm_error};
 
 fn record_path(dir: &FsPath) -> String {
@@ -181,13 +182,24 @@ impl BatchRun {
     }
 }
 
-/// A result's glyph and colour, the same family as the unit view's.
-fn mark(result: Settled) -> (Glyph, Color32) {
+/// A result's glyph, its chip and the colour of its words, the same family as the unit view's.
+/// An update that finished is Verge's identity, so a lume chip, with the words in ink.
+fn mark(result: Settled, face: &Face) -> (Glyph, Fill, Color32) {
+    let bare = |color| Fill {
+        ground: Color32::TRANSPARENT,
+        on: color,
+    };
     match result {
-        Settled::Updated => (glyph::DONE, color::OURS),
-        Settled::JumperFitted | Settled::NotRestarted => (glyph::ATTENTION, color::ATTENTION),
-        Settled::Failed => (glyph::FAILED, color::FAULT),
-        Settled::Current | Settled::Skipped | Settled::Waiting => (glyph::STOCK, color::TEXT_2),
+        Settled::Updated => (glyph::DONE, Fill::lume(face), face.ink),
+        Settled::JumperFitted | Settled::NotRestarted => (
+            glyph::ATTENTION,
+            bare(face.attention_ink),
+            face.attention_ink,
+        ),
+        Settled::Failed => (glyph::FAILED, bare(face.fault_ink), face.fault_ink),
+        Settled::Current | Settled::Skipped | Settled::Waiting => {
+            (glyph::STOCK, bare(face.ink_2), face.ink_2)
+        }
     }
 }
 
@@ -248,19 +260,20 @@ impl VergeApp {
     }
 
     fn batch_setup(&mut self, ui: &mut Ui, now: f64) {
+        let face = style::face(ui.ctx());
         if let Some(error) = &self.worker_error {
-            edged(ui, color::FAULT, &format!("{error}. Restart the tool."));
+            edged(ui, Status::Fault, &format!("{error}. Restart the tool."));
             return;
         }
-        frame(ui, None, Stroke::new(1.0, color::BORDER), |ui| {
+        frame(ui, None, Stroke::new(1.0, face.rule), |ui| {
             ui.horizontal(|ui| {
-                glyph::WAITING.show(ui, 48.0, color::TEXT);
+                glyph::WAITING.show(ui, 48.0, face.ink);
                 ui.add_space(space::M);
-                ui.label(text(Role::Display, "BATCH").color(color::TEXT));
+                ui.label(text(Role::Display, "Batch").color(face.ink));
             });
             wrapping(
                 ui,
-                text(Role::Instruction, "ONE IMAGE FOR EVERY UNIT PLUGGED IN").color(color::TEXT),
+                text(Role::Instruction, "One image for every unit plugged in").color(face.ink),
             );
             wrapping(
                 ui,
@@ -268,19 +281,16 @@ impl VergeApp {
                     Role::Body,
                     "Choose the image and the units it takes, and arm it once. Then plug units in, one after another or several on a hub. Each goes through its bootloader on its own, one at a time, and blinks when it is done.",
                 )
-                .color(color::TEXT_2),
+                .color(face.ink_2),
             );
         });
         ui.add_space(space::M);
         self.image_choice(ui, None);
         ui.add_space(space::S);
         let form = &mut self.batch_form;
-        field(ui, "takes", |ui| {
+        field(ui, "Takes", |ui| {
             ui.horizontal(|ui| {
-                ui.checkbox(
-                    &mut form.stock,
-                    text(Role::Body, "Stock").color(color::TEXT),
-                );
+                ui.checkbox(&mut form.stock, text(Role::Body, "Stock").color(face.ink));
                 ui.add_enabled_ui(form.stock, |ui| {
                     label(ui, "only below");
                     ui.add(
@@ -291,7 +301,7 @@ impl VergeApp {
                 });
             });
             ui.horizontal(|ui| {
-                ui.checkbox(&mut form.ours, text(Role::Body, "Verge").color(color::TEXT));
+                ui.checkbox(&mut form.ours, text(Role::Body, "Verge").color(face.ink));
                 ui.add_enabled_ui(form.ours, |ui| {
                     ui.checkbox(
                         &mut form.ours_any,
@@ -299,7 +309,7 @@ impl VergeApp {
                             Role::Body,
                             "of any build, not only those older than the image",
                         )
-                        .color(color::TEXT),
+                        .color(face.ink),
                     );
                 });
             });
@@ -309,7 +319,7 @@ impl VergeApp {
                     Role::Body,
                     "Units that arrive in ISP mode, as after fitting the jumper",
                 )
-                .color(color::TEXT),
+                .color(face.ink),
             );
             ui.checkbox(
                 &mut form.attached,
@@ -317,42 +327,43 @@ impl VergeApp {
                     Role::Body,
                     "Units attached now, not only those plugged in from here on",
                 )
-                .color(color::TEXT),
+                .color(face.ink),
             );
         });
-        field(ui, "board", |ui| {
+        field(ui, "Board", |ui| {
             ui.horizontal(|ui| {
                 for board in Board::ALL {
                     ui.radio_value(
                         &mut form.board,
                         board,
-                        text(Role::Body, board.to_string()).color(color::TEXT),
+                        text(Role::Body, board.to_string()).color(face.ink),
                     );
                 }
             });
         });
-        field(ui, "stop", |ui| {
+        field(ui, "Stop", |ui| {
             ui.horizontal(|ui| {
                 ui.checkbox(
                     &mut form.stop_after,
-                    text(Role::Body, "after").color(color::TEXT),
+                    text(Role::Body, "after").color(face.ink),
                 );
                 ui.add_enabled(
                     form.stop_after,
                     egui::TextEdit::singleline(&mut form.count).desired_width(48.0),
                 );
-                ui.label(text(Role::Body, "units are updated").color(color::TEXT));
+                ui.label(text(Role::Body, "units are updated").color(face.ink));
             });
         });
-        field(ui, "record", |ui| {
+        field(ui, "Record", |ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut form.record)
+                    .font(Role::Code.style())
                     .desired_width(ui.available_width().min(640.0)),
             );
             wrapping(
                 ui,
                 text(Role::Body, "One JSON line per unit: when, its port and serial, the firmware before and after, and the result.")
-                    .color(color::TEXT_2),
+                    .color(face.ink_2),
             );
         });
         ui.add_space(space::L);
@@ -366,12 +377,10 @@ impl VergeApp {
             Err(reason) => {
                 ui.add_enabled(
                     false,
-                    egui::Button::new(text(Role::Action, "CANNOT ARM").color(color::TEXT_2))
-                        .fill(Color32::TRANSPARENT)
-                        .stroke(Stroke::new(1.0, color::BORDER))
+                    egui::Button::new(text(Role::Action, "Cannot arm").color(face.ink_2))
                         .min_size(vec2(320.0, crate::style::SLOT_HEIGHT)),
                 );
-                wrapping(ui, text(Role::Body, reason).color(color::TEXT_2));
+                wrapping(ui, text(Role::Body, reason).color(face.ink_2));
                 return;
             }
         };
@@ -397,10 +406,10 @@ impl VergeApp {
             if filter.bootloaders {
                 question = format!("{ISP_IDENTITY_WARNING} {question}");
             }
-            edged(ui, color::ATTENTION, &question);
+            edged(ui, Status::Attention, &question);
             ui.add_space(space::S);
             ui.horizontal(|ui| {
-                if slot(ui, "Confirm", Some(color::OURS)).clicked() {
+                if slot(ui, "Confirm", Some(Fill::lume(face))).clicked() {
                     let record = PathBuf::from(self.batch_form.record.trim());
                     let stop = Cancel::new();
                     let cancel = Cancel::new();
@@ -433,7 +442,7 @@ impl VergeApp {
             });
             return;
         }
-        if slot(ui, "Arm batch", Some(color::OURS)).clicked() {
+        if slot(ui, "Arm batch", Some(Fill::lume(face))).clicked() {
             self.batch_form.confirming = Some(Arming {
                 download: self.download(&source),
                 source,
@@ -445,37 +454,28 @@ impl VergeApp {
         let Some(run) = self.batch() else {
             return;
         };
+        let face = style::face(ui.ctx());
+        let fault = Some(Fill::status(Status::Fault, face));
         let (word, instruction, glyph, fill) = match &run.ended {
-            Some(Ok(_)) => ("BATCH", "ENDED", glyph::DONE, Some(color::OURS)),
-            Some(Err(_)) if run.name.is_none() => {
-                ("BATCH", "NOT ARMED", glyph::FAILED, Some(color::FAULT))
-            }
-            Some(Err(_)) => (
-                "BATCH",
-                "STOPPED BY A FAULT",
-                glyph::FAILED,
-                Some(color::FAULT),
-            ),
-            None if run.state.paused.is_some() => ("BATCH", "PAUSED", glyph::ATTENTION, None),
+            Some(Ok(_)) => ("Batch", "Ended", glyph::DONE, Some(Fill::lume(face))),
+            Some(Err(_)) if run.name.is_none() => ("Batch", "Not armed", glyph::FAILED, fault),
+            Some(Err(_)) => ("Batch", "Stopped by a fault", glyph::FAILED, fault),
+            None if run.state.paused.is_some() => ("Batch", "Paused", glyph::ATTENTION, None),
             None if run.stop.is_cancelled() => (
-                "BATCH",
-                "STOPPING: THE UNIT UNDER WAY FINISHES FIRST",
+                "Batch",
+                "Stopping: the unit under way finishes first",
                 glyph::WORKING,
                 None,
             ),
-            None => ("BATCH", "PLUG UNITS IN", glyph::WORKING, None),
+            None => ("Batch", "Plug units in", glyph::WORKING, None),
         };
-        let ink = if fill.is_some() {
-            color::INK
-        } else {
-            color::TEXT
-        };
+        let ink = fill.map_or(face.ink, |fill| fill.on);
         let stroke = if fill.is_some() {
             Stroke::NONE
         } else {
-            Stroke::new(2.0, color::TEXT)
+            Stroke::new(2.0, face.ink)
         };
-        frame(ui, fill, stroke, |ui| {
+        frame(ui, fill.map(|fill| fill.ground), stroke, |ui| {
             ui.horizontal(|ui| {
                 glyph.show(ui, 48.0, ink);
                 ui.add_space(space::M);
@@ -489,10 +489,10 @@ impl VergeApp {
             ];
             facts.push(run.filter.clone());
             facts.push(format!("{:.0} s", now - run.started));
-            wrapping(ui, text(Role::Data, facts.join(" · ")).color(ink));
+            wrapping(ui, text(Role::Code, facts.join(" · ")).color(ink));
             wrapping(
                 ui,
-                text(Role::Data, format!("recording to {}", run.record.display())).color(ink),
+                text(Role::Code, format!("recording to {}", run.record.display())).color(ink),
             );
         });
         ui.add_space(space::M);
@@ -510,12 +510,21 @@ impl VergeApp {
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.set_min_width(112.0);
-                        let tint = match (name, count) {
-                            ("failed", n) if n > 0 => color::FAULT,
-                            ("updated", n) if n > 0 => color::OURS,
-                            _ => color::TEXT,
+                        let words = text(Role::Tally, count.to_string());
+                        let response = match (name, count) {
+                            ("failed", n) if n > 0 => ui.label(words.color(face.fault_ink)),
+                            // Verge's identity is a fill, never text: the count sits on lume.
+                            ("updated", n) if n > 0 => {
+                                let fill = Fill::lume(face);
+                                egui::Frame::new()
+                                    .fill(fill.ground)
+                                    .corner_radius(egui::CornerRadius::same(style::RADIUS))
+                                    .inner_margin(Margin::symmetric(space::XS as i8, 0))
+                                    .show(ui, |ui| ui.label(words.color(fill.on)))
+                                    .inner
+                            }
+                            _ => ui.label(words.color(face.ink)),
                         };
-                        let response = ui.label(text(Role::Tally, count.to_string()).color(tint));
                         response.widget_info(|| {
                             egui::WidgetInfo::labeled(
                                 egui::Role::Label,
@@ -523,20 +532,20 @@ impl VergeApp {
                                 format!("{count} {name}"),
                             )
                         });
-                        label(ui, name);
+                        label(ui, &sentence_case(name));
                     },
                 );
             }
         });
         if let Some(reason) = &run.state.paused {
-            edged(ui, color::ATTENTION, reason);
+            edged(ui, Status::Attention, reason);
         }
         if let Some(Err(error)) = &run.ended {
-            edged(ui, color::FAULT, error);
+            edged(ui, Status::Fault, error);
         }
         if let Some((port, current)) = &run.current {
             ui.add_space(space::S);
-            field(ui, "now", |ui| {
+            field(ui, "Now", |ui| {
                 let mut words = format!("updating {port}");
                 if let Some(current) = current {
                     words.push_str(&format!(" · {}", current.step));
@@ -548,25 +557,17 @@ impl VergeApp {
                         ));
                     }
                 }
-                ui.label(text(Role::Data, words).color(color::TEXT));
+                ui.label(text(Role::Code, words).color(face.ink));
                 if let Some(current) = current
                     && current.step.unit() == StepUnit::Bytes
                     && current.total > 0
                 {
-                    let fraction = current.done as f32 / current.total as f32;
-                    let (rect, _) = ui.allocate_exact_size(
-                        vec2(ui.available_width().min(640.0), 8.0),
-                        egui::Sense::hover(),
-                    );
-                    ui.painter().rect_filled(rect, 0.0, color::BORDER);
-                    let mut done = rect;
-                    done.set_width(rect.width() * fraction.clamp(0.0, 1.0));
-                    ui.painter().rect_filled(done, 0.0, color::TEXT);
+                    progress(ui, current.done as f32 / current.total as f32, 640.0);
                 }
             });
         }
         if !run.state.waiting.is_empty() {
-            field(ui, "waiting", |ui| {
+            field(ui, "Waiting", |ui| {
                 let names: Vec<String> = run
                     .state
                     .waiting
@@ -576,41 +577,41 @@ impl VergeApp {
                         None => port.clone(),
                     })
                     .collect();
-                wrapping(ui, text(Role::Data, names.join(", ")).color(color::TEXT));
+                wrapping(ui, text(Role::Code, names.join(", ")).color(face.ink));
             });
         }
         ui.add_space(space::M);
         if run.records.is_empty() {
-            label(ui, "no unit yet");
+            label(ui, "No unit yet");
         }
         for record in run.records.iter().rev() {
             egui::Frame::new()
-                .fill(color::SURFACE)
+                .fill(face.surface)
                 .inner_margin(Margin::same(space::S as i8))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        let (glyph, tint) = mark(record.result);
-                        glyph.show(ui, 20.0, tint);
-                        ui.label(text(Role::Data, &record.port).color(color::TEXT));
+                        let (glyph, chip, tint) = mark(record.result, face);
+                        glyph.chip(ui, 20.0, chip.ground, chip.on);
+                        ui.label(text(Role::Code, &record.port).color(face.ink));
                         let serial = match (&record.serial_before, &record.serial_after) {
                             (Some(a), Some(b)) if a != b => format!("{a} -> {b}"),
                             (Some(a), _) => a.clone(),
                             (None, Some(b)) => b.clone(),
                             (None, None) => "-".into(),
                         };
-                        ui.label(text(Role::Data, serial).color(color::TEXT));
+                        ui.label(text(Role::Code, serial).color(face.ink));
                         let firmware = match &record.firmware_after {
                             Some(after) => format!("{} -> {after}", record.firmware_before),
                             None => record.firmware_before.clone(),
                         };
-                        ui.label(text(Role::Data, firmware).color(color::TEXT_2));
+                        ui.label(text(Role::Code, firmware).color(face.ink_2));
                         ui.label(
-                            text(Role::Label, record.result.as_str().to_uppercase()).color(tint),
+                            text(Role::Label, sentence_case(record.result.as_str())).color(tint),
                         );
                     });
                     if let Some(reason) = &record.reason {
-                        wrapping(ui, text(Role::Body, reason).color(color::TEXT_2));
+                        wrapping(ui, text(Role::Body, reason).color(face.ink_2));
                     }
                 });
         }

@@ -1,9 +1,9 @@
 //! Pro bench view. Acquisition and archive queries continue independently of frames.
 
 mod query;
-use crate::app::{choice, edged, label, outline, sentence};
+use crate::app::{choice, edged, label, outline, sentence, sentence_case};
 use crate::bench_worker::{Command, DioChange, Status};
-use crate::style::{self, Role, color, space, text};
+use crate::style::{self, Role, space, text};
 use crate::worker::{Backend, Request};
 use egui::{Color32, CornerRadius, Frame, Margin, ScrollArea, Stroke, Ui, Vec2, vec2};
 use egui_plot::{
@@ -382,11 +382,12 @@ impl Bench {
         selected: &mut Option<String>,
         backend: &mut dyn Backend,
     ) {
+        let face = style::face(ui.ctx());
         egui::Panel::left("bench")
             .exact_size(SIDE)
             .frame(
                 Frame::new()
-                    .fill(color::SUNKEN)
+                    .fill(face.surface)
                     .inner_margin(Margin::same(space::M as i8)),
             )
             .show(ui, |ui| {
@@ -395,7 +396,7 @@ impl Bench {
         egui::CentralPanel::default()
             .frame(
                 Frame::new()
-                    .fill(color::BACKGROUND)
+                    .fill(face.page)
                     .inner_margin(Margin::same(space::L as i8)),
             )
             .show(ui, |ui| {
@@ -412,14 +413,15 @@ impl Bench {
         selected: &mut Option<String>,
         backend: &mut dyn Backend,
     ) {
-        let name = label(ui, "unit");
+        let face = style::face(ui.ctx());
+        let name = label(ui, "Unit");
         let chosen = units
             .iter()
             .find(|u| Some(&u.device.instance) == selected.as_ref());
         egui::ComboBox::from_id_salt("bench-unit")
             .width(ui.available_width())
             .selected_text(text(
-                Role::Data,
+                Role::Code,
                 chosen.and_then(Unit::serial).unwrap_or("Select a unit"),
             ))
             .show_ui(ui, |ui| {
@@ -428,7 +430,7 @@ impl Bench {
                         ui.selectable_value(
                             selected,
                             Some(unit.device.instance.clone()),
-                            text(Role::Data, unit.serial().unwrap_or("No serial")),
+                            text(Role::Code, unit.serial().unwrap_or("No serial")),
                         );
                     });
                 }
@@ -441,7 +443,7 @@ impl Bench {
                 Err(error) => {
                     self.disconnect(backend);
                     ui.add_space(space::S);
-                    edged(ui, color::ATTENTION, &sentence(&error.to_string()));
+                    edged(ui, style::Status::Attention, &sentence(&error.to_string()));
                 }
             },
             None => self.disconnect(backend),
@@ -462,13 +464,13 @@ impl Bench {
             }
             (None, Some(_)) if self.connection.is_some() => {
                 ui.add_space(space::S);
-                ui.label(text(Role::Body, "Connecting…").color(color::TEXT_2));
+                ui.label(text(Role::Body, "Connecting…").color(face.ink_2));
             }
             _ => {}
         }
         if let Some(notice) = self.notice.clone() {
             ui.add_space(space::S);
-            edged(ui, color::ATTENTION, &notice);
+            edged(ui, style::Status::Attention, &notice);
         }
         self.dio(ui, chosen, backend);
         self.markers(ui);
@@ -477,8 +479,9 @@ impl Bench {
     }
 
     fn dio(&mut self, ui: &mut Ui, chosen: Option<&Unit>, backend: &mut dyn Backend) {
+        let face = style::face(ui.ctx());
         ui.add_space(space::L);
-        label(ui, "dio");
+        label(ui, "DIO");
         let state = self
             .status
             .as_ref()
@@ -503,17 +506,13 @@ impl Bench {
         for group in &state.groups {
             let name = if *group == 7 { "DIO0–2" } else { "DIO3" };
             ui.horizontal(|ui| {
-                ui.label(text(Role::Data, name));
+                ui.label(text(Role::Code, name));
                 for output in [false, true] {
                     let selected = (state.outputs & group != 0) == output;
                     let words = format!("{name} {}", if output { "output" } else { "input" });
                     let response = choice(ui, if output { "Output" } else { "Input" }, selected);
                     response.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::Role::Button,
-                            ui.is_enabled(),
-                            words.to_uppercase(),
-                        )
+                        egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), &words)
                     });
                     if response.clicked() && !selected {
                         backend.send(Request::Bench(Command::Dio {
@@ -538,26 +537,24 @@ impl Bench {
                         continue;
                     }
                     let output = state.outputs & bit != 0;
-                    ui.label(text(Role::Data, format!("DIO{pin}")));
-                    ui.label(
-                        text(Role::Data, if output { "OUT" } else { "IN" }).color(color::TEXT_2),
-                    );
+                    ui.label(text(Role::Code, format!("DIO{pin}")));
+                    ui.label(text(Role::Code, if output { "out" } else { "in" }).color(face.ink_2));
                     let high = state.read & bit != 0;
                     ui.label(
-                        text(Role::Data, if high { "HIGH" } else { "LOW" }).color(if high {
-                            color::ACCENT
+                        text(Role::Figures, if high { "high" } else { "low" }).color(if high {
+                            face.ink
                         } else {
-                            color::TEXT_2
+                            face.ink_2
                         }),
                     );
                     if output
                         && ui
                             .small_button(text(
-                                Role::Data,
+                                Role::Label,
                                 if state.levels & bit == 0 {
-                                    "SET HIGH"
+                                    "Set high"
                                 } else {
-                                    "SET LOW"
+                                    "Set low"
                                 },
                             ))
                             .clicked()
@@ -579,7 +576,7 @@ impl Bench {
                 Role::Body,
                 "Inputs have pull-downs. Outputs read their drive.",
             )
-            .color(color::TEXT_2),
+            .color(face.ink_2),
         );
     }
 
@@ -591,9 +588,10 @@ impl Bench {
         if page.total == 0 && page.loss_events == 0 {
             return;
         }
+        let face = style::face(ui.ctx());
         ui.add_space(space::L);
-        label(ui, "markers");
-        ui.label(text(Role::Data, format!("{} received", page.total)));
+        label(ui, "Markers");
+        ui.label(text(Role::Figures, format!("{} received", page.total)).color(face.ink));
         if page.loss_events > 0 {
             ui.label(
                 text(
@@ -608,7 +606,7 @@ impl Bench {
                         }
                     ),
                 )
-                .color(color::ATTENTION),
+                .color(face.attention_ink),
             );
         }
         ScrollArea::vertical()
@@ -627,7 +625,7 @@ impl Bench {
                         verge_probe::record::marker_label(&entry.marker.label)
                     );
                     let response = ui.add(
-                        egui::Button::new(text(Role::Data, words))
+                        egui::Button::new(text(Role::Code, words))
                             .selected(self.marker_selected == Some(cursor))
                             .wrap(),
                     );
@@ -646,7 +644,7 @@ impl Bench {
                     if entry.lost_before {
                         ui.label(
                             text(Role::Body, "Markers lost before this one")
-                                .color(color::ATTENTION),
+                                .color(face.attention_ink),
                         );
                     }
                 }
@@ -679,8 +677,9 @@ impl Bench {
     }
 
     fn supply(&mut self, ui: &mut Ui, status: &Status, backend: &mut dyn Backend) {
+        let face = style::face(ui.ctx());
         ui.add_space(space::L);
-        label(ui, "target supply");
+        label(ui, "Target supply");
         ui.horizontal(|ui| {
             if outline(ui, if status.supply { "Turn off" } else { "Turn on" }, true).clicked() {
                 backend.send(Request::Bench(Command::Supply {
@@ -689,40 +688,33 @@ impl Bench {
                 }));
             }
             ui.label(
-                text(Role::Data, if status.supply { "ON" } else { "OFF" }).color(
-                    if status.supply {
-                        color::TEXT
-                    } else {
-                        color::TEXT_2
-                    },
-                ),
+                text(Role::Figures, if status.supply { "on" } else { "off" })
+                    .color(if status.supply { face.ink } else { face.ink_2 }),
             );
         });
         ui.label(
-            text(
-                Role::Data,
-                status.millivolts.map_or_else(
-                    || "no reading without a capture".into(),
-                    |mv| format!("measured {}", si(f64::from(mv) * 1e-3, "V")),
+            match status.millivolts {
+                None => text(Role::Body, "No reading without a capture"),
+                Some(mv) => text(
+                    Role::Figures,
+                    format!("measured {}", si(f64::from(mv) * 1e-3, "V")),
                 ),
-            )
-            .color(color::TEXT_2),
+            }
+            .color(face.ink_2),
         );
     }
 
     fn acquisition(&mut self, ui: &mut Ui, status: &Status, backend: &mut dyn Backend) {
+        let face = style::face(ui.ctx());
         ui.add_space(space::L);
-        label(ui, "acquisition");
+        label(ui, "Acquisition");
         if status.recording {
             ui.label(
-                text(
-                    Role::Data,
-                    status.rate.map_or_else(
-                        || "waiting for the stream".into(),
-                        |rate| format!("{rate} pairs/s · recording"),
-                    ),
-                )
-                .color(color::TEXT),
+                match status.rate {
+                    None => text(Role::Body, "Waiting for the stream"),
+                    Some(rate) => text(Role::Figures, format!("{rate} pairs/s · recording")),
+                }
+                .color(face.ink),
             );
             if outline(ui, "Stop recording", true).clicked() {
                 backend.send(Request::Bench(Command::Stop));
@@ -767,7 +759,7 @@ impl Bench {
                             }
                         },
                     )
-                    .color(color::TEXT_2),
+                    .color(face.ink_2),
                 )
                 .wrap(),
             );
@@ -791,7 +783,7 @@ impl Bench {
                         Role::Body,
                         "A capture is running: recording it keeps its rate.",
                     )
-                    .color(color::TEXT_2),
+                    .color(face.ink_2),
                 )
                 .wrap(),
             );
@@ -803,8 +795,9 @@ impl Bench {
         let Some(answer) = self.answer.clone() else {
             return;
         };
+        let face = style::face(ui.ctx());
         ui.add_space(space::L);
-        label(ui, "measurements");
+        label(ui, "Measurements");
         if let Some(mut selection) = self.selection {
             ui.horizontal(|ui| {
                 let mut start = seconds(selection.start_ns);
@@ -815,7 +808,7 @@ impl Bench {
                         .max_decimals(6)
                         .suffix(" s"),
                 );
-                ui.label(text(Role::Data, "to").color(color::TEXT_2));
+                ui.label(text(Role::Body, "to").color(face.ink_2));
                 let to = ui.add(
                     egui::DragValue::new(&mut end)
                         .speed(0.001)
@@ -848,38 +841,40 @@ impl Bench {
         });
         egui::Grid::new("bench-measurements")
             .num_columns(3)
-            .spacing(vec2(space::S, space::XS))
+            .spacing(vec2(space::M, space::XS))
             .min_col_width(60.0)
             .show(ui, |ui| {
                 ui.label("");
-                label(ui, "window");
+                label(ui, "Window");
                 if selection.is_some() {
-                    label(ui, "selection");
+                    label(ui, "Selection");
                 }
                 ui.end_row();
                 let columns: Vec<Option<&(Interval, Statistics)>> = std::iter::once(Some(&window))
                     .chain(selection.as_ref().map(Option::as_ref))
                     .collect();
                 for (name, value) in READINGS {
-                    label(ui, name);
+                    label(ui, &sentence_case(name));
                     for column in &columns {
                         let words = column.map_or_else(
                             || "…".to_owned(),
                             |(interval, statistics)| value(*interval, statistics),
                         );
-                        ui.label(text(Role::Data, words).color(color::TEXT));
+                        ui.label(text(Role::Figures, words).color(face.ink));
                     }
                     ui.end_row();
                 }
-                label(ui, "unmeasured");
+                label(ui, "Unmeasured");
                 for column in &columns {
                     let missing = column.map(|(interval, statistics)| {
                         unmeasured_ns(*interval, answer.view.extent, statistics)
                     });
                     ui.label(match missing {
-                        Some(0) => text(Role::Data, "none").color(color::TEXT_2),
-                        Some(ns) => text(Role::Data, si(seconds(ns), "s")).color(color::ATTENTION),
-                        None => text(Role::Data, "…").color(color::TEXT),
+                        Some(0) => text(Role::Figures, "none").color(face.ink_2),
+                        Some(ns) => {
+                            text(Role::Figures, si(seconds(ns), "s")).color(face.attention_ink)
+                        }
+                        None => text(Role::Figures, "…").color(face.ink),
                     });
                 }
                 ui.end_row();
@@ -888,16 +883,17 @@ impl Bench {
 
     /// The open capture's name and what can be done with it, under the graph.
     fn files(&mut self, ui: &mut Ui) {
+        let face = style::face(ui.ctx());
         let idle = self.io.is_none();
         let open = self.path.is_some();
         ui.horizontal_wrapped(|ui| {
             if let Some(path) = &self.path {
                 ui.label(
                     text(
-                        Role::Data,
+                        Role::Code,
                         path.file_name().unwrap_or_default().to_string_lossy(),
                     )
-                    .color(color::TEXT_2),
+                    .color(face.ink_2),
                 )
                 .on_hover_text(path.display().to_string());
                 ui.add_space(space::S);
@@ -912,9 +908,9 @@ impl Bench {
             label(
                 ui,
                 if self.selection.is_some() {
-                    "export selection"
+                    "Export selection"
                 } else {
-                    "export"
+                    "Export"
                 },
             )
             .on_hover_text("Exports keep whole samples at the selection's edges.");
@@ -937,18 +933,18 @@ impl Bench {
             return;
         }
         ui.add_space(space::L);
-        let name = label(ui, "kept on disk");
+        let name = label(ui, "Kept on disk");
         egui::ComboBox::from_id_salt("bench-retained")
             .width(ui.available_width())
             .selected_text(text(
-                Role::Data,
+                Role::Code,
                 format!("{} captures", self.recovered.len()),
             ))
             .show_ui(ui, |ui| {
                 for path in self.recovered.clone() {
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
                     if ui
-                        .selectable_label(self.path.as_ref() == Some(&path), text(Role::Data, name))
+                        .selectable_label(self.path.as_ref() == Some(&path), text(Role::Code, name))
                         .clicked()
                     {
                         self.open(path);
@@ -1076,6 +1072,9 @@ impl Bench {
     }
 
     fn graph(&mut self, ui: &mut Ui) {
+        let face = style::face(ui.ctx());
+        // The plots stand on the surface, as the measurements page's charts do.
+        ui.visuals_mut().extreme_bg_color = face.surface;
         self.toolbar(ui);
         let Some(answer) = self.answer.clone() else {
             // A selection drag under way ends with the plot it was on.
@@ -1085,7 +1084,8 @@ impl Bench {
                 (ui.available_height() - 48.0).max(160.0),
             );
             Frame::new()
-                .fill(color::SUNKEN)
+                .fill(face.surface)
+                .stroke(Stroke::new(1.0, face.hair))
                 .corner_radius(CornerRadius::same(style::RADIUS))
                 .show(ui, |ui| {
                     ui.set_min_size(size);
@@ -1100,7 +1100,7 @@ impl Bench {
                                     "Start a recording, or open a capture."
                                 },
                             )
-                            .color(color::TEXT_2),
+                            .color(face.ink_2),
                         );
                     });
                 });
@@ -1129,6 +1129,7 @@ impl Bench {
             .x_axis_formatter(|mark, _| tick(mark, "s"))
             .y_axis_formatter(move |mark, _| tick(mark, quantity.unit()))
             .y_axis_min_width(56.0)
+            .grid_color(face.hair)
             .auto_bounds(false)
             .allow_double_click_reset(false)
             // The wheel zooms time; dragging the Y axis zooms Y.
@@ -1158,11 +1159,12 @@ impl Bench {
                 let shift = -f64::from(carry) * plot.transform().dvalue_dpos()[1];
                 plot.translate_bounds(vec2(0.0, shift as f32));
             }
-            lost_bands(plot, &answer.overview.lost);
-            draw(plot, &answer.fallback, quantity, color::ACCENT);
+            lost_bands(plot, &answer.overview.lost, face);
+            let verge = face.series_verge;
+            draw(plot, &answer.fallback, quantity, verge);
             match &answer.view.samples {
-                Some(samples) => draw_samples(plot, samples, quantity, color::ACCENT, &x),
-                None => draw(plot, &answer.view.envelopes, quantity, color::ACCENT),
+                Some(samples) => draw_samples(plot, samples, quantity, verge, &x),
+                None => draw(plot, &answer.view.envelopes, quantity, verge),
             }
             if let Some(selection) = selection {
                 plot.span(
@@ -1170,7 +1172,7 @@ impl Bench {
                         "Selection",
                         seconds(selection.start_ns)..=seconds(selection.end_ns),
                     )
-                    .fill(color::ACCENT.gamma_multiply(0.18)),
+                    .fill(face.wash()),
                 );
             }
             pointer = plot.pointer_coordinate().map(|p| nanos(p.x));
@@ -1224,25 +1226,25 @@ impl Bench {
         if answer.high_range_only {
             ui.label(
                 text(
-                    Role::Data,
+                    Role::Body,
                     "This capture held the high range: currents under about 0.36 mA read unreliably",
                 )
-                .color(color::TEXT_2),
+                .color(face.ink_2),
             );
         }
         if answer.view.lost_pairs > 0 {
             ui.label(
                 text(
-                    Role::Data,
+                    Role::Body,
                     format!("{} pairs lost in this capture", answer.view.lost_pairs),
                 )
-                .color(color::ATTENTION),
+                .color(face.attention_ink),
             );
         }
         if answer.digital.loss_events > 0 {
             ui.label(
                 text(
-                    Role::Data,
+                    Role::Body,
                     format!(
                         "{} DIO edge-loss {} in this capture",
                         answer.digital.loss_events,
@@ -1253,7 +1255,7 @@ impl Bench {
                         }
                     ),
                 )
-                .color(color::ATTENTION),
+                .color(face.attention_ink),
             );
         }
         ui.add_space(space::S);
@@ -1272,9 +1274,12 @@ impl Bench {
         page: &verge_probe::capture::MarkerPage,
         transform: &egui_plot::PlotTransform,
     ) {
+        let face = style::face(ui.ctx());
         let frame = *transform.frame();
         let painter = ui.painter().with_clip_rect(frame);
         let mut occupied = [frame.left() - 1.0; LABEL_ROWS];
+        // Drawn once every line is, so that no marker's line crosses another's label.
+        let mut labels = Vec::new();
         for entry in &page.entries {
             let x = transform
                 .position_from_point(&egui_plot::PlotPoint::new(
@@ -1286,18 +1291,15 @@ impl Bench {
                 continue;
             }
             let line = [egui::pos2(x, frame.top()), egui::pos2(x, frame.bottom())];
-            painter.line_segment(line, Stroke::new(3.0, color::SUNKEN));
-            painter.line_segment(line, Stroke::new(1.0, color::ATTENTION));
+            painter.line_segment(line, Stroke::new(3.0, face.surface));
+            painter.line_segment(line, Stroke::new(1.0, face.ink));
             let label = format!(
                 "{} {}",
                 entry.marker.number,
                 verge_probe::record::marker_label(&entry.marker.label)
             );
-            let galley = painter.layout_no_wrap(
-                label.clone(),
-                egui::FontId::monospace(11.0),
-                color::ATTENTION,
-            );
+            let galley =
+                painter.layout_no_wrap(label.clone(), egui::FontId::monospace(11.0), face.ink);
             let left = (x + 3.0)
                 .min(frame.right() - galley.size().x)
                 .max(frame.left());
@@ -1307,13 +1309,8 @@ impl Bench {
                 .find(|(_, right)| **right < left)
             {
                 let pos = egui::pos2(left, frame.top() + LABEL_TOP + row as f32 * LABEL_ROW);
-                painter.rect_filled(
-                    egui::Rect::from_min_size(pos, galley.size()),
-                    0,
-                    color::SUNKEN,
-                );
                 *right = left + galley.size().x + 8.0;
-                painter.galley(pos, galley, color::ATTENTION);
+                labels.push((pos, galley));
             }
             ui.interact(
                 egui::Rect::from_min_max(
@@ -1325,13 +1322,21 @@ impl Bench {
             )
             .on_hover_text(format!("{:.6}s · {label}", seconds(entry.marker.time_ns)));
         }
+        for (pos, galley) in labels {
+            painter.rect_filled(
+                egui::Rect::from_min_size(pos, galley.size()),
+                0,
+                face.surface,
+            );
+            painter.galley(pos, galley, face.ink);
+        }
         if page.next.is_some() {
             painter.text(
                 frame.left_bottom() + vec2(6.0, -6.0),
                 egui::Align2::LEFT_BOTTOM,
                 "More markers: zoom in or use the list",
-                egui::FontId::monospace(11.0),
-                color::ATTENTION,
+                egui::FontId::proportional(12.0),
+                face.ink_2,
             );
         }
     }
@@ -1346,6 +1351,7 @@ impl Bench {
         if digital.pins == 0 {
             return;
         }
+        let face = style::face(ui.ctx());
         let count = digital.pins.count_ones() as f32;
         let (rect, _) = ui.allocate_exact_size(
             vec2(ui.available_width(), count * 24.0),
@@ -1375,7 +1381,7 @@ impl Bench {
                 egui::Align2::RIGHT_CENTER,
                 format!("DIO{pin}"),
                 egui::FontId::monospace(11.0),
-                color::TEXT_2,
+                face.ink_2,
             );
             let mut previous: Option<(f32, f32)> = None;
             for bin in fallback.iter().chain(&digital.bins) {
@@ -1394,7 +1400,7 @@ impl Bench {
                                 egui::pos2(right, top + 14.0),
                             ),
                             0,
-                            color::ATTENTION.gamma_multiply(0.2),
+                            face.attention_fill.gamma_multiply(0.2),
                         );
                     }
                     continue;
@@ -1407,7 +1413,7 @@ impl Bench {
                 {
                     painter.line_segment(
                         [egui::pos2(left, last_y), egui::pos2(left, y)],
-                        Stroke::new(1.0, color::ACCENT),
+                        Stroke::new(1.0, face.series_verge),
                     );
                 }
                 if high && low {
@@ -1417,13 +1423,13 @@ impl Bench {
                             egui::pos2(right.max(left + 1.0), top + 14.0),
                         ),
                         0,
-                        color::ACCENT.gamma_multiply(0.6),
+                        face.series_verge.gamma_multiply(0.6),
                     );
                     previous = None;
                 } else {
                     painter.line_segment(
                         [egui::pos2(left, y), egui::pos2(right, y)],
-                        Stroke::new(1.0, color::ACCENT),
+                        Stroke::new(1.0, face.series_verge),
                     );
                     previous = Some((right, y));
                 }
@@ -1480,6 +1486,7 @@ impl Bench {
 
     /// The whole capture, small, with the visible window marked and its edges draggable.
     fn overview(&mut self, ui: &mut Ui, answer: &Answer, interval: Interval, extent: Interval) {
+        let face = style::face(ui.ctx());
         ui.add_space(space::S);
         let mut overview_pointer = None;
         let overview = Plot::new("energy-overview")
@@ -1496,19 +1503,17 @@ impl Bench {
                 plot.set_plot_bounds_x(
                     seconds(extent.start_ns)..=seconds(extent.end_ns.max(extent.start_ns + 1)),
                 );
-                lost_bands(plot, &answer.overview.lost);
+                lost_bands(plot, &answer.overview.lost, face);
                 draw(
                     plot,
                     &answer.overview.envelopes,
                     self.quantity,
-                    color::TEXT_2,
+                    face.series_verge,
                 );
+                // Unnamed: 64 points leave no room for its label.
                 plot.span(
-                    Span::new(
-                        "Visible",
-                        seconds(interval.start_ns)..=seconds(interval.end_ns),
-                    )
-                    .fill(color::ACCENT.gamma_multiply(0.2)),
+                    Span::new("", seconds(interval.start_ns)..=seconds(interval.end_ns))
+                        .fill(face.wash()),
                 );
                 overview_pointer = plot.pointer_coordinate().map(|p| nanos(p.x));
             });
@@ -1535,7 +1540,7 @@ impl Bench {
             );
             ui.painter().line_segment(
                 [rect.center_top(), rect.center_bottom()],
-                Stroke::new(2.0, color::ACCENT),
+                Stroke::new(2.0, face.ink),
             );
             if handle.dragged()
                 && let Some(position) = handle.interact_pointer_pos()
@@ -1833,7 +1838,7 @@ fn draw(plot: &mut PlotUi<'_>, bins: &[Envelope], quantity: Quantity, color: Col
 /// A band over each span of lost pairs, so that a loss reads apart from a pause at any zoom: both
 /// break the trace, and only a loss is marked. Spans less than a pixel apart share one band, so a
 /// capture that lost pairs thousands of times draws no more bands than the plot has pixels.
-fn lost_bands(plot: &mut PlotUi<'_>, lost: &[Interval]) {
+fn lost_bands(plot: &mut PlotUi<'_>, lost: &[Interval], face: &style::Face) {
     let pixel = plot.transform().dvalue_dpos()[0].abs();
     let shown = plot.plot_bounds().range_x();
     let mut bands: Vec<(f64, f64)> = Vec::new();
@@ -1849,7 +1854,7 @@ fn lost_bands(plot: &mut PlotUi<'_>, lost: &[Interval]) {
     }
     for (start, end) in bands {
         // Unnamed, so egui_plot draws no label over the marker rows.
-        plot.span(Span::new("", start..=end).fill(color::ATTENTION.gamma_multiply(0.2)));
+        plot.span(Span::new("", start..=end).fill(face.attention_fill.gamma_multiply(0.2)));
     }
 }
 
@@ -2193,7 +2198,7 @@ mod tests {
             }
         }
         assert_eq!(h.state().answer.as_ref().unwrap().selection, expected);
-        h.get_by_label("CLEAR").click();
+        h.get_by_label("Clear").click();
         h.step();
         assert!(h.state().selection.is_none());
     }
@@ -2229,6 +2234,22 @@ mod tests {
         }
         panic!("no latest query result");
     }
+    /// Renders the frame `h` drew to `name` in `dir`, then the next in the day face.
+    fn shoot(h: &mut Harness<'_, Bench>, dir: &Path, name: &str) {
+        let stem = name.trim_end_matches(".png");
+        h.render()
+            .unwrap()
+            .save(dir.join(format!("{stem}-night.png")))
+            .unwrap();
+        h.ctx.set_theme(egui::Theme::Light);
+        h.step();
+        h.render()
+            .unwrap()
+            .save(dir.join(format!("{stem}-day.png")))
+            .unwrap();
+        h.ctx.set_theme(egui::Theme::Dark);
+        h.step();
+    }
     #[test]
     #[ignore = "renders Bench screenshots with wgpu"]
     fn bench_picture() {
@@ -2242,15 +2263,12 @@ mod tests {
         let mut h = harness(state(&path), true);
         wait(&mut h);
         h.step();
-        h.render().unwrap().save(dir.join("bench.png")).unwrap();
+        shoot(&mut h, &dir, "bench.png");
         let visible = Interval::new(5_000_000_000, 5_040_000_000);
         h.state_mut().inspect(visible, None);
         answered(&mut h, visible);
         h.step();
-        h.render()
-            .unwrap()
-            .save(dir.join("bench-samples.png"))
-            .unwrap();
+        shoot(&mut h, &dir, "bench-samples.png");
         // 2 ms of every 10 at 10,000 pairs a second, for 20 s.
         let path = dir.join("dense.vergecapture");
         if path.exists() {
@@ -2264,17 +2282,14 @@ mod tests {
         let mut h = harness(bench, true);
         wait(&mut h);
         h.step();
-        h.render()
-            .unwrap()
-            .save(dir.join("bench-dense.png"))
-            .unwrap();
+        shoot(&mut h, &dir, "bench-dense.png");
         for (name, span) in [("1s", 1_000_000_000), ("100ms", 100_000_000)] {
             let visible = Interval::new(5_000_000_000, 5_000_000_000 + span);
             h.state_mut().inspect(visible, None);
             answered(&mut h, visible);
             h.step();
             let file = format!("bench-dense-{name}.png");
-            h.render().unwrap().save(dir.join(file)).unwrap();
+            shoot(&mut h, &dir, &file);
         }
         // 2 ms of every 10 at 1,000 pairs a second, with noise on both levels.
         let path = dir.join("marker.vergecapture");
@@ -2339,7 +2354,7 @@ mod tests {
             answered(&mut h, visible);
             h.step();
             let file = format!("bench-marker-{name}.png");
-            h.render().unwrap().save(dir.join(file)).unwrap();
+            shoot(&mut h, &dir, &file);
         }
         // The same shape with pairs lost: one, three, and 300 in a run.
         let path = dir.join("lossy.vergecapture");
@@ -2368,7 +2383,7 @@ mod tests {
             answered(&mut h, visible);
             h.step();
             let file = format!("bench-lossy-{name}.png");
-            h.render().unwrap().save(dir.join(file)).unwrap();
+            shoot(&mut h, &dir, &file);
         }
         // A pan past what the answer covers, before the next answer lands: high until 10.05 s,
         // then low.
@@ -2387,7 +2402,7 @@ mod tests {
         h.state_mut().interval = Some(Interval::new(10_000_000_000, 10_200_000_000));
         h.state_mut().reset_bounds = true;
         h.step();
-        h.render().unwrap().save(dir.join("bench-pan.png")).unwrap();
+        shoot(&mut h, &dir, "bench-pan.png");
         // A debug session's shape: 10,000 pairs a second, held 4 ms every 0.3 to 0.8 s while a
         // debugger connects, and pairs lost twice, 0.6 ms from 15.12 s and 150 ms from 22 s.
         let path = dir.join("held.vergecapture");
@@ -2429,7 +2444,7 @@ mod tests {
             answered(&mut h, visible);
             h.step();
             let file = format!("bench-held-{name}.png");
-            h.render().unwrap().save(dir.join(file)).unwrap();
+            shoot(&mut h, &dir, &file);
         }
     }
     /// 2 ms of every 10, with noise on both levels.
@@ -2471,9 +2486,9 @@ mod tests {
         let wanted = h.state().interval.unwrap();
         assert_eq!(wanted, Interval::new(19_000_000_000, 29_000_000_000));
         answered(&mut h, wanted);
-        h.get_by_label("SELECT TO NEXT MARKER").scroll_to_me();
+        h.get_by_label("Select to next marker").scroll_to_me();
         h.step();
-        h.get_by_label("SELECT TO NEXT MARKER").click();
+        h.get_by_label("Select to next marker").click();
         h.step();
         for _ in 0..400 {
             h.step();
@@ -2499,9 +2514,9 @@ mod tests {
             .unwrap();
         assert_eq!(selection.0, Interval::new(24_000_000_000, 25_000_000_000));
         assert_eq!(selection.1.samples, 1000);
-        h.get_by_label("NEXT").scroll_to_me();
+        h.get_by_label("Next").scroll_to_me();
         h.step();
-        h.get_by_label("NEXT").click();
+        h.get_by_label("Next").click();
         h.step();
         for _ in 0..400 {
             h.step();

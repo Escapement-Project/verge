@@ -210,7 +210,7 @@ fn load_error(error: &LoadError) -> JobError {
         }
         LoadError::NoStock { .. } => Some("Install NXP's LinkServer, or pick the image as a file."),
         LoadError::OtherBoard { .. } | LoadError::NotForBoard { .. } => {
-            Some("Pick STOCK to put NXP's image on it instead.")
+            Some("Pick Stock to put NXP's image on it instead.")
         }
         error if download_again(error) => Some(DOWNLOAD_AGAIN),
         LoadError::Release(ReleaseError::CachedCopyFailed { left: Some(_), .. }) => {
@@ -256,7 +256,7 @@ pub fn arm_error(error: &ArmError) -> String {
         ArmError::OursUndated => {
             " Tick \"of any build\" to take every unit running Verge, or untick Verge."
         }
-        ArmError::NotForBoard { .. } => " Pick a Verge image built for it, or STOCK.",
+        ArmError::NotForBoard { .. } => " Pick a Verge image built for it, or Stock.",
         ArmError::Image(_) => "",
     };
     format!("{}{advice}", crate::app::sentence(&error.to_string()))

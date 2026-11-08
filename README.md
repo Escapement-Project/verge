@@ -371,7 +371,7 @@ unit's identity, so a disconnect and reconnect between polls counts as a continu
 ### GUI
 
 `verge-gui` provides the same update workflows. Attached units are on the left. Select one to see
-its firmware, update path and image choices: RELEASE, STOCK or FILE. Browse for a file with FILE's
+its firmware, update path and image choices: Release, Stock or File. Browse for a file with File's
 dialog, or drop it on the window. This app cannot receive file drops under Wayland.
 
 Read the board and jumper advice, choose the update or install action shown, and confirm. The
@@ -379,23 +379,23 @@ GUI shows download and flash progress. When it finishes, check the result and th
 
 The GUI asks before flashing and includes any required download in the same confirmation.
 During an update it shows each step and the byte count. Closing waits for the update to finish.
-CANCEL stops it at the next safe point. SHOW opens the log along the bottom.
+Cancel stops it at the next safe point. Show opens the log along the bottom.
 
 Local files are checked against the board when selected. Release board support is checked after
 download, before the unit is changed. If the unit needs the ISP jumper, the GUI names its board
 and the image to flash in ISP mode. For a unit already in ISP mode or with an unknown board, the
 confirmation lists the selected file's supported boards.
 
-BATCH, at the top, opens the batch view. It sets up the same batch as `verge batch`: the image,
+Batch, at the top, opens the batch view. It sets up the same batch as `verge batch`: the image,
 the kinds of unit, the board, whether to take the units attached now, a count to stop after, and
 the record file. The default record location is your data directory:
 `~/.local/share/verge` on Linux, `~/Library/Application Support/verge` on macOS and
 `%APPDATA%\verge` on Windows. Once armed, the view shows the tally, active update, queue and
-completed units. STOP stops accepting new units. CANCEL THE UNIT UNDER WAY stops the active
-update at its next safe point. During image loading, STOP or closing the window ends the batch
+completed units. Stop takes no new units, and Cancel the unit under way then stops the active
+update at its next safe point. During image loading, Stop or closing the window ends the batch
 immediately; no unit has been flashed.
 
-BENCH reaches a Pro's target supply and energy measurement through Verge Aux, so a debugger can
+Bench reaches a Pro's target supply and energy measurement through Verge Aux, so a debugger can
 keep CMSIS-DAP open meanwhile. The supply switches at once. Turning it off asks first while a
 capture runs. The panel shows the supply as commanded and the voltage as measured, which are
 separate readings. DIO shows each pin’s direction and level. DIO0–2 change direction together;
@@ -403,34 +403,34 @@ DIO3 changes alone. Switching to output asks first: check that the target is not
 Inputs have pull-downs. Outputs read their own drive. DIO requires current Verge firmware with
 DIO on Aux and J15 removed at startup.
 
-START RECORDING starts a capture at 1 to 100,000 pairs/s and records it. AUTO RANGE and HIGH RANGE
+Start recording starts a capture at 1 to 100,000 pairs/s and records it. Auto range and High range
 choose the current ranges, as `--range` does for `energy record`. Once the graph shows single pairs,
 a pair marked under range draws pale, and a capture that held the high range says so under the
 graph. Starting clears the probe's energy total, and its calibration can interrupt target power for
-about 0.2 s. If another host already runs a capture, RECORD RUNNING CAPTURE records it at its own
-rate. STOP RECORDING stops a capture the window started, and leaves another host's running.
+about 0.2 s. If another host already runs a capture, Record running capture records it at its own
+rate. Stop recording stops a capture the window started, and leaves another host's running.
 
 Capture start, recording and watch require firmware with conditional capture stop. Each keeps the
 identity of the capture it started or attached to. Cleanup leaves a replacement capture running.
 A lost start reply can leave acquisition running; an explicit attach or `energy stop` resolves it.
 
-The graph shows current, voltage or power. LIVE follows the newest pairs; INSPECT holds the view
+The graph shows current, voltage or power. Live follows the newest pairs; Inspect holds the view
 while recording carries on. Drag or scroll the graph to move along time, and ctrl-scroll or pinch
 to zoom; the window's marker in the overview under it drags too. The vertical axis fits what is
-visible until you move it: drag or scroll up or down, or drag along the axis to zoom it. FIT Y, or a
+visible until you move it: drag or scroll up or down, or drag along the axis to zoom it. Fit Y, or a
 double click, fits it again. Zoomed out, each column of the graph spans the lowest to the highest
 reading in its time, so a pulse shorter than a column keeps its height. Zoomed in, the graph marks
 each pair. Where pairs were lost within a capture, the graph shades their time and draws the columns
 around it pale. A pause, as while a debugger holds the conversions, only breaks the trace. With
-SELECT on, dragging across the graph selects an interval; the left panel sets its ends exactly and
+Select on, dragging across the graph selects an interval; the left panel sets its ends exactly and
 zooms to it. The panel measures the visible window and the selection: duration, pairs, minimum, mean
 and peak current, mean voltage and power, charge and energy. It shows how much of each was not
 measured. Time without measurements adds nothing to charge or energy. The readings come from the
 recorded pairs, so zooming does not change them.
 
 Each recording goes to disk as it arrives, for as long as the disk has room. Recordings stay in a
-`captures` folder in that data directory until discarded. KEPT ON DISK reopens one, including one
-cut short by a crash. SAVE AS copies the open capture; OPEN reads one back. EXPORT writes the
+`captures` folder in that data directory until discarded. Kept on disk reopens one, including one
+cut short by a crash. Save as copies the open capture; Open reads one back. Export writes the
 capture, or the selection, as CSV or as a sigrok session with voltage, current and a GAP channel.
 Recordings include all four DIO pins. Their lanes below the trace share its time axis. Zoomed
 out, a lane keeps short pulses visible. Missing edges leave breaks and an edge-loss report count.
@@ -439,7 +439,7 @@ An export keeps whole pairs at its edges, with their own times, so it can start 
 the selection.
 
 Markers appear as labelled lines on the graph and in a paged list. Picking a marker centres the
-view on it. SELECT TO NEXT MARKER selects the span to the following marker for measurement.
+view on it. Select to next marker selects the span to the following marker for measurement.
 The panel reports marker loss. Both export formats keep markers as `energy record` does.
 
 ### Releases
@@ -545,4 +545,4 @@ CONTRIBUTING.md has how the tools are built and how to test them.
 ## Licence
 
 Apache-2.0, in `LICENSE`. The fonts in `gui/fonts/` are under the SIL Open Font License, with
-their licence texts beside them. The GUI's LICENCES button displays the texts too.
+their licence texts beside them. The GUI's Licences button displays the texts too.

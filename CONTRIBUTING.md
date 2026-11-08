@@ -23,8 +23,12 @@ The library and frontends use:
 - `dirs` for the cache and data directories.
 - `eframe` and `egui` for the GUI, `rfd` for its file dialog, and `egui_kittest` for GUI tests.
 
-The GUI uses IBM Plex and Kode Mono under the SIL Open Font License. `gui/fonts/` records their
-sources and licence texts.
+The GUI takes its colours, type and icon from the Escapement Project's design tokens:
+`gui/src/tokens.rs`, the fonts in `gui/fonts/` and the icons in `gui/icons/` are copies of files
+the project's site repository generates. The fonts are Saira, Hanken Grotesk and Martian Mono,
+under the SIL Open Font License. `gui/fonts/README.md` records their roles and licences, and how
+to check the copies against the site's build. The window shows the day or the night face as the
+system prefers. On Linux winit reports no preference, so there it shows night.
 
 ## Testing
 
@@ -78,7 +82,7 @@ simulator's own images. A real image flashed there, such as stock from your Link
 leaves the unit silent.
 
 GUI tests run headlessly through `egui_kittest` against the same simulator. A separate test
-renders each state to PNG and requires a GPU:
+renders each state to PNG, in the day face and the night face, and requires a GPU:
 
 ```
 VERGE_GUI_SHOTS=/tmp/shots cargo test -p verge-gui pictures -- --ignored
