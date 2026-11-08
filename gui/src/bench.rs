@@ -874,9 +874,7 @@ impl Bench {
                 label(ui, "unmeasured");
                 for column in &columns {
                     let missing = column.map(|(interval, statistics)| {
-                        interval
-                            .duration_ns()
-                            .saturating_sub(statistics.measured_ns)
+                        unmeasured_ns(*interval, answer.view.extent, statistics)
                     });
                     ui.label(match missing {
                         Some(0) => text(Role::Data, "none").color(color::TEXT_2),
@@ -1721,6 +1719,15 @@ const DETENT: f32 = 12.0;
 
 /// The opacity of a column some of whose time was not measured, against a whole one.
 const PARTLY_MEASURED: f32 = 0.35;
+
+/// The time in `interval` that the capture spans and has no reading for. A window reaching before
+/// the capture's start or past its end has nothing to measure there.
+fn unmeasured_ns(interval: Interval, extent: Interval, statistics: &Statistics) -> u64 {
+    let start = interval.start_ns.max(extent.start_ns);
+    let end = interval.end_ns.min(extent.end_ns);
+    end.saturating_sub(start)
+        .saturating_sub(statistics.measured_ns)
+}
 
 /// Marker labels sit in rows across the top of the plot.
 const LABEL_ROWS: usize = 3;
@@ -2726,6 +2733,29 @@ mod tests {
         };
         assert!(part(10_100_000_000).gap);
         assert!(!part(9_687_500_000).gap);
+    }
+    #[test]
+    fn a_window_past_the_capture_counts_only_the_capture_as_unmeasured() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short.vergecapture");
+        // 2 s of pairs, five of them lost before 1.1 s.
+        capture_lossy(&path, 1000, 2000, |_| 350, &[500..502, 1000..1003]);
+        let mut h = harness(state(&path), false);
+        wait(&mut h);
+        let visible = Interval::new(1_500_000_000, 2_300_000_000);
+        h.state_mut().inspect(visible, None);
+        let answer = answered(&mut h, visible);
+        assert_eq!(
+            unmeasured_ns(visible, answer.view.extent, &answer.window),
+            0
+        );
+        let whole = Interval::new(0, 2_300_000_000);
+        h.state_mut().inspect(whole, None);
+        let answer = answered(&mut h, whole);
+        assert_eq!(
+            unmeasured_ns(whole, answer.view.extent, &answer.window),
+            5_000_000
+        );
     }
     #[test]
     fn a_capture_that_cannot_be_read_is_asked_for_once() {
