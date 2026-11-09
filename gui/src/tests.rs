@@ -118,10 +118,16 @@ where
     )
 }
 
+/// The style, with Verge's mark held still: what a test sees must not depend on the frame it looks.
+fn still(ctx: &egui::Context) {
+    style::install(ctx);
+    crate::mark::set_motion(ctx, false);
+}
+
 fn harness(app: VergeApp) -> Harness<'static, VergeApp> {
     Harness::builder()
         .with_size(vec2(1080.0, 700.0))
-        .with_context_setup(style::install)
+        .with_context_setup(still)
         .build_ui_state(|ui, app: &mut VergeApp| app.show(ui), app)
 }
 
@@ -517,7 +523,7 @@ fn pictures() {
     let rendered = |app: VergeApp| {
         Harness::builder()
             .with_size(vec2(1080.0, 700.0))
-            .with_context_setup(style::install)
+            .with_context_setup(still)
             .wgpu()
             .build_ui_state(|ui, app: &mut VergeApp| app.show(ui), app)
     };
@@ -706,6 +712,88 @@ fn pictures() {
         paused: Some("The unit at 1-2, a full MCU-Link, failed and is in ISP mode, maybe with a partial image. The batch waits until it is unplugged. In ISP mode the tool cannot tell its board, so flash it again with the batch's image, which is built for it: `verge isp flash --release v0.3.0`.".into()),
     })));
     shoot(&mut h, "15-batch-paused");
+
+    // Nothing attached: the mark above the instruction, at rest as the harness holds it.
+    let mut n = rendered(sim_app(SimBus::default(), vec![]));
+    until(&mut n, "Plug in an MCU-Link");
+    shoot(&mut n, "22-nothing-attached");
+    // The mark's sequence at three instants: crossing to the step, on it, crossing back. At 160 and
+    // 64 px on the master, at 24 px on the fitted master the strip uses at launch.
+    let mut m = Harness::builder()
+        .with_size(vec2(600.0, 300.0))
+        .with_context_setup(still)
+        .wgpu()
+        .build_ui_state(
+            |ui, icon: &mut style::Mark| {
+                let f = style::face(ui.ctx());
+                let colours = crate::mark::Colours::of(f, true);
+                ui.horizontal(|ui| {
+                    use crate::mark::{BACK, MOVE, SWEEP};
+                    for t in [SWEEP / 2.0, (SWEEP + MOVE + BACK) / 2.0, BACK + SWEEP / 2.0] {
+                        ui.vertical(|ui| {
+                            for (size, geometry) in [
+                                (160.0, &crate::mark::MASTER),
+                                (64.0, &crate::mark::MASTER),
+                                (24.0, &crate::mark::FITTED_24),
+                            ] {
+                                let (rect, _) =
+                                    ui.allocate_exact_size(vec2(size, size), egui::Sense::hover());
+                                crate::mark::paint(
+                                    ui.painter(),
+                                    rect,
+                                    geometry,
+                                    &crate::mark::at(t),
+                                    &colours,
+                                );
+                            }
+                        });
+                    }
+                    // The strip's launch play as it draws it, on the icon's pixels: crossing to
+                    // the step, crossing back, its last frame, and then the icon, which must look
+                    // the same as the last frame.
+                    ui.vertical(|ui| {
+                        let bare = crate::mark::Colours::of(f, false);
+                        let decoded = eframe::icon_data::from_png_bytes(include_bytes!(
+                            "../icons/verge-24.png"
+                        ))
+                        .unwrap();
+                        let pixels = crate::mark::Icon::from_rgba(
+                            24,
+                            &decoded.rgba,
+                            crate::tokens::DAY.plate,
+                            crate::tokens::DAY.lume,
+                        );
+                        for frame in [
+                            crate::mark::at(crate::mark::SWEEP / 2.0),
+                            crate::mark::at(crate::mark::BACK + crate::mark::SWEEP / 2.0),
+                            crate::mark::Frame::REST,
+                        ] {
+                            let (rect, _) =
+                                ui.allocate_exact_size(vec2(24.0, 24.0), egui::Sense::hover());
+                            crate::mark::paint_exact(
+                                ui.painter(),
+                                rect,
+                                &crate::mark::FITTED_24,
+                                &frame,
+                                &bare,
+                                1.0,
+                                &pixels,
+                            );
+                        }
+                        icon.show(ui);
+                    });
+                });
+            },
+            style::Mark::default(),
+        );
+    for (theme, face) in [(egui::Theme::Dark, "night"), (egui::Theme::Light, "day")] {
+        m.ctx.set_theme(theme);
+        m.step();
+        m.render()
+            .expect("wgpu renders the mark")
+            .save(dir.join(format!("23-mark-sequence-{face}.png")))
+            .unwrap();
+    }
 
     for (scenario, name) in [
         ("stock-old", "08-old-stock-jumper"),
@@ -2320,4 +2408,14 @@ fn the_focused_widget_has_an_ink_ring_outside_it() {
         h.step();
         assert_eq!(rings(&h, around), 1, "{label} has no ring with focus");
     }
+}
+
+/// The desktop's reduced-motion setting as the window reads it at start. Needs a session bus.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "reads the desktop's portal"]
+fn reads_the_desktops_motion_setting() {
+    let setting = crate::portal_reduced_motion().expect("the portal answers");
+    assert!(setting <= 1, "reduced-motion is 0 or 1, not {setting}");
+    println!("reduced-motion: {setting}");
 }

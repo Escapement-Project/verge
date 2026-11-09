@@ -8,6 +8,7 @@ mod bench;
 mod bench_worker;
 mod glyph;
 mod log;
+mod mark;
 mod style;
 #[cfg(test)]
 mod tests;
@@ -170,6 +171,10 @@ fn main() -> eframe::Result {
             style::install(&ctx);
             #[cfg(target_os = "linux")]
             follow_desktop_face(&ctx);
+            #[cfg(target_os = "linux")]
+            if desktop_reduces_motion() {
+                mark::set_motion(&ctx, false);
+            }
             log.set_repaint(ctx.clone());
             let repaint = {
                 let ctx = ctx.clone();
@@ -199,6 +204,34 @@ fn main() -> eframe::Result {
             Ok(Box::new(VergeApp::new(Box::new(worker), log, config)))
         }),
     )
+}
+
+/// The XDG portal's `reduced-motion` setting: 1 when the desktop asks for reduced motion.
+#[cfg(target_os = "linux")]
+fn portal_reduced_motion() -> zbus::Result<u32> {
+    let connection = zbus::blocking::Connection::session()?;
+    let reply = connection.call_method(
+        Some("org.freedesktop.portal.Desktop"),
+        "/org/freedesktop/portal/desktop",
+        Some("org.freedesktop.portal.Settings"),
+        "ReadOne",
+        &("org.freedesktop.appearance", "reduced-motion"),
+    )?;
+    let value: zbus::zvariant::OwnedValue = reply.body().deserialize()?;
+    Ok(u32::try_from(value)?)
+}
+
+/// Whether the desktop asks for reduced motion, read once at start. Without a portal, or with one
+/// too old to have the setting, the mark moves.
+#[cfg(target_os = "linux")]
+fn desktop_reduces_motion() -> bool {
+    match portal_reduced_motion() {
+        Ok(setting) => setting == 1,
+        Err(error) => {
+            tracing::debug!("no reduced-motion setting: {error}");
+            false
+        }
+    }
 }
 
 /// Day or night as the desktop sets it. winit reports no system theme on Linux, so egui would stay

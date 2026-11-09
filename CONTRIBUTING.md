@@ -22,7 +22,8 @@ The library and frontends use:
   the command line, and `tracing` with `tracing-indicatif` for logs and progress.
 - `dirs` for the cache and data directories.
 - `eframe` and `egui` for the GUI, `rfd` for its file dialog, `dark-light` for the desktop's light
-  or dark setting on Linux, and `egui_kittest` for GUI tests.
+  or dark setting on Linux, `zbus` for its reduced-motion setting, and `egui_kittest` for GUI
+  tests.
 
 The GUI takes its colours, type and icon from the Escapement Project's design tokens:
 `gui/src/tokens.rs`, the fonts in `gui/fonts/` and the icons in `gui/icons/` are copies of files
@@ -32,6 +33,13 @@ to check the copies against the site's build. The window shows the day or the ni
 system prefers, and follows a change while it runs. On Linux, where winit reports no preference,
 it reads the desktop's colour-scheme setting through the XDG portal with `dark-light`; without a
 portal it shows night.
+
+Verge's mark moves in two places: once at launch in the window's top strip, and in a loop above
+"Nothing" and "Plug in an MCU-Link" while nothing is attached. `gui/src/mark.rs` only draws it:
+its timing, shape and lines are `gui/src/tokens.rs`'s `mark` module, generated from the site's
+design tokens and marks with the landing page's, so the two cannot drift apart. On Linux the window reads the portal's reduced-motion setting at start and holds
+the mark still if the desktop asks for that; elsewhere it always moves. The tests hold it still, so
+their pictures do not depend on when they are taken.
 
 ## Testing
 

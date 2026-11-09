@@ -186,6 +186,8 @@ pub struct VergeApp {
     last_batch: Option<BatchRun>,
     bench: crate::bench::Bench,
     mark: style::Mark,
+    /// Since when nothing has been attached, which times the waiting mark's loop.
+    waiting_since: Option<f64>,
 }
 
 fn kib(bytes: u64) -> String {
@@ -458,6 +460,7 @@ impl VergeApp {
             last_batch: None,
             bench,
             mark: style::Mark::default(),
+            waiting_since: None,
         };
         app.backend.send(Request::Detect);
         app.backend.send(Request::Release);
@@ -1160,8 +1163,36 @@ impl VergeApp {
             }
             return;
         }
+        // While nothing is attached the mark loops above the instruction, from the V each time the
+        // list empties.
+        let waiting = if self.units.is_empty() {
+            let since = *self.waiting_since.get_or_insert(now);
+            Some(((now - since) as f32) % crate::mark::LOOP)
+        } else {
+            self.waiting_since = None;
+            None
+        };
         let Some(unit) = self.selected_unit().cloned() else {
             frame(ui, None, Stroke::new(1.0, face.rule), |ui| {
+                if let Some(t) = waiting {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(64.0, 64.0), egui::Sense::hover());
+                    let moving = crate::mark::motion(ui.ctx());
+                    let at = if moving {
+                        crate::mark::at(t)
+                    } else {
+                        crate::mark::Frame::REST
+                    };
+                    let colours = crate::mark::Colours::of(face, true);
+                    crate::mark::paint(ui.painter(), rect, &crate::mark::MASTER, &at, &colours);
+                    if moving && t < crate::mark::END {
+                        ui.ctx().request_repaint();
+                    } else if moving {
+                        ui.ctx()
+                            .request_repaint_after(Duration::from_secs_f32(crate::mark::LOOP - t));
+                    }
+                    ui.add_space(space::M);
+                }
                 ui.label(text(Role::Display, "Nothing").color(face.ink_2));
                 ui.label(
                     text(

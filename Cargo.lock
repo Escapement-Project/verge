@@ -6205,6 +6205,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "verge-probe",
+ "zbus",
 ]
 
 [[package]]

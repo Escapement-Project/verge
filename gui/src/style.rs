@@ -376,19 +376,23 @@ pub fn focus_ring(ctx: &Context) {
         );
 }
 
-/// Verge's app icon, beside its name in the strip.
+/// Verge's app icon, beside its name in the strip. At launch it plays the mark's sequence once,
+/// on the icon's own pixels, and rests on the icon.
 #[derive(Default)]
 pub struct Mark {
-    /// The texture, and whether it is the one for a fine display.
-    texture: Option<(bool, egui::TextureHandle)>,
+    /// The texture, its pixels, and whether they are the ones for a fine display.
+    icon: Option<(bool, egui::TextureHandle, crate::mark::Icon)>,
+    /// When the strip first drew it.
+    shown: Option<f64>,
 }
 
 impl Mark {
     pub fn show(&mut self, ui: &mut egui::Ui) {
         const SIZE: f32 = 24.0;
+        let ppp = ui.ctx().pixels_per_point();
         // The 24 px icon is fitted to whole pixels; a fine display takes the 48.
-        let fine = ui.ctx().pixels_per_point() > 1.25;
-        if self.texture.as_ref().is_none_or(|(was, _)| *was != fine) {
+        let fine = ppp > 1.25;
+        if self.icon.as_ref().is_none_or(|(was, _, _)| *was != fine) {
             let png: &[u8] = if fine {
                 include_bytes!("../icons/verge-48.png")
             } else {
@@ -402,14 +406,54 @@ impl Mark {
             let texture = ui
                 .ctx()
                 .load_texture("verge-mark", image, egui::TextureOptions::LINEAR);
-            self.texture = Some((fine, texture));
+            // The icons are drawn in the day face's plate and lume, the same in both faces.
+            let pixels =
+                crate::mark::Icon::from_rgba(icon.width as usize, &icon.rgba, DAY.plate, DAY.lume);
+            self.icon = Some((fine, texture, pixels));
         }
-        if let Some((_, texture)) = &self.texture {
-            ui.add(egui::Image::new(egui::load::SizedTexture::new(
-                texture.id(),
-                egui::vec2(SIZE, SIZE),
-            )));
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(SIZE, SIZE), egui::Sense::hover());
+        // On the physical pixel grid, for the play and the icon alike, so the hand over between them
+        // does not shift the mark by part of a pixel.
+        let rect = egui::Rect::from_min_size(
+            ((rect.min.to_vec2() * ppp).round() / ppp).to_pos2(),
+            rect.size(),
+        );
+        let Some((_, texture, pixels)) = &self.icon else {
+            return;
+        };
+        let now = ui.input(|i| i.time);
+        let t = (now - *self.shown.get_or_insert(now)) as f32;
+        if crate::mark::motion(ui.ctx()) && t < crate::mark::END {
+            let colours = crate::mark::Colours::of(face(ui.ctx()), false);
+            let frame = crate::mark::at(t);
+            let geometry = if fine {
+                &crate::mark::MASTER
+            } else {
+                &crate::mark::FITTED_24
+            };
+            // On a display whose pixels do not land on the icon's (a scale of 1.5, say) there is
+            // no pixel-exact hand over to make: draw it with shapes.
+            if (SIZE * ppp).round() as usize == pixels.side {
+                crate::mark::paint_exact(
+                    ui.painter(),
+                    rect,
+                    geometry,
+                    &frame,
+                    &colours,
+                    ppp,
+                    pixels,
+                );
+            } else {
+                crate::mark::paint(ui.painter(), rect, geometry, &frame, &colours);
+            }
+            ui.ctx().request_repaint();
+            return;
         }
+        egui::Image::new(egui::load::SizedTexture::new(
+            texture.id(),
+            egui::vec2(SIZE, SIZE),
+        ))
+        .paint_at(ui, rect);
     }
 }
 
