@@ -596,7 +596,7 @@ fn list<B: Bus>(bus: &B, verbose: bool, serial: Option<&str>) -> Result<()> {
         outputln!("No MCU-Link is attached.");
         if cfg!(target_os = "linux") {
             outputln!(
-                "If one is plugged in, check that your user may open it: see the udev rules in the README."
+                "If one is plugged in, check that your user may open it: see the udev rules at https://escapement-project.github.io/verge/docs/getting-started/#usb-permissions-on-linux"
             );
         }
         return Ok(());

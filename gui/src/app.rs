@@ -689,7 +689,7 @@ impl VergeApp {
             return if self.units.is_empty() {
                 blocked(
                     "Nothing attached",
-                    "Plug in an MCU-Link. On Linux your user also needs the udev rules in the README.".into(),
+                    "Plug in an MCU-Link. On Linux your user also needs the udev rules in verge's Getting started page.".into(),
                 )
             } else {
                 blocked("Pick a unit", "Pick a unit on the left.".into())
