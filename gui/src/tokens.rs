@@ -99,6 +99,7 @@ pub const WASH: f32 = 0.12;
 pub const DASH_SECOND_BUILD: &[f32] = &[6.0, 3.0];
 pub const DASH_MISREAD: &[f32] = &[2.0, 4.0];
 pub const DASH_REFERENCE: &[f32] = &[8.0, 3.0, 2.0, 3.0];
+pub const DASH_CAPTURE_SECOND: &[f32] = &[12.0, 4.0];
 pub const CAPTURE_OPACITY: f32 = 0.6;
 pub const CAPTURE_WIDTH: f32 = 1.5;
 
