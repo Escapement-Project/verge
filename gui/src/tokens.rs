@@ -20,6 +20,7 @@ pub struct Face {
     pub lume: Color32,
     pub on_lume: Color32,
     pub plate: Color32,
+    pub plate_line: Color32,
     pub hand: Color32,
     pub ring: Color32,
     pub face: Color32,
@@ -46,6 +47,7 @@ pub const DAY: Face = Face {
     lume: Color32::from_rgb(0xc4, 0xf0, 0x3c),
     on_lume: Color32::from_rgb(0x11, 0x17, 0x1d),
     plate: Color32::from_rgb(0x11, 0x17, 0x1d),
+    plate_line: Color32::from_rgb(0xaa, 0xb5, 0xbe),
     hand: Color32::from_rgb(0xc8, 0x10, 0x2e),
     ring: Color32::from_rgb(0xee, 0xf4, 0xf6),
     face: Color32::from_rgb(0xdc, 0xe8, 0xed),
@@ -72,6 +74,7 @@ pub const NIGHT: Face = Face {
     lume: Color32::from_rgb(0xc4, 0xf0, 0x3c),
     on_lume: Color32::from_rgb(0x11, 0x17, 0x1d),
     plate: Color32::from_rgb(0x11, 0x17, 0x1d),
+    plate_line: Color32::from_rgb(0xaa, 0xb5, 0xbe),
     hand: Color32::from_rgb(0xef, 0x3b, 0x4a),
     ring: Color32::from_rgb(0x1b, 0x23, 0x2b),
     face: Color32::from_rgb(0x11, 0x17, 0x1d),
@@ -98,6 +101,93 @@ pub const DASH_MISREAD: &[f32] = &[2.0, 4.0];
 pub const DASH_REFERENCE: &[f32] = &[8.0, 3.0, 2.0, 3.0];
 pub const CAPTURE_OPACITY: f32 = 0.6;
 pub const CAPTURE_WIDTH: f32 = 1.5;
+
+/// Verge's mark in motion (design/README.md, "The mark in motion"): the samples' places from
+/// design/marks, everything else from design/tokens.toml's `[motion.mark]`. Times in seconds,
+/// places on the 64-unit grid unless a geometry gives them in its own units.
+pub mod mark {
+    /// One drawing of the mark, in its own units across a plate `side` wide.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Geometry {
+        pub side: f32,
+        /// A place across the 64-unit grid, in these units: `x0 + k * grid_x`.
+        pub x0: f32,
+        pub k: f32,
+        /// Each sample's centre across, its height at rest (the V) and on the step.
+        pub x: [f32; 7],
+        pub v: [f32; 7],
+        pub step: [f32; 7],
+        /// The lowest and highest samples' heights: the floor and the step's top.
+        pub floor: f32,
+        pub top: f32,
+        pub radius: f32,
+        /// The beam's run, top to bottom.
+        pub beam: (f32, f32),
+        pub stem: f32,
+        pub line: f32,
+        pub beam_width: f32,
+    }
+
+    pub const SWEEP: f32 = 0.4;
+    pub const MOVE: f32 = 0.2;
+    /// The second sweep starts.
+    pub const BACK: f32 = 1.2;
+    /// At rest again.
+    pub const END: f32 = 1.8;
+    pub const GROW: f32 = 0.1;
+    /// A loop's length, where it loops: the sequence, then a rest on the V.
+    pub const LOOP: f32 = 3.2;
+    /// A sample's move eases out at this power.
+    pub const EASE: i32 = 3;
+    /// The samples across the 64-unit grid, which time each one's move.
+    pub const GRID_X: [f32; 7] = [8.0, 16.0, 24.0, 32.0, 40.0, 48.0, 56.0];
+    pub const RISER: f32 = 32.0;
+    pub const FLOOR_RUN: (f32, f32) = (4.0, 60.0);
+    /// The stems, floor and trace in plate-line at this opacity, under the samples.
+    pub const LINE_OPACITY: f32 = 0.45;
+    /// The beam at this, over them.
+    pub const BEAM_OPACITY: f32 = 0.6;
+
+    /// The 64-unit master, design/marks/verge.svg, on its plate.
+    pub const MASTER: Geometry = Geometry {
+        side: 85.3333,
+        x0: 10.6667,
+        k: 1.0,
+        x: [
+            18.6667, 26.6667, 34.6667, 42.6667, 50.6667, 58.6667, 66.6667,
+        ],
+        v: [
+            22.6667, 35.6667, 48.6667, 60.6667, 48.6667, 35.6667, 22.6667,
+        ],
+        step: [
+            60.6667, 60.6667, 60.6667, 41.6667, 22.6667, 22.6667, 22.6667,
+        ],
+        floor: 60.6667,
+        top: 22.6667,
+        radius: 5.4,
+        beam: (12.6667, 72.6667),
+        stem: 1.6,
+        line: 1.1,
+        beam_width: 1.2,
+    };
+
+    /// The 24 px master fitted to whole pixels, design/marks/verge-24.svg, which fills its plate.
+    pub const FITTED_24: Geometry = Geometry {
+        side: 24.0,
+        x0: 2.0,
+        k: 0.3125,
+        x: [4.5, 7.0, 9.5, 12.0, 14.5, 17.0, 19.5],
+        v: [5.5, 9.5, 13.5, 17.5, 13.5, 9.5, 5.5],
+        step: [17.5, 17.5, 17.5, 11.5, 5.5, 5.5, 5.5],
+        floor: 17.5,
+        top: 5.5,
+        radius: 1.5,
+        beam: (2.3421, 21.2895),
+        stem: 1.0,
+        line: 1.0,
+        beam_width: 1.0,
+    };
+}
 
 /// The fixed font instances under fonts/, each with the axis values it was cut at.
 pub const FONTS: &[(&str, &str)] = &[
