@@ -156,15 +156,16 @@ enum Command {
     ///
     /// The probe measures the current that flows from J9 pin 1 to pin 3, whatever supplies it;
     /// `verge power` switches the Pro's own supply. A capture runs in the probe from `start` to
-    /// `stop`, so a debugger can use the probe meanwhile. While a debugger has the probe open,
-    /// these commands cannot reach it.
+    /// `stop`, so a debugger can use the probe meanwhile. The commands reach the probe through Verge
+    /// Aux, so they work while a debugger has it open; a Verge build older than Verge Aux answers
+    /// only once the debugger lets go.
     #[command(subcommand)]
     Energy(energy::EnergyCommand),
 }
 
 #[derive(Args)]
 struct DioArgs {
-    /// Drive these pins high: 0 to 3, as `--high 0,1`, or `dio0` to `dio3`, or `all`.
+    /// Drive these pins high: 0 to 3, as `--high 0,1,2`, or `dio0` to `dio3`, or `all`.
     #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = parse_dio_pins)]
     high: Vec<u8>,
     /// Drive these pins low.

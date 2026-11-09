@@ -137,8 +137,8 @@ pub enum EnergyCommand {
         #[arg(long = "for", value_name = "DURATION", value_parser = humantime::parse_duration)]
         limit: Option<Duration>,
         /// Write CSV instead: one line per pair, its sequence number, its time in ns since the
-        /// capture started, millivolts, nanoamps and the current range it was read on (low or
-        /// high), then the level of each DIO pin recorded. Each
+        /// capture started, millivolts, nanoamps and the current range it was read on (low, high,
+        /// or under for a pair marked under range), then the level of each DIO pin recorded. Each
         /// edge of those pins is a line of its own, in time order, with only its time and the
         /// levels after it. Markers, if any arrive, are merged in as rows of their own when
         /// recording ends, with marker number and label columns; not into a pipe or terminal.
