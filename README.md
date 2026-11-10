@@ -13,7 +13,7 @@ and in mculink-verge:
   updating many probes, and releases.
 - [The desktop app](docs/desktop-app.md): verge-gui.
 - [Energy capture](docs/energy.md): measuring a target's current and energy on the Pro.
-- [The verge command](docs/command.md): every command and its options.
+- [The verge command](docs/command.md): every command, and the doc for each.
 
 This README is for building verge and making its releases.
 

@@ -111,7 +111,7 @@ directory you name instead, and `--file` takes any image file.
 
 ## Where next
 
-- [The verge command](command.md): every command and its options.
+- [The verge command](command.md): every command, and the doc for each.
 - [The desktop app](desktop-app.md): updates and the Pro's bench, in a window.
 - [Probes and
   jumpers](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/probes.md): what each

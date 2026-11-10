@@ -48,10 +48,9 @@ reply. daplink-rs does not report it. verge recognises the standalone MCU-Link a
 and lists each probe's board.
 
 A Verge image says which boards it runs on, in a [board declaration](#board-declarations) inside the
-image. An image without one runs only on the standalone MCU-Link: builds from before declarations
-existed were made for it alone. verge checks releases and local files against the probe's board. It
-refuses a board the image does not declare, and a board it does not know, such as an MCU-Link MR.
-NXP's firmware goes on any board NXP's firmware supports.
+image. An image without one runs only on the standalone MCU-Link. verge checks releases and local
+files against the probe's board. It refuses a board the image does not declare, and a board it does
+not know, such as an MCU-Link MR. NXP's firmware goes on any board NXP's firmware supports.
 
 A probe in ISP mode cannot say which board it is. `verge isp flash` lists the image's boards when it
 asks you to confirm, but cannot check the probe against them. So `verge isp enter` sends a known
@@ -186,8 +185,7 @@ probe. If opening it fails, the batch tries again for a few polls before it skip
 
 Updates run one at a time, in the order the probes arrived. The batch pauses while another device is
 in ISP mode: an MCU-Link mini, a second probe, or a probe it left out. It says why, and carries on
-once that device is unplugged. It also pauses while a probe without a reported USB port is attached,
-because it follows probes into their bootloader by port.
+once that device is unplugged.
 
 The batch handles each probe once per connection, whatever happened: updated, failed, skipped or
 left in ISP mode. A failure does not stop it. A probe left in ISP mode pauses it until you unplug
@@ -195,17 +193,9 @@ the probe, or flash it again with `verge isp flash` and the batch's image; the p
 and the image. A bootloader that did not restart pauses it too: plug the probe in again to start its
 new image.
 
-If a probe does not come back after its update, the batch carries on. If it comes back later on the
-same port running the image, it counts as current. If it comes back with its old firmware and serial
-number, the batch tries it once more, in arrival order. A second failure leaves it out until the
-batch ends. A different serial number is a different probe on the same port. Probes in ISP mode have
-no serial number, so the batch goes by their port.
-
-The batch knows a returning probe by any serial number it reported. After a failed update, it also
-knows a probe running the image on its earlier port. A local file has no release version to
-recognise. So for a file, the port alone identifies a returning probe only when the write completed,
-the probe did not restart or come back, and it was not running Verge before. If a returning probe is
-not current, the batch updates it again.
+If a probe does not come back after its update, the batch carries on. When it comes back running the
+image, it counts as current. When it comes back with its old firmware, the batch tries it once more.
+A second failure leaves it out until the batch ends.
 
 A finished probe blinks its LEDs until you unplug it or the batch ends, and the batch lists its USB
 port. The last one is listed without blinking, because the batch has ended. Each probe gets a result
@@ -220,9 +210,7 @@ line, and a tally ends the batch:
 Batch done: 1 updated, 1 current, 1 skipped, 0 failed, 0 waiting.
 ```
 
-The tally counts each probe once, unplugged ones included. A failed probe that comes back running
-the image counts as current. An updated probe stays counted as updated when it comes back. A probe
-whose bootloader did not restart counts as failed until it returns.
+The tally counts each probe once, unplugged ones included.
 
 The batch looks for unplugged probes every quarter of a second. Windows keeps a reconnected probe's
 identity, so unplugging and plugging back between two looks counts as one connection.

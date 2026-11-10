@@ -23,8 +23,7 @@ raw ADC codes.
 A capture runs in the probe, not in verge. It goes on from `start` until `stop`, the next start or a
 restart, so a debugger can use the probe meanwhile. verge reaches the capture through Verge Aux, a
 second USB interface that debuggers leave alone. So `power` and the `energy` commands keep working
-while a debugger has the probe open. A Verge build older than Verge Aux answers only once the
-debugger lets go.
+while a debugger has the probe open.
 
 ## Starting and stopping
 
@@ -83,9 +82,8 @@ verge energy watch
 two graphs: current and power. Its title says when the capture holds the high range, and the total's
 line counts the pairs marked under range since the watch began.
 
-The current graph shows every pair, as the lowest and highest in each column. A Verge build older
-than Verge Aux gives only the newest pair at each read, so the graph can miss short peaks. The power
-graph plots each interval's mean from the total, which counts every pair.
+The current graph shows every pair, as the lowest and highest in each column. The power graph plots
+each interval's mean from the total, which counts every pair.
 
 `watch` starts a capture if none runs, and stops only a capture it started. Over a capture that a
 fault stopped, it shows that capture's total, then starts a new one, which clears it. Q, Esc or
@@ -146,13 +144,10 @@ Labels keep UTF-8 text. Backslashes, control characters and other bytes are esca
 reports markers the probe lost; an empty time means the probe reported a loss without a marker to
 place it. A report without a time applies to the whole capture, including an export of part of it.
 
-CSV writes pairs and edges as they arrive. When recording ends with markers to add, verge writes a
-merged copy beside the file, `<name>.<random>.partial`, and swaps it in. Until the swap, the file
-keeps the pairs and edges written so far; a forced quit during the merge can leave the `.partial`
-copy behind. The swap replaces the file, so verge needs to be able to write in its directory, and a
-hard link to the file keeps the unmerged version. A recording with no markers and no marker loss has
-no marker columns. CSV to a pipe or a terminal has none either: verge warns at the first marker and
-leaves the markers out.
+CSV writes pairs and edges as they arrive. When recording ends, verge adds the markers by writing a
+new copy beside the file and swapping it in, so it needs to be able to write in the file's
+directory. A recording with no markers and no marker loss has no marker columns. CSV to a pipe or a
+terminal has none either: verge warns at the first marker and leaves the markers out.
 
 ## For tool authors
 
