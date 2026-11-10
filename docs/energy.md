@@ -132,7 +132,7 @@ line of its own, in time order, with its time and the levels after it.
 ### Markers
 
 A debug session can mark moments in a capture ([Host
-interface](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/HOST-INTERFACE.md#markers-0x94)
+interface](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/host-interface.md#markers-0x94)
 has the command). Markers keep their own times. CSV gives each marker a row of its own, with its
 number and label, in time order among the pairs and edges. A sigrok session carries them in a
 `markers.csv` inside it. That file also gives each marker's `session_time_ns`: its time from the
@@ -152,5 +152,5 @@ terminal has none either: verge warns at the first marker and leaves the markers
 ## For tool authors
 
 The capture's commands, and the energy stream Verge Aux carries, are in [Host
-interface](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/HOST-INTERFACE.md): vendor
-command `0x90` and the energy stream. Holding the high range is `0x90` mode 14.
+interface](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/host-interface.md):
+vendor command `0x90` and the energy stream. Holding the high range is `0x90` mode 14.
