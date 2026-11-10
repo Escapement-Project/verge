@@ -55,7 +55,9 @@ down to tens of nA, which a sleeping target needs. But each switch disturbs the 
 current falls, the probe moves to the low range within about 2 ms, and the low range's sense
 resistor lowers the target's supply. For about a millisecond the target's own decoupling then feeds
 part of its load, so the reading dips below what the target draws. When the current rises again, the
-decoupling recharges in a few microseconds, and the total misses most of that.
+decoupling recharges in a few microseconds, and the total misses most of that. A target can climb
+back to the switch up on the low range alone, again and again. The probe then waits longer before
+each switch down, up to about a second, so it reads such a target mostly on the high range.
 
 `high` holds the high range for the whole capture. Nothing switches, so the reading follows what the
 target draws. But the high range reads small currents unreliably. In the 350 mA setting that starts
