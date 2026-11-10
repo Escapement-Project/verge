@@ -6,6 +6,12 @@ standalone boards. It does not run on an MCU-Link built into an evaluation board
 You install it with verge, a command-line tool. verge also updates Verge, puts NXP's firmware back,
 and drives the Pro's extras. Its desktop app, verge-gui, does the same in a window.
 
+Verge has no release yet. Until the first, there are no archives to download, and verge refuses
+every release because its release key isn't set. Build both yourself instead: verge as
+[Building](../README.md#building) in its README describes, and the firmware as [Building the
+firmware](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/README.md) does. Then
+install the firmware with `verge update --file`.
+
 ## What you need
 
 - A standalone MCU-Link or MCU-Link Pro, and a USB cable.
@@ -70,10 +76,6 @@ verge update
 `update` installs the latest Verge release on the probe. It checks the release's signature and
 checksum before it writes anything. It asks before it downloads, showing the repository, the tag and
 the size, and asks again before it flashes. `--yes` answers both questions for you.
-
-verge's release key is not set yet, so verge refuses every release for now. Until it is, install a
-build of your own with `verge update --file`, as [Building the
-firmware](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/README.md) describes.
 
 A probe running NXP's firmware from V3.122 on updates without a jumper. So does a probe already
 running Verge. Older NXP firmware needs the ISP jumper, fitted before you plug the probe in. verge
