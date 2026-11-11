@@ -728,8 +728,12 @@ fn pictures() {
                 let f = style::face(ui.ctx());
                 let colours = crate::mark::Colours::of(f, true);
                 ui.horizontal(|ui| {
-                    use crate::mark::{BACK, MOVE, SWEEP};
-                    for t in [SWEEP / 2.0, (SWEEP + MOVE + BACK) / 2.0, BACK + SWEEP / 2.0] {
+                    use crate::mark::{BACK, GROW, MOVE, SWEEP};
+                    for t in [
+                        GROW + SWEEP / 2.0,
+                        (SWEEP + MOVE + BACK) / 2.0,
+                        BACK + SWEEP / 2.0,
+                    ] {
                         ui.vertical(|ui| {
                             for (size, geometry) in [
                                 (160.0, &crate::mark::MASTER),
@@ -764,7 +768,7 @@ fn pictures() {
                             crate::tokens::DAY.lume,
                         );
                         for frame in [
-                            crate::mark::at(crate::mark::SWEEP / 2.0),
+                            crate::mark::at(crate::mark::GROW + crate::mark::SWEEP / 2.0),
                             crate::mark::at(crate::mark::BACK + crate::mark::SWEEP / 2.0),
                             crate::mark::Frame::REST,
                         ] {

@@ -129,22 +129,22 @@ pub mod mark {
         pub beam_width: f32,
     }
 
-    pub const SWEEP: f32 = 0.4;
-    pub const MOVE: f32 = 0.2;
-    /// The second sweep starts.
-    pub const BACK: f32 = 1.2;
+    pub const SWEEP: f32 = 0.28;
+    pub const MOVE: f32 = 0.18;
+    /// The second sweep starts; the first starts at `GROW`, once the samples have dimmed.
+    pub const BACK: f32 = 1.16;
     /// At rest again.
-    pub const END: f32 = 1.8;
+    pub const END: f32 = 1.72;
     pub const GROW: f32 = 0.1;
     /// A loop's length, where it loops: the sequence, then a rest on the V.
-    pub const LOOP: f32 = 3.2;
-    /// A sample's move eases out at this power.
+    pub const LOOP: f32 = 3.12;
+    /// A sample's rise eases out at this power.
     pub const EASE: i32 = 3;
-    /// The samples across the 64-unit grid, which time each one's move.
+    /// The samples across the 64-unit grid, which time each one's rise.
     pub const GRID_X: [f32; 7] = [8.0, 16.0, 24.0, 32.0, 40.0, 48.0, 56.0];
     pub const RISER: f32 = 32.0;
     pub const FLOOR_RUN: (f32, f32) = (4.0, 60.0);
-    /// The stems, floor and trace in plate-line at this opacity, under the samples.
+    /// The lines and the dimmed samples in plate-line at this opacity, under the lit samples.
     pub const LINE_OPACITY: f32 = 0.45;
     /// The beam at this, over them.
     pub const BEAM_OPACITY: f32 = 0.6;

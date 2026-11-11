@@ -1,6 +1,8 @@
-//! Verge's mark in motion. A beam sweeps the plate and each sample moves from the V to the
-//! project's step as the beam passes it, grey stems rising from the floor; a hold on the step; the
-//! next sweep wipes back to the V. Every number in it comes from the design tokens
+//! Verge's mark in motion, in tickwave's grammar of a capture taken again. The V dims to grey as a
+//! floor and stems grow under it; a beam sweeps the plate, and as it reaches each sample the grey
+//! one fades and a new one rises in lume from the floor to its place on the project's step, the
+//! riser's stem in lume (the step's edge); a hold, over whose end the step dims; the next sweep
+//! takes the V again the same way. Every number in it comes from the design tokens
 //! (`tokens::mark`, generated from the site repository's design/tokens.toml and design/marks), as
 //! the landing page's does: this file is only how to draw it.
 //!
@@ -9,14 +11,43 @@
 
 use egui::{Color32, CornerRadius, Id, Painter, Rect, Stroke};
 
-pub use crate::tokens::mark::{BACK, END, FITTED_24, Geometry, LOOP, MASTER, MOVE, SWEEP};
-use crate::tokens::mark::{BEAM_OPACITY, EASE, FLOOR_RUN, GRID_X, GROW, LINE_OPACITY, RISER};
+pub use crate::tokens::mark::{BACK, END, FITTED_24, GROW, Geometry, LOOP, MASTER, MOVE, SWEEP};
+use crate::tokens::mark::{BEAM_OPACITY, EASE, FLOOR_RUN, GRID_X, LINE_OPACITY, RISER};
+
+/// Where a sample stands: on the V, as the mark rests, or on the project's step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    V,
+    Step,
+}
+
+/// One sample at one instant.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sample {
+    /// The capture's sample: its place, how far it has risen from the floor to it (0 to 1), and how
+    /// lit (in lume) and how dimmed (in the lines' grey) it is.
+    pub place: Place,
+    pub risen: f32,
+    pub lit: f32,
+    pub dimmed: f32,
+    /// The previous capture's sample, fading once the beam has passed it: its place and how dimmed.
+    pub was: Option<(Place, f32)>,
+}
+
+impl Sample {
+    const REST: Sample = Sample {
+        place: Place::V,
+        risen: 1.0,
+        lit: 1.0,
+        dimmed: 0.0,
+        was: None,
+    };
+}
 
 /// One instant of the sequence, whatever the size it is drawn at.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Frame {
-    /// Each sample's way from the V (0) to the step (1).
-    pub toward_step: [f32; 7],
+    pub samples: [Sample; 7],
     /// The beam's place on the 64-unit grid.
     pub beam: Option<f32>,
     /// The step's trace, from and to, on the 64-unit grid.
@@ -30,7 +61,7 @@ pub struct Frame {
 impl Frame {
     /// The mark at rest.
     pub const REST: Frame = Frame {
-        toward_step: [0.0; 7],
+        samples: [Sample::REST; 7],
         beam: None,
         trace: None,
         lines: 0.0,
@@ -49,17 +80,43 @@ pub fn at(t: f32) -> Frame {
     if !(0.0..END).contains(&t) {
         return Frame::REST;
     }
-    let toward_step = GRID_X.map(|x| {
-        let reached = |t0: f32| ease_out((t - t0 - x / 64.0 * SWEEP) / MOVE);
-        if t < BACK {
-            reached(0.0)
+    // The V dims before the first sweep, the step over the end of the hold.
+    let dim_v = (t / GROW).clamp(0.0, 1.0);
+    let dim_step = ((t - (BACK - GROW)) / GROW).clamp(0.0, 1.0);
+    let samples = GRID_X.map(|x| {
+        let reach = |t0: f32| t0 + x / 64.0 * SWEEP;
+        let risen = |t0: f32| ease_out((t - reach(t0)) / MOVE);
+        if t < reach(GROW) {
+            Sample {
+                place: Place::V,
+                risen: 1.0,
+                lit: 1.0 - dim_v,
+                dimmed: dim_v,
+                was: None,
+            }
+        } else if t < reach(BACK) {
+            let p = risen(GROW);
+            Sample {
+                place: Place::Step,
+                risen: p,
+                lit: p * (1.0 - dim_step),
+                dimmed: p * dim_step,
+                was: Some((Place::V, 1.0 - p)),
+            }
         } else {
-            1.0 - reached(BACK)
+            let p = risen(BACK);
+            Sample {
+                place: Place::V,
+                risen: p,
+                lit: p,
+                dimmed: 0.0,
+                was: Some((Place::Step, 1.0 - p)),
+            }
         }
     });
     let across = |t0: f32| (t - t0) / SWEEP * 64.0;
-    let beam = if t < SWEEP {
-        Some(across(0.0))
+    let beam = if (GROW..GROW + SWEEP).contains(&t) {
+        Some(across(GROW))
     } else if (BACK..BACK + SWEEP).contains(&t) {
         Some(across(BACK))
     } else {
@@ -67,8 +124,10 @@ pub fn at(t: f32) -> Frame {
     };
     // The step's edge, drawn behind the first beam and wiped by the second.
     let (start, finish) = FLOOR_RUN;
-    let trace = if t < SWEEP {
-        Some((start, across(0.0).max(start)))
+    let trace = if t < GROW {
+        None
+    } else if t < GROW + SWEEP {
+        Some((start, across(GROW).max(start)))
     } else if t < BACK {
         Some((start, finish))
     } else if t < BACK + SWEEP {
@@ -80,7 +139,7 @@ pub fn at(t: f32) -> Frame {
     let lines = (t / GROW).min((END - t) / GROW).clamp(0.0, 1.0);
     let settled = ((t - (END - GROW)) / GROW).clamp(0.0, 1.0);
     Frame {
-        toward_step,
+        samples,
         beam,
         trace,
         lines,
@@ -124,8 +183,14 @@ pub fn paint(painter: &Painter, rect: Rect, geometry: &Geometry, frame: &Frame, 
         );
     }
     under(painter, rect, g, frame, colours);
-    for (centre, _) in centres(g, frame) {
-        painter.circle_filled(rect.min + centre * scale, g.radius * scale, colours.lume);
+    for (i, sample) in frame.samples.iter().enumerate() {
+        if sample.lit > 0.0 {
+            painter.circle_filled(
+                rect.min + centre(g, i, sample) * scale,
+                g.radius * scale,
+                colours.lume.gamma_multiply(sample.lit),
+            );
+        }
     }
     beam(painter, rect, g, frame, colours);
 }
@@ -201,42 +266,53 @@ pub fn paint_exact(
     beam(painter, rect, geometry, frame, colours);
 }
 
-/// The samples' centres in the geometry's units, with their index.
-fn centres(g: &Geometry, frame: &Frame) -> [(egui::Vec2, usize); 7] {
-    std::array::from_fn(|i| {
-        let y = g.v[i] + (g.step[i] - g.v[i]) * frame.toward_step[i];
-        (egui::vec2(g.x[i], y), i)
-    })
+/// Sample `i`'s height at `place`, in the geometry's units.
+fn height(g: &Geometry, i: usize, place: Place) -> f32 {
+    match place {
+        Place::V => g.v[i],
+        Place::Step => g.step[i],
+    }
 }
 
-/// The samples' coverage of each pixel of a plate `side` pixels across, row by row, from 8 × 8
-/// samples in each pixel.
+/// Sample `i`'s centre in the geometry's units, risen as far as it has from the floor.
+fn centre(g: &Geometry, i: usize, sample: &Sample) -> egui::Vec2 {
+    let y = g.floor + (height(g, i, sample.place) - g.floor) * sample.risen;
+    egui::vec2(g.x[i], y)
+}
+
+/// The lit samples' coverage of each pixel of a plate `side` pixels across, row by row, from 8 × 8
+/// samples in each pixel, each sample as far as it is lit.
 #[must_use]
 pub fn raster(geometry: &Geometry, frame: &Frame, side: usize) -> Vec<f32> {
     const N: usize = 8;
     let scale = side as f32 / geometry.side;
     let r2 = (geometry.radius * scale).powi(2);
-    let dots = centres(geometry, frame).map(|(c, _)| c * scale);
+    let dots: [(egui::Vec2, f32); 7] = std::array::from_fn(|i| {
+        let sample = &frame.samples[i];
+        (centre(geometry, i, sample) * scale, sample.lit)
+    });
     let in_dot = |x: f32, y: f32| {
         dots.iter()
-            .any(|d| (x - d.x).powi(2) + (y - d.y).powi(2) <= r2)
+            .filter(|(d, _)| (x - d.x).powi(2) + (y - d.y).powi(2) <= r2)
+            .map(|&(_, lit)| lit)
+            .fold(0.0, f32::max)
     };
     (0..side * side)
         .map(|n| {
-            let mut hits = 0;
+            let mut hits = 0.0;
             for a in 0..N {
                 for b in 0..N {
                     let x = (n % side) as f32 + (a as f32 + 0.5) / N as f32;
                     let y = (n / side) as f32 + (b as f32 + 0.5) / N as f32;
-                    hits += usize::from(in_dot(x, y));
+                    hits += in_dot(x, y);
                 }
             }
-            hits as f32 / (N * N) as f32
+            hits / (N * N) as f32
         })
         .collect()
 }
 
-/// The step's trace, the floor and the stems, drawn under the samples.
+/// The step's trace, the floor, the stems and the dimmed samples, drawn under the lit samples.
 fn under(painter: &Painter, rect: Rect, g: &Geometry, frame: &Frame, colours: &Colours) {
     let scale = rect.width() / g.side;
     let at = |x: f32, y: f32| rect.min + egui::vec2(x, y) * scale;
@@ -265,12 +341,39 @@ fn under(painter: &Painter, rect: Rect, g: &Geometry, frame: &Frame, colours: &C
             ),
         ];
         painter.line_segment(floor, line(LINE_OPACITY, g.line));
-        for (centre, _) in centres(g, frame) {
-            let top = g.floor + (centre.y - g.floor) * frame.lines;
-            painter.line_segment(
-                [at(centre.x, g.floor), at(centre.x, top)],
-                line(LINE_OPACITY, g.stem),
-            );
+        let riser = GRID_X.iter().position(|&x| x == RISER);
+        let stem = |x: f32, y: f32, stroke: Stroke| {
+            let top = g.floor + (y - g.floor) * frame.lines;
+            painter.line_segment([at(x, g.floor), at(x, top)], stroke);
+        };
+        for (i, sample) in frame.samples.iter().enumerate() {
+            let lines = frame.lines * LINE_OPACITY;
+            if let Some((place, dimmed)) = sample.was {
+                stem(g.x[i], height(g, i, place), line(dimmed * lines, g.stem));
+            }
+            let c = centre(g, i, sample);
+            if sample.place == Place::Step && riser == Some(i) {
+                // The riser's stem on the step is the step's edge, in lume as its sample is lit.
+                let lume = colours.lume.gamma_multiply(sample.lit * frame.lines);
+                stem(c.x, c.y, Stroke::new(g.stem * scale, lume));
+                stem(c.x, c.y, line(sample.dimmed * lines, g.stem));
+            } else {
+                stem(c.x, c.y, line((sample.lit + sample.dimmed) * lines, g.stem));
+            }
+        }
+    }
+    // The previous capture's samples as they fade, and the capture's own as far as it is dimmed.
+    let radius = g.radius * scale;
+    let grey = |dimmed: f32| colours.line.gamma_multiply(dimmed * LINE_OPACITY);
+    for (i, sample) in frame.samples.iter().enumerate() {
+        if let Some((place, dimmed)) = sample.was
+            && dimmed > 0.0
+        {
+            painter.circle_filled(at(g.x[i], height(g, i, place)), radius, grey(dimmed));
+        }
+        if sample.dimmed > 0.0 {
+            let c = centre(g, i, sample);
+            painter.circle_filled(at(c.x, c.y), radius, grey(sample.dimmed));
         }
     }
 }
@@ -316,21 +419,47 @@ mod tests {
     fn the_sequence_starts_and_ends_on_the_mark() {
         assert_eq!(at(-0.1), Frame::REST);
         assert_eq!(at(END), Frame::REST);
-        // At the start only the beam shows, at the plate's left edge.
+        // At the start it is the mark: every sample lit on the V, no lines, no beam.
         let start = at(0.0);
-        assert_eq!(start.toward_step, [0.0; 7]);
+        assert_eq!(start.samples, Frame::REST.samples);
         assert_eq!(start.lines, 0.0);
-        assert_eq!(start.beam, Some(0.0));
-        // Just before the end every sample is back on the V and the lines nearly gone.
+        assert_eq!(start.beam, None);
+        // Just before the end every sample is lit on the V again and the lines nearly gone.
         let late = at(END - 0.01);
-        assert!(late.toward_step.iter().all(|&p| p < 1e-3), "{late:?}");
+        assert!(
+            late.samples.iter().all(|s| s.place == Place::V
+                && s.risen > 1.0 - 1e-3
+                && s.lit > 1.0 - 1e-3
+                && s.was.is_none_or(|(_, dimmed)| dimmed < 1e-3)),
+            "{late:?}"
+        );
         assert!(late.lines < 0.1);
+    }
+
+    #[test]
+    fn the_v_dims_before_the_beam_reaches_it() {
+        // Once dimmed, as the beam sets off, every sample is grey on the V.
+        let f = at(GROW);
+        assert!(
+            f.samples
+                .iter()
+                .all(|s| s.place == Place::V && s.lit == 0.0 && s.dimmed == 1.0)
+        );
+        assert_eq!(f.beam, Some(0.0));
+        assert_eq!(f.lines, 1.0);
     }
 
     #[test]
     fn the_step_holds_with_its_stems_and_trace() {
         let hold = at((SWEEP + MOVE + BACK) / 2.0);
-        assert_eq!(hold.toward_step, [1.0; 7]);
+        let on_step = Sample {
+            place: Place::Step,
+            risen: 1.0,
+            lit: 1.0,
+            dimmed: 0.0,
+            was: Some((Place::V, 0.0)),
+        };
+        assert_eq!(hold.samples, [on_step; 7]);
         assert_eq!(hold.lines, 1.0);
         assert_eq!(hold.trace, Some((4.0, 60.0)));
         assert_eq!(hold.beam, None);
@@ -338,12 +467,16 @@ mod tests {
 
     #[test]
     fn the_beam_moves_each_sample_in_turn() {
-        // A third of the way through the first sweep, the left samples have started and the right
-        // ones have not.
-        let f = at(SWEEP / 3.0);
-        assert!(f.toward_step[0] > 0.0);
-        assert_eq!(f.toward_step[6], 0.0);
-        assert!(f.toward_step.windows(2).all(|w| w[0] >= w[1]));
+        // A third of the way through the first sweep, the left samples are rising to the step and
+        // the right ones are still dimmed on the V.
+        let f = at(GROW + SWEEP / 3.0);
+        let toward_step = f
+            .samples
+            .map(|s| if s.place == Place::Step { s.risen } else { 0.0 });
+        assert!(toward_step[0] > 0.0);
+        assert_eq!(f.samples[6].place, Place::V);
+        assert!(f.samples[6].was.is_none());
+        assert!(toward_step.windows(2).all(|w| w[0] >= w[1]));
     }
 
     #[test]
