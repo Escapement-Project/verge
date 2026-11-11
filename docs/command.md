@@ -32,7 +32,6 @@ Pro needs no serial. `list` and `release` show only the probe `--serial` names.
 | `release` | shows a Verge release, and how each attached probe compares to it | [below](#release) |
 | `inspect` | says what an image file puts into flash | [below](#inspect) |
 | `read` | reads target memory over SWD, JTAG or cJTAG | [below](#read) |
-| `cjtag` | shows or limits the cJTAG scan formats a probe running Verge offers | [Wires and clocks](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/wires.md#cjtag) |
 | `dio` | drives and reads the DIO pins of an MCU-Link Pro running Verge | [The Pro](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/pro.md#dio-pins) |
 | `power` | reads or switches the target supply of an MCU-Link Pro running Verge | [The Pro](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/pro.md#target-supply) |
 | `energy` | measures a target's voltage, current and energy through an MCU-Link Pro running Verge | [Energy capture](energy.md) |

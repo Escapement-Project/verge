@@ -124,20 +124,13 @@ enum Command {
     /// Read target memory through a probe over SWD, JTAG or cJTAG, as probe-rs's read does.
     ///
     /// Prints probe-rs's hex table on stdout and nothing else: each line is its address and eight
-    /// values, four for b64. cJTAG works on a unit running Verge; `verge cjtag --formats` picks
-    /// which formats it offers the target.
+    /// values, four for b64. cJTAG works on a unit running Verge.
     Read(read::ReadArgs),
     /// Read an image file and say what it puts into flash. Touches no USB device.
     Inspect {
         /// An ELF or S-record file.
         file: PathBuf,
     },
-    /// Show or limit the cJTAG scan formats a unit running Verge offers a host.
-    ///
-    /// A host frames the format it prefers of those both the unit and the target have. --oscan1-only leaves it
-    /// OScan1, which is what to look at on an analyser, and --formats picks a set, so that a host
-    /// can be held to one format to test or compare it. A limit lasts until the unit restarts.
-    Cjtag(CjtagArgs),
     /// Drive and read the four DIO pins on an MCU-Link Pro's J19 header, on a unit running Verge.
     ///
     /// With no options it reads them. --high and --low make pins outputs at that level, and
@@ -200,36 +193,6 @@ fn dio_names(mask: u8) -> String {
         .map(|n| format!("DIO{n}"))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-#[derive(Args)]
-struct CjtagArgs {
-    /// Offer OScan1 alone.
-    #[arg(long, conflicts_with_all = ["all", "formats"])]
-    oscan1_only: bool,
-    /// Offer every format the image frames again.
-    #[arg(long, conflicts_with = "formats")]
-    all: bool,
-    /// Offer these formats, by name or SCNFMT number: `--formats oscan1,oscan5` or `9,13`. OScan1
-    /// stays offered whatever the list says, and a format the image does not frame is left out.
-    #[arg(long, value_delimiter = ',', value_parser = parse_scan_format)]
-    formats: Option<Vec<u32>>,
-}
-
-/// A scan format named as `scan_format_name` names it, in any case, or its SCNFMT number.
-fn parse_scan_format(text: &str) -> Result<u32, String> {
-    if let Ok(number) = text.parse::<u32>() {
-        return if number < 32 {
-            Ok(number)
-        } else {
-            Err(format!("SCNFMT {number} is past 31"))
-        };
-    }
-    (0..32)
-        .find(|&n| dap::scan_format_name(n).eq_ignore_ascii_case(text))
-        .ok_or_else(|| {
-            format!("{text} is not a scan format: name one as OScan5 or give its SCNFMT, 13")
-        })
 }
 
 #[derive(Subcommand)]
@@ -513,7 +476,6 @@ fn run<B: Bus + Sync, H: Http>(
     match &cli.command {
         Some(Command::Batch(args)) => batch(bus, github, args, cancel, stop),
         None | Some(Command::List) => list(bus, cli.verbose > 0, serial),
-        Some(Command::Cjtag(args)) => cjtag(bus, args, serial),
         Some(Command::Dio(args)) => dio(bus, args, serial),
         Some(Command::Power(args)) => energy::power(bus, args, serial),
         Some(Command::Energy(command)) => energy::energy(bus, command, serial, cancel),
@@ -563,16 +525,6 @@ fn choose<'a>(units: &[&'a Unit]) -> Result<&'a Unit> {
         .default(0)
         .interact()?;
     Ok(units[index])
-}
-
-fn runs_ours(unit: &Unit) -> bool {
-    matches!(
-        unit.state,
-        State::Probe {
-            firmware: Firmware::Ours(_),
-            ..
-        }
-    )
 }
 
 fn pro_running_ours(unit: &Unit) -> bool {
@@ -650,7 +602,12 @@ fn list<B: Bus>(bus: &B, verbose: bool, serial: Option<&str>) -> Result<()> {
             if let Firmware::Ours(ours) = firmware {
                 field("capabilities", Some(&ours.flag_names().join(", ")))?;
                 if let Some(names) = ours.scan_format_names() {
-                    field("cJTAG", Some(&names.join(", ")))?;
+                    let names = if names.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        names.join(", ")
+                    };
+                    field("cJTAG", Some(&names))?;
                 }
             }
         }
@@ -1193,58 +1150,6 @@ fn arm_refusal(error: &ArmError) -> anyhow::Error {
         ),
         ArmError::Image(_) => anyhow::anyhow!("{error}"),
     }
-}
-
-fn cjtag<B: Bus>(bus: &B, args: &CjtagArgs, serial: Option<&str>) -> Result<()> {
-    let units = detect_named(bus, serial).context("looking for MCU-Links")?;
-    let unit = pick_unit(&units, serial, runs_ours)?;
-    let serial = unit.serial().unwrap_or("the unit");
-    if let State::Held { .. } = unit.state {
-        bail!(
-            "another program holds {serial}'s CMSIS-DAP interface, and the cJTAG formats are set only through it"
-        );
-    }
-    let State::Probe {
-        firmware: Firmware::Ours(ours),
-        ..
-    } = &unit.state
-    else {
-        bail!(
-            "{serial} is {}, not running Verge, so it has no cJTAG formats to show or limit",
-            unit.state
-        );
-    };
-    if ours.version < 4 {
-        bail!(
-            "{serial} runs build {}, older than the scan formats: it frames OScan1 alone",
-            ours.firmware
-        );
-    }
-    let mut link = bus
-        .open_dap(&unit.device)
-        .with_context(|| format!("opening {serial}"))?;
-    let mask = if args.oscan1_only {
-        Some(1 << dap::SCNFMT_OSCAN1)
-    } else if args.all {
-        Some(u32::MAX)
-    } else {
-        args.formats
-            .as_ref()
-            .map(|formats| formats.iter().fold(0, |mask, n| mask | 1 << n))
-    };
-    if let Some(mask) = mask {
-        dap::set_scan_formats(&mut link, mask).with_context(|| format!("limiting {serial}"))?;
-    }
-    let names = dap::identify(&mut link)?
-        .and_then(|ours| ours.scan_format_names())
-        .unwrap_or_default();
-    let until = if args.oscan1_only || args.formats.is_some() {
-        ", until it restarts"
-    } else {
-        ""
-    };
-    outputln!("{serial} offers cJTAG {}{until}.", names.join(", "));
-    Ok(())
 }
 
 fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {

@@ -33,7 +33,6 @@ fn closed_stdout_ends_commands_quietly() {
         ("bench", vec!["--help"]),
         ("bench", vec!["--version"]),
         ("bench", vec!["list", "-v"]),
-        ("ours-pro", vec!["cjtag"]),
         ("ours-pro", vec!["dio"]),
         ("ours-pro", vec!["power"]),
         ("ours-pro", vec!["energy", "latest"]),
@@ -1069,59 +1068,6 @@ fn isp_flash_by_port_beside_a_mini_refuses_first() {
 }
 
 #[test]
-fn cjtag_limits_the_formats_to_oscan1() {
-    tool("ours-pro")
-        .args(["cjtag", "--oscan1-only"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "offers cJTAG OScan1, until it restarts.",
-        ));
-}
-
-#[test]
-fn cjtag_shows_the_formats() {
-    tool("ours-pro")
-        .arg("cjtag")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "offers cJTAG OScan1, OScan2, OScan5.",
-        ));
-}
-
-#[test]
-fn cjtag_limits_the_formats_to_a_set() {
-    tool("ours-pro")
-        .args(["cjtag", "--formats", "oscan5,9"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "offers cJTAG OScan1, OScan5, until it restarts.",
-        ));
-}
-
-#[test]
-fn cjtag_refuses_an_unknown_format() {
-    tool("ours-pro")
-        .args(["cjtag", "--formats", "oscan9"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("oscan9 is not a scan format"));
-}
-
-#[test]
-fn cjtag_refuses_stock() {
-    tool("pro")
-        .args(["cjtag", "--oscan1-only"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "is stock V3.172, not running Verge",
-        ));
-}
-
-#[test]
 fn dio_reads_the_pins() {
     tool("ours-pro")
         .arg("dio")
@@ -1524,14 +1470,16 @@ fn energy_refuses_stock() {
 #[test]
 fn serial_goes_before_the_command_or_after_it() {
     for args in [
-        ["--serial", "CJ3E7AB3E4", "cjtag"],
-        ["cjtag", "--serial", "CJ3E7AB3E4"],
+        ["--serial", "CJ3E7A91C2", "power"],
+        ["power", "--serial", "CJ3E7A91C2"],
     ] {
         tool("ours-pro-and-plain")
             .args(args)
             .assert()
             .success()
-            .stdout(predicate::str::contains("CJ3E7AB3E4 offers cJTAG"));
+            .stdout(predicate::str::contains(
+                "CJ3E7A91C2's target supply is off.",
+            ));
     }
 }
 
@@ -1549,7 +1497,7 @@ fn a_pro_command_takes_the_only_pro_beside_a_plain_board() {
 #[test]
 fn several_units_that_fit_need_a_serial_off_a_terminal() {
     tool("ours-pro-and-plain")
-        .arg("cjtag")
+        .arg("update")
         .assert()
         .failure()
         .stderr(predicate::str::contains(
