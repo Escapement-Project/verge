@@ -56,7 +56,8 @@ declares. Touches no USB device. [Board declarations](updating.md#board-declarat
 ## `read`
 
 ```
-verge read --chip CHIP [--protocol swd|jtag|cjtag] [--speed KHZ] [--time] WIDTH ADDRESS WORDS
+verge read --chip CHIP [--protocol swd|jtag|cjtag] [--cjtag-format FORMAT] [--speed KHZ] [--time]
+           WIDTH ADDRESS WORDS
 ```
 
 Reads target memory through a probe over SWD, JTAG or cJTAG, as probe-rs's `read` does. It prints
@@ -71,6 +72,7 @@ resumes any halted core when it finishes.
 | `WORDS` | how many values to read |
 | `--chip CHIP` | the target chip, as probe-rs names it |
 | `--protocol` | the wire: `swd`, the default, `jtag` or `cjtag`. cJTAG works on a probe running Verge |
+| `--cjtag-format FORMAT` | with `cjtag`, hold the target to one scan format: `oscan1`, `oscan2`, `oscan5` or `oscan6`. The target switches to it where it has it, and stays in OScan1 where not. Left out, the target runs the fastest format both it and the probe have |
 | `--speed KHZ` | the wire clock in kHz; the probe's default when left out |
 | `--time` | print the attach and read times on stderr |
 

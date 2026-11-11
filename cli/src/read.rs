@@ -6,8 +6,8 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use escapement_verge_probe::probe_rs::MemoryInterface;
-use escapement_verge_probe::probe_rs::probe::WireProtocol;
 use escapement_verge_probe::probe_rs::probe::list::Lister;
+use escapement_verge_probe::probe_rs::probe::{ScanFormat, WireProtocol};
 
 #[derive(Args)]
 pub struct ReadArgs {
@@ -20,6 +20,10 @@ pub struct ReadArgs {
     /// The wire clock in kHz. The probe's default when left out.
     #[arg(long)]
     speed: Option<u32>,
+    /// Hold cJTAG to one scan format. The target is switched to it where it has it, and stays in
+    /// OScan1 where not. Left out, the target runs the fastest format both it and the probe have.
+    #[arg(long, value_enum, value_name = "FORMAT")]
+    cjtag_format: Option<CjtagFormat>,
     /// Print the attach and read times on stderr.
     #[arg(long)]
     time: bool,
@@ -65,7 +69,7 @@ fn pick_probe() -> Result<Option<String>> {
     Ok(Some(serial))
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Wire {
     Swd,
     Jtag,
@@ -83,6 +87,25 @@ impl From<Wire> for WireProtocol {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum CjtagFormat {
+    Oscan1,
+    Oscan2,
+    Oscan5,
+    Oscan6,
+}
+
+impl From<CjtagFormat> for ScanFormat {
+    fn from(format: CjtagFormat) -> Self {
+        match format {
+            CjtagFormat::Oscan1 => Self::OScan1,
+            CjtagFormat::Oscan2 => Self::OScan2,
+            CjtagFormat::Oscan5 => Self::OScan5,
+            CjtagFormat::Oscan6 => Self::OScan6,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum Width {
     B8,
     B16,
@@ -91,6 +114,9 @@ enum Width {
 }
 
 pub fn read(args: &ReadArgs, serial: Option<&str>) -> Result<()> {
+    if args.cjtag_format.is_some() && args.protocol != Wire::Cjtag {
+        anyhow::bail!("--cjtag-format needs --protocol cjtag");
+    }
     let picked = match serial {
         Some(_) => None,
         None => pick_probe()?,
@@ -101,6 +127,7 @@ pub fn read(args: &ReadArgs, serial: Option<&str>) -> Result<()> {
         &args.chip,
         args.protocol.into(),
         args.speed,
+        args.cjtag_format.map(Into::into),
     )?;
     let attached = Instant::now();
     let data = read_memory(

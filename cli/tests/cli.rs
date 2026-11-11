@@ -1068,6 +1068,26 @@ fn isp_flash_by_port_beside_a_mini_refuses_first() {
 }
 
 #[test]
+fn a_cjtag_format_needs_cjtag() {
+    tool("ours-pro")
+        .args([
+            "read",
+            "--chip",
+            "CC1312R",
+            "--cjtag-format",
+            "oscan2",
+            "b32",
+            "0",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--cjtag-format needs --protocol cjtag",
+        ));
+}
+
+#[test]
 fn dio_reads_the_pins() {
     tool("ours-pro")
         .arg("dio")
