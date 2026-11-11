@@ -27,10 +27,11 @@ Each verge release has one archive per system:
 - Windows on x86_64;
 - macOS, one program for both Apple silicon and Intel.
 
-An archive holds both programs, `verge` and `verge-gui`, with `LICENSE` and
-`THIRD-PARTY-LICENSES.html`, the licence of every crate inside. Beside each archive are a `.sha256`
-checksum and a minisign signature, made with the same key that signs the firmware. To check an
-archive before you unpack it:
+The Linux and Windows archives hold both programs, `verge` and `verge-gui`. The macOS archive holds
+`verge` alone; on macOS, build `verge-gui` from source ([Building](../README.md#building)). Each
+archive also holds `LICENSE` and `THIRD-PARTY-LICENSES.html`, the licence of every crate inside.
+Beside each archive are a `.sha256` checksum and a minisign signature, made with the same key that
+signs the firmware. To check an archive before you unpack it:
 
 ```
 minisign -V -P <the public key> -m verge-v0.1.0-x86_64-linux.tar.gz

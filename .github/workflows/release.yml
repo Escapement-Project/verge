@@ -1,14 +1,15 @@
 # Builds verge and verge-gui for a version tag, signs each archive, and attaches them to the tag's
 # release:
 #
-#   verge-<tag>-<platform>.<tar.gz|zip>          both binaries, LICENSE, and
+#   verge-<tag>-<platform>.<tar.gz|zip>          the binaries, LICENSE, and
 #                                                THIRD-PARTY-LICENSES.html for what they link
 #   verge-<tag>-<platform>.<ext>.sha256          sha256sum's line for it
 #   verge-<tag>-<platform>.<ext>.minisig         minisign's signature; its trusted comment names
 #                                                the file and the tag
 #
 # Platforms: x86_64-linux (built on the oldest Ubuntu runner, so the binaries need no newer glibc
-# than it has), x86_64-windows, and universal-macos (arm64 and x86_64 joined by lipo).
+# than it has), x86_64-windows, and universal-macos (arm64 and x86_64 joined by lipo). The macOS
+# archive carries verge alone: verge-gui is built from source there until it ships as a signed app.
 #
 # The same split as the firmware's release workflow, with the same key: `build` has no secret,
 # `sign` runs only minisign in the `release` environment, which holds the key and waits for a
@@ -32,12 +33,15 @@ jobs:
           - platform: x86_64-linux
             runner: ubuntu-22.04
             targets: x86_64-unknown-linux-gnu
+            tools: verge verge-gui
           - platform: x86_64-windows
             runner: windows-latest
             targets: x86_64-pc-windows-msvc
+            tools: verge verge-gui
           - platform: universal-macos
             runner: macos-latest
             targets: aarch64-apple-darwin x86_64-apple-darwin
+            tools: verge
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -76,8 +80,11 @@ jobs:
       - name: Build
         run: |
           set -eu
+          packages=""
+          for tool in ${{ matrix.tools }}; do packages="$packages -p escapement-$tool"; done
           for target in ${{ matrix.targets }}; do
-            cargo build --release --locked --target "$target" -p escapement-verge -p escapement-verge-gui
+            # shellcheck disable=SC2086
+            cargo build --release --locked --target "$target" $packages
           done
 
       - name: Package
@@ -88,24 +95,31 @@ jobs:
           set -- ${{ matrix.targets }}
           case "${{ matrix.platform }}" in
             universal-macos)
-              for tool in verge verge-gui; do
+              for tool in ${{ matrix.tools }}; do
                 lipo -create -output "pkg/$stem/$tool" \
                   "target/$1/release/$tool" "target/$2/release/$tool"
               done
               ;;
             x86_64-windows)
-              cp "target/$1/release/verge.exe" "target/$1/release/verge-gui.exe" "pkg/$stem/"
+              for tool in ${{ matrix.tools }}; do cp "target/$1/release/$tool.exe" "pkg/$stem/"; done
               ;;
             *)
-              cp "target/$1/release/verge" "target/$1/release/verge-gui" "pkg/$stem/"
+              for tool in ${{ matrix.tools }}; do cp "target/$1/release/$tool" "pkg/$stem/"; done
               ;;
           esac
           cp LICENSE "pkg/$stem/"
-          # The licences of everything the binaries link, for every target in the archive.
+          # The licences of everything the binaries link, for every target in the archive. Without
+          # verge-gui, the CLI's package alone, so the list holds only what the archive links.
           about_targets=""
           for target in ${{ matrix.targets }}; do about_targets="$about_targets --target $target"; done
+          about_scope=""
+          case " ${{ matrix.tools }} " in
+            *" verge-gui "*) ;;
+            *) about_scope="--manifest-path cli/Cargo.toml" ;;
+          esac
           # shellcheck disable=SC2086
-          cargo about generate --locked --fail $about_targets -o "pkg/$stem/THIRD-PARTY-LICENSES.html" about.hbs
+          cargo about generate --locked --fail -c about.toml $about_scope $about_targets \
+            -o "pkg/$stem/THIRD-PARTY-LICENSES.html" about.hbs
           if [ "${{ matrix.platform }}" = x86_64-windows ]; then
             name="$stem.zip"
             (cd pkg && 7z a -tzip "../out/$name" "$stem" > /dev/null)
