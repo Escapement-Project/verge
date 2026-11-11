@@ -103,7 +103,7 @@ pub struct Capture(pub Log);
 impl<S: Subscriber> Layer<S> for Capture {
     fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
         let target = event.metadata().target();
-        if !target.starts_with("verge") {
+        if !(target.starts_with("verge_gui") || target.starts_with("escapement_verge_probe")) {
             return;
         }
         let mut message = Message(String::new());

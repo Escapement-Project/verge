@@ -1,5 +1,5 @@
 [package]
-name = "verge-gui"
+name = "escapement-verge-gui"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -18,7 +18,7 @@ rfd = "0.17.2"
 serde_json = "1.0.154"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-verge-probe = { version = "0.1.0", path = "../../verge-probe", features = ["capture"] }
+escapement-verge-probe = { version = "0.1.0", path = "../../verge-probe", features = ["capture"] }
 
 [lints]
 workspace = true
@@ -26,13 +26,13 @@ workspace = true
 [features]
 # `--simulate`, the simulated bench, for development with `--features simulate`; off in release
 # builds. The tests take the simulator from verge-probe's dev-dependency below.
-simulate = ["verge-probe/simulate"]
+simulate = ["escapement-verge-probe/simulate"]
 
 [dev-dependencies]
 egui_kittest = { version = "0.37.0", features = ["wgpu", "snapshot"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 tempfile = "3.27.0"
-verge-probe = { path = "../../verge-probe", features = ["simulate"] }
+escapement-verge-probe = { path = "../../verge-probe", features = ["simulate"] }
 
 [[bin]]
 name = "verge-gui"

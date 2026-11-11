@@ -8,10 +8,12 @@ use std::time::Duration;
 
 use crate::output::outputln;
 use anyhow::{Context, Result, anyhow, bail};
-use verge_probe::aux::{Aux, AuxLink};
-use verge_probe::record::Sink;
-use verge_probe::stream::{Converter, Edge, EndReason, Markers, Message, Sample, Total};
-use verge_probe::{Bus, Cancel, CommandError, EnergyCaptureSample, EnergyError, VergeControl};
+use escapement_verge_probe::aux::{Aux, AuxLink};
+use escapement_verge_probe::record::Sink;
+use escapement_verge_probe::stream::{Converter, Edge, EndReason, Markers, Message, Sample, Total};
+use escapement_verge_probe::{
+    Bus, Cancel, CommandError, EnergyCaptureSample, EnergyError, VergeControl,
+};
 
 pub struct Options {
     pub out: PathBuf,
@@ -325,10 +327,10 @@ impl Writer {
 
 #[cfg(test)]
 mod tests {
+    use escapement_verge_probe::record::samplerate;
     use std::fs::File;
     use std::io::Read;
     use std::path::Path;
-    use verge_probe::record::samplerate;
     const CHUNK: usize = 1 << 20;
 
     use super::*;
@@ -339,7 +341,7 @@ mod tests {
             time_ns: time_ms * 1_000_000,
             millivolts,
             nanoamps,
-            range: Some(verge_probe::stream::CurrentRange::Low),
+            range: Some(escapement_verge_probe::stream::CurrentRange::Low),
             under_range: false,
         }
     }
@@ -399,7 +401,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut samples = [sample(1, 0, 3300, 20_000), sample(2, 1, 3300, 5_000_000)];
         for s in &mut samples {
-            s.range = Some(verge_probe::stream::CurrentRange::High);
+            s.range = Some(escapement_verge_probe::stream::CurrentRange::High);
         }
         samples[0].under_range = true;
         let path = dir.path().join("under.sr");
@@ -535,7 +537,7 @@ mod tests {
     struct Playback(std::collections::VecDeque<Option<Vec<u8>>>);
 
     impl AuxLink for Playback {
-        fn write(&mut self, request: &[u8]) -> Result<(), verge_probe::dap::LinkError> {
+        fn write(&mut self, request: &[u8]) -> Result<(), escapement_verge_probe::dap::LinkError> {
             if request == [0x82] {
                 let mut info = b"\x82CJTAG\x06\x00\x00\x01".to_vec();
                 info.extend_from_slice(&0u32.to_le_bytes());
@@ -547,11 +549,11 @@ mod tests {
             Ok(())
         }
 
-        fn read(&mut self, _: Duration) -> Result<Vec<u8>, verge_probe::dap::LinkError> {
+        fn read(&mut self, _: Duration) -> Result<Vec<u8>, escapement_verge_probe::dap::LinkError> {
             self.0
                 .pop_front()
                 .flatten()
-                .ok_or(verge_probe::dap::LinkError::Timeout)
+                .ok_or(escapement_verge_probe::dap::LinkError::Timeout)
         }
     }
 
@@ -617,7 +619,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lost.csv");
         let writer = Writer::spawn(Sink::create(&path, true).unwrap());
-        let bus = verge_probe::sim::SimBus::default();
+        let bus = escapement_verge_probe::sim::SimBus::default();
         let recorded = stream(
             &bus,
             "the unit",
@@ -664,7 +666,7 @@ mod tests {
         let path = dir.path().join("markers.csv");
         let writer = Writer::spawn(Sink::create(&path, true).unwrap());
         stream(
-            &verge_probe::sim::SimBus::default(),
+            &escapement_verge_probe::sim::SimBus::default(),
             "unit",
             &mut playback_control(&mut aux),
             &writer,
@@ -694,7 +696,7 @@ mod tests {
     }
 
     fn edges(lost: bool, edges: &[(u64, u8)]) -> Vec<u8> {
-        verge_probe::stream::Edges::new(
+        escapement_verge_probe::stream::Edges::new(
             u8::from(lost),
             edges
                 .iter()
@@ -726,7 +728,7 @@ mod tests {
         let path = dir.path().join("held.csv");
         let writer = Writer::spawn(Sink::create(&path, true).unwrap());
         let recorded = stream(
-            &verge_probe::sim::SimBus::default(),
+            &escapement_verge_probe::sim::SimBus::default(),
             "the unit",
             &mut playback_control(&mut aux),
             &writer,
@@ -782,7 +784,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let writer = Writer::spawn(Sink::create(&dir.path().join("tail.csv"), true).unwrap());
         let recorded = stream(
-            &verge_probe::sim::SimBus::default(),
+            &escapement_verge_probe::sim::SimBus::default(),
             "the unit",
             &mut playback_control(&mut aux),
             &writer,
@@ -796,10 +798,10 @@ mod tests {
     }
 
     /// A probe that turns the start down, as one whose calibration failed would.
-    struct RefuseStart(verge_probe::sim::SimAux);
+    struct RefuseStart(escapement_verge_probe::sim::SimAux);
 
     impl AuxLink for RefuseStart {
-        fn write(&mut self, request: &[u8]) -> Result<(), verge_probe::dap::LinkError> {
+        fn write(&mut self, request: &[u8]) -> Result<(), escapement_verge_probe::dap::LinkError> {
             let mut request = request.to_vec();
             if request.starts_with(&[0x90, 9]) {
                 request[2..6].fill(0);
@@ -807,14 +809,23 @@ mod tests {
             self.0.write(&request)
         }
 
-        fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, verge_probe::dap::LinkError> {
+        fn read(
+            &mut self,
+            timeout: Duration,
+        ) -> Result<Vec<u8>, escapement_verge_probe::dap::LinkError> {
             self.0.read(timeout)
         }
     }
 
-    fn pro_link() -> (verge_probe::sim::SimBus, verge_probe::UsbDevice) {
-        let bus = verge_probe::sim::SimBus::scenario("ours-pro").unwrap();
-        let device = verge_probe::detect(&bus).unwrap().remove(0).device;
+    fn pro_link() -> (
+        escapement_verge_probe::sim::SimBus,
+        escapement_verge_probe::UsbDevice,
+    ) {
+        let bus = escapement_verge_probe::sim::SimBus::scenario("ours-pro").unwrap();
+        let device = escapement_verge_probe::detect(&bus)
+            .unwrap()
+            .remove(0)
+            .device;
         (bus, device)
     }
 
@@ -832,14 +843,20 @@ mod tests {
     #[test]
     fn missing_header_times_out_even_while_pairs_keep_arriving() {
         struct Headerless {
-            inner: verge_probe::sim::SimAux,
-            bus: verge_probe::sim::SimBus,
+            inner: escapement_verge_probe::sim::SimAux,
+            bus: escapement_verge_probe::sim::SimBus,
         }
         impl AuxLink for Headerless {
-            fn write(&mut self, request: &[u8]) -> Result<(), verge_probe::dap::LinkError> {
+            fn write(
+                &mut self,
+                request: &[u8],
+            ) -> Result<(), escapement_verge_probe::dap::LinkError> {
                 self.inner.write(request)
             }
-            fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, verge_probe::dap::LinkError> {
+            fn read(
+                &mut self,
+                timeout: Duration,
+            ) -> Result<Vec<u8>, escapement_verge_probe::dap::LinkError> {
                 self.bus.sleep(Duration::from_millis(100));
                 let message = self.inner.read(timeout)?;
                 Ok(if message.first() == Some(&0xa1) {
@@ -878,8 +895,11 @@ mod tests {
     #[test]
     fn zero_duration_and_file_failure_end_an_attached_stream() {
         for file_failure in [false, true] {
-            let bus = verge_probe::sim::SimBus::scenario("ours-pro-energy").unwrap();
-            let device = verge_probe::detect(&bus).unwrap().remove(0).device;
+            let bus = escapement_verge_probe::sim::SimBus::scenario("ours-pro-energy").unwrap();
+            let device = escapement_verge_probe::detect(&bus)
+                .unwrap()
+                .remove(0)
+                .device;
             let dir = tempfile::tempdir().unwrap();
             let out = if file_failure {
                 dir.path().to_owned()

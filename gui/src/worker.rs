@@ -8,16 +8,16 @@ use std::time::Duration;
 
 use std::path::PathBuf;
 
-use verge_probe::batch::{
+use escapement_verge_probe::batch::{
     ArmError, Armed, Batch, Entry, Filter, Observer, Record, RecordWriter, Status, Tally,
     open_record,
 };
-use verge_probe::dap::EntryError;
-use verge_probe::progress::{Cancel, Progress, Step};
-use verge_probe::release::{Download, GitHub, Http, Release, ReleaseError};
-use verge_probe::source::{self, LoadError, Loaded, Source};
-use verge_probe::update::{self, Outcome, Timing, UpdateError};
-use verge_probe::{Bus, Unit, detect};
+use escapement_verge_probe::dap::EntryError;
+use escapement_verge_probe::progress::{Cancel, Progress, Step};
+use escapement_verge_probe::release::{Download, GitHub, Http, Release, ReleaseError};
+use escapement_verge_probe::source::{self, LoadError, Loaded, Source};
+use escapement_verge_probe::update::{self, Outcome, Timing, UpdateError};
+use escapement_verge_probe::{Bus, Unit, detect};
 
 pub enum Request {
     Bench(crate::bench_worker::Command),

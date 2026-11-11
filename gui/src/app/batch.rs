@@ -6,11 +6,13 @@ use std::num::NonZeroUsize;
 use std::path::{Path as FsPath, PathBuf};
 
 use egui::{Color32, Margin, Stroke, Ui, vec2};
-use verge_probe::batch::{self, Board, Filter, OursFilter, Record, Settled, StockFilter, Tally};
-use verge_probe::paths::ISP_IDENTITY_WARNING;
-use verge_probe::progress::{Cancel, Unit as StepUnit};
-use verge_probe::source::{ImageVersion, Source};
-use verge_probe::version::StockVersion;
+use escapement_verge_probe::batch::{
+    self, Board, Filter, OursFilter, Record, Settled, StockFilter, Tally,
+};
+use escapement_verge_probe::paths::ISP_IDENTITY_WARNING;
+use escapement_verge_probe::progress::{Cancel, Unit as StepUnit};
+use escapement_verge_probe::source::{ImageVersion, Source};
+use escapement_verge_probe::version::StockVersion;
 
 use super::{
     Choice, Current, Fill, Picked, VergeApp, edged, field, frame, kib, label, outline, progress,

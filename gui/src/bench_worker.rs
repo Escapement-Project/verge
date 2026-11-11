@@ -1,15 +1,15 @@
 //! Probe controls and continuous acquisition; called only by the USB worker.
 
 use anyhow::{Context, Result, bail};
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
-use verge_probe::aux::Aux;
-use verge_probe::capture::Recorder;
-use verge_probe::stream::{EndReason, Message};
-use verge_probe::{
+use escapement_verge_probe::aux::Aux;
+use escapement_verge_probe::capture::Recorder;
+use escapement_verge_probe::stream::{EndReason, Message};
+use escapement_verge_probe::{
     Bus, CommandError, DioState, EnergyCaptureSample, EnergyError, Refused, Unit, VergeControl,
 };
-use verge_probe::{EnergyRanges, pro};
+use escapement_verge_probe::{EnergyRanges, pro};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug)]
 pub struct DioChange {
@@ -62,7 +62,7 @@ impl DioUnavailable {
         match error.downcast_ref::<pro::ProError>() {
             Some(pro::ProError::Open {
                 interface: "Verge Aux",
-                source: verge_probe::bus::BusError::Busy { .. },
+                source: escapement_verge_probe::bus::BusError::Busy { .. },
                 ..
             }) => Self::Aux,
             Some(error) => Self::Feature(error.to_string()),
@@ -90,12 +90,12 @@ pub struct Status {
     pub edge_losses: u64,
 }
 
-pub struct Session<L: verge_probe::aux::AuxLink> {
+pub struct Session<L: escapement_verge_probe::aux::AuxLink> {
     aux: Aux<L>,
     status: Status,
     recorder: Option<Recorder>,
     owned: bool,
-    capture_id: Option<verge_probe::CaptureId>,
+    capture_id: Option<escapement_verge_probe::CaptureId>,
     stopping: Option<Instant>,
     synced: bool,
     poll_at: Instant,
@@ -103,7 +103,7 @@ pub struct Session<L: verge_probe::aux::AuxLink> {
     stream_levels: u8,
 }
 
-impl<L: verge_probe::aux::AuxLink> Session<L> {
+impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
     pub fn open<B: Bus<Aux = L>>(bus: &B, unit: &Unit) -> Result<Self> {
         let aux = pro::open_stream(bus, unit)?;
         let mut session = Self {
@@ -252,7 +252,7 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
                 if let Err(error) = started {
                     // Nothing was recorded: leave no empty capture among those kept.
                     drop(recorder);
-                    if let Err(removing) = verge_probe::capture::remove(&path) {
+                    if let Err(removing) = escapement_verge_probe::capture::remove(&path) {
                         tracing::warn!("removing {}: {removing}", path.display());
                     }
                     return Err(error.into());
@@ -450,7 +450,7 @@ impl<L: verge_probe::aux::AuxLink> Session<L> {
     }
 }
 
-impl<L: verge_probe::aux::AuxLink> Drop for Session<L> {
+impl<L: escapement_verge_probe::aux::AuxLink> Drop for Session<L> {
     fn drop(&mut self) {
         if let Err(error) = self.close() {
             tracing::error!("closing bench: {error:#}");
@@ -462,8 +462,8 @@ impl<L: verge_probe::aux::AuxLink> Drop for Session<L> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verge_probe::{detect, sim::SimBus};
-    fn session(name: &str) -> (SimBus, Session<verge_probe::sim::SimAux>) {
+    use escapement_verge_probe::{detect, sim::SimBus};
+    fn session(name: &str) -> (SimBus, Session<escapement_verge_probe::sim::SimAux>) {
         let bus = SimBus::scenario(name).unwrap().paced(0.2);
         let unit = detect(&bus).unwrap().remove(0);
         let session = Session::open(&bus, &unit).unwrap();
@@ -520,7 +520,7 @@ mod tests {
             s.tick().unwrap();
         }
         assert!(s.status().capturing);
-        let archive = verge_probe::capture::Archive::open(&path).unwrap();
+        let archive = escapement_verge_probe::capture::Archive::open(&path).unwrap();
         assert!(archive.extent().unwrap().duration_ns() > 0);
     }
     /// The panel's range choice reaches the capture it starts: the archive's header says whether
@@ -540,7 +540,7 @@ mod tests {
                 s.tick().unwrap();
             }
             s.close().unwrap();
-            let archive = verge_probe::capture::Archive::open(&path).unwrap();
+            let archive = escapement_verge_probe::capture::Archive::open(&path).unwrap();
             let high = ranges == EnergyRanges::High;
             assert_eq!(archive.header().unwrap().high_range_only, high);
             let extent = archive.extent().unwrap();
@@ -551,7 +551,9 @@ mod tests {
                 .unwrap();
             let low = samples
                 .iter()
-                .filter(|s| s.sample.range == Some(verge_probe::stream::CurrentRange::Low))
+                .filter(|s| {
+                    s.sample.range == Some(escapement_verge_probe::stream::CurrentRange::Low)
+                })
                 .count();
             assert!(!samples.is_empty());
             assert_eq!(low == 0, high, "{ranges:?}: {low} of {} low", samples.len());
@@ -573,7 +575,7 @@ mod tests {
         }
         s.close().unwrap();
         assert!(!s.status().capturing);
-        let archive = verge_probe::capture::Archive::open(&path).unwrap();
+        let archive = escapement_verge_probe::capture::Archive::open(&path).unwrap();
         assert_eq!(archive.header().unwrap().rate, 100_000);
     }
     #[test]
@@ -600,27 +602,33 @@ mod tests {
     #[test]
     fn delayed_attach_header_is_bound_before_stop_or_failure_cleanup() {
         struct DelayedHeader {
-            link: verge_probe::sim::SimAux,
+            link: escapement_verge_probe::sim::SimAux,
             bus: SimBus,
             pending: Option<(Duration, Vec<u8>)>,
         }
-        impl verge_probe::aux::AuxLink for DelayedHeader {
-            fn write(&mut self, request: &[u8]) -> Result<(), verge_probe::dap::LinkError> {
+        impl escapement_verge_probe::aux::AuxLink for DelayedHeader {
+            fn write(
+                &mut self,
+                request: &[u8],
+            ) -> Result<(), escapement_verge_probe::dap::LinkError> {
                 self.link.write(request)
             }
-            fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, verge_probe::dap::LinkError> {
+            fn read(
+                &mut self,
+                timeout: Duration,
+            ) -> Result<Vec<u8>, escapement_verge_probe::dap::LinkError> {
                 if let Some((ready, _)) = &self.pending {
                     if self.bus.now() >= *ready {
                         return Ok(self.pending.take().unwrap().1);
                     }
                     self.bus.sleep(timeout);
-                    return Err(verge_probe::dap::LinkError::Timeout);
+                    return Err(escapement_verge_probe::dap::LinkError::Timeout);
                 }
                 let message = self.link.read(timeout)?;
                 if message.first() == Some(&0xa1) {
                     self.pending = Some((self.bus.now() + Duration::from_millis(100), message));
                     self.bus.sleep(timeout);
-                    return Err(verge_probe::dap::LinkError::Timeout);
+                    return Err(escapement_verge_probe::dap::LinkError::Timeout);
                 }
                 Ok(message)
             }
@@ -719,13 +727,13 @@ mod hardware {
     use crate::bench::Bench;
     use crate::worker::{Backend, Event, Request, Worker};
     use egui_kittest::Harness;
-    use std::sync::atomic::AtomicBool;
-    use verge_probe::{
+    use escapement_verge_probe::{
         capture::{Archive, Interval},
         detect::detect_named,
         release::{GitHub, Repo, Ureq},
         usb::UsbBus,
     };
+    use std::sync::atomic::AtomicBool;
 
     struct Rig {
         bench: Bench,
@@ -746,7 +754,7 @@ mod hardware {
     struct Restore(Unit);
     impl Drop for Restore {
         fn drop(&mut self) {
-            if let Err(error) = verge_probe::pro::with_pro(
+            if let Err(error) = escapement_verge_probe::pro::with_pro(
                 &UsbBus::default(),
                 &self.0,
                 pro::Feature::Supply,
@@ -774,7 +782,7 @@ mod hardware {
     #[test]
     #[ignore = "uses USB; VERGE_BENCH_SERIAL and VERGE_BENCH_OUT required"]
     fn bench_markers() {
-        use verge_probe::{DapTransport, Marked};
+        use escapement_verge_probe::{DapTransport, Marked};
         let serial = std::env::var("VERGE_BENCH_SERIAL").expect("explicit Pro serial");
         let directory =
             PathBuf::from(std::env::var("VERGE_BENCH_OUT").expect("capture output directory"));
@@ -865,12 +873,14 @@ mod hardware {
         pro::validate(&units[0], pro::Feature::Energy).unwrap();
         let _debugger = match UsbBus::default().open_dap(&units[0].device) {
             Ok(link) => Some(link),
-            Err(verge_probe::bus::BusError::Busy { .. }) => None,
+            Err(escapement_verge_probe::bus::BusError::Busy { .. }) => None,
             Err(error) => panic!("opening CMSIS-DAP: {error}"),
         };
         let _restore = Restore(units[0].clone());
         let selected = Some(units[0].device.instance.clone());
-        let repo: Repo = verge_probe::release::DEFAULT_REPO.parse().unwrap();
+        let repo: Repo = escapement_verge_probe::release::DEFAULT_REPO
+            .parse()
+            .unwrap();
         let worker = Worker::spawn(
             UsbBus::default(),
             GitHub::new(Ureq::default(), repo, None),
@@ -1118,15 +1128,15 @@ mod hardware {
 #[cfg(test)]
 mod dio_tests {
     use super::*;
+    use escapement_verge_probe::capture::{Archive, Interval};
+    use escapement_verge_probe::sim::SimBus;
     use std::sync::atomic::AtomicBool;
-    use verge_probe::capture::{Archive, Interval};
-    use verge_probe::sim::SimBus;
 
     #[test]
     fn debugger_markers_survive_gui_recording_and_both_exports() {
-        use verge_probe::{Bus, DapTransport, Marked};
+        use escapement_verge_probe::{Bus, DapTransport, Marked};
         let bus = SimBus::scenario("ours-pro").unwrap().paced(0.1);
-        let unit = verge_probe::detect(&bus).unwrap().remove(0);
+        let unit = escapement_verge_probe::detect(&bus).unwrap().remove(0);
         let mut session = Session::open(&bus, &unit).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("markers.vergecapture");
@@ -1176,7 +1186,7 @@ mod dio_tests {
     #[test]
     fn dio_polling_group_confirmation_and_split_refusal() {
         let bus = SimBus::scenario("ours-pro-held").unwrap();
-        let unit = verge_probe::detect(&bus).unwrap().remove(0);
+        let unit = escapement_verge_probe::detect(&bus).unwrap().remove(0);
         let mut session = Session::open(&bus, &unit).unwrap();
         assert_eq!(session.status.dio.as_ref().unwrap().read, 8);
         let change = DioChange {
@@ -1228,7 +1238,7 @@ mod dio_tests {
     fn dio_recording_uses_all_pins_and_keeps_edges_and_loss() {
         for scenario in ["ours-pro", "ours-pro-edge-loss"] {
             let bus = SimBus::scenario(scenario).unwrap().paced(0.1);
-            let unit = verge_probe::detect(&bus).unwrap().remove(0);
+            let unit = escapement_verge_probe::detect(&bus).unwrap().remove(0);
             let mut session = Session::open(&bus, &unit).unwrap();
             session.command(Command::Supply {
                 on: true,

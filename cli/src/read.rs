@@ -5,9 +5,9 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
-use verge_probe::probe_rs::MemoryInterface;
-use verge_probe::probe_rs::probe::WireProtocol;
-use verge_probe::probe_rs::probe::list::Lister;
+use escapement_verge_probe::probe_rs::MemoryInterface;
+use escapement_verge_probe::probe_rs::probe::WireProtocol;
+use escapement_verge_probe::probe_rs::probe::list::Lister;
 
 #[derive(Args)]
 pub struct ReadArgs {
@@ -96,7 +96,7 @@ pub fn read(args: &ReadArgs, serial: Option<&str>) -> Result<()> {
         None => pick_probe()?,
     };
     let started = Instant::now();
-    let mut session = verge_probe::attach(
+    let mut session = escapement_verge_probe::attach(
         serial.or(picked.as_deref()),
         &args.chip,
         args.protocol.into(),
@@ -137,7 +137,7 @@ pub fn read(args: &ReadArgs, serial: Option<&str>) -> Result<()> {
 
 /// Reads `count` values of `width` at `address`, as little-endian bytes.
 fn read_memory(
-    core: &mut impl MemoryInterface<verge_probe::probe_rs::Error>,
+    core: &mut impl MemoryInterface<escapement_verge_probe::probe_rs::Error>,
     width: Width,
     address: u64,
     count: usize,

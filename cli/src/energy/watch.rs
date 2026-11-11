@@ -7,6 +7,10 @@ use std::time::Duration;
 
 use crate::output::outputln;
 use anyhow::{Context, Result, anyhow, bail};
+use escapement_verge_probe::stream::{Converter, EndReason, Message, Sample};
+use escapement_verge_probe::{
+    Bus, Cancel, CommandError, EnergyCaptureSample, EnergyError, EnergyTotal,
+};
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -14,8 +18,6 @@ use ratatui::style::{Color, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::Line;
 use ratatui::widgets::{Axis, Block, Chart, Dataset, GraphType, Paragraph};
-use verge_probe::stream::{Converter, EndReason, Message, Sample};
-use verge_probe::{Bus, Cancel, CommandError, EnergyCaptureSample, EnergyError, EnergyTotal};
 
 use super::{Pro, range_name, si};
 
@@ -398,7 +400,7 @@ pub fn watch<B: Bus>(
     let totals = pro
         .info()
         .with_context(|| format!("asking {name} what it runs"))?
-        .is_some_and(verge_probe::VergeInfo::supports_energy_accumulator);
+        .is_some_and(escapement_verge_probe::VergeInfo::supports_energy_accumulator);
     let running = match pro.latest_energy_sample() {
         Err(ref error) if fault(error) => {
             // The start below clears what the failed capture kept, so show it first.
@@ -882,13 +884,19 @@ mod tests {
         assert!(screen.contains("5.50 mA"), "{screen}");
     }
 
-    fn pro_with_a_capture() -> (verge_probe::sim::SimBus, verge_probe::UsbDevice) {
-        let bus = verge_probe::sim::SimBus::scenario("ours-pro-energy").unwrap();
-        let device = verge_probe::detect(&bus).unwrap().remove(0).device;
+    fn pro_with_a_capture() -> (
+        escapement_verge_probe::sim::SimBus,
+        escapement_verge_probe::UsbDevice,
+    ) {
+        let bus = escapement_verge_probe::sim::SimBus::scenario("ours-pro-energy").unwrap();
+        let device = escapement_verge_probe::detect(&bus)
+            .unwrap()
+            .remove(0)
+            .device;
         (bus, device)
     }
 
-    fn aux_log(bus: &verge_probe::sim::SimBus) -> Vec<String> {
+    fn aux_log(bus: &escapement_verge_probe::sim::SimBus) -> Vec<String> {
         bus.log()
             .into_iter()
             .filter_map(|line| line.split_once("AUX ").map(|(_, hex)| hex.to_owned()))
@@ -900,8 +908,9 @@ mod tests {
     #[test]
     fn leaving_a_capture_found_running_ends_its_stream() {
         let (bus, device) = pro_with_a_capture();
-        let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
-        let mut pro: Pro<'_> = verge_probe::VergeControl::new(&mut aux);
+        let mut aux =
+            escapement_verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+        let mut pro: Pro<'_> = escapement_verge_probe::VergeControl::new(&mut aux);
         let options = Options {
             rate: 1000,
             every: Duration::from_millis(100),
@@ -920,8 +929,9 @@ mod tests {
     #[test]
     fn zero_duration_attach_still_ends_its_stream() {
         let (bus, device) = pro_with_a_capture();
-        let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
-        let mut pro: Pro<'_> = verge_probe::VergeControl::new(&mut aux);
+        let mut aux =
+            escapement_verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+        let mut pro: Pro<'_> = escapement_verge_probe::VergeControl::new(&mut aux);
         let options = Options {
             rate: 1000,
             every: Duration::from_millis(100),
@@ -946,8 +956,9 @@ mod tests {
     #[test]
     fn a_watch_over_verge_aux_plots_every_pair() {
         let (bus, device) = pro_with_a_capture();
-        let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
-        let mut pro: Pro<'_> = verge_probe::VergeControl::new(&mut aux);
+        let mut aux =
+            escapement_verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+        let mut pro: Pro<'_> = escapement_verge_probe::VergeControl::new(&mut aux);
         pro.stream_energy_capture_identified(0).unwrap();
         let mut model = Model::new("CJ3E7A91C2", None, Duration::from_secs(30));
         let options = Options {
@@ -994,12 +1005,16 @@ mod tests {
             let (bus, device) = if running {
                 pro_with_a_capture()
             } else {
-                let bus = verge_probe::sim::SimBus::scenario("ours-pro").unwrap();
-                let device = verge_probe::detect(&bus).unwrap().remove(0).device;
+                let bus = escapement_verge_probe::sim::SimBus::scenario("ours-pro").unwrap();
+                let device = escapement_verge_probe::detect(&bus)
+                    .unwrap()
+                    .remove(0)
+                    .device;
                 (bus, device)
             };
-            let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
-            let mut pro: Pro<'_> = verge_probe::VergeControl::new(&mut aux);
+            let mut aux =
+                escapement_verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+            let mut pro: Pro<'_> = escapement_verge_probe::VergeControl::new(&mut aux);
             let options = Options {
                 rate: 1000,
                 every: Duration::from_millis(100),
@@ -1031,7 +1046,7 @@ mod tests {
                 time_ns: u64::from(n) * 1_000_000,
                 millivolts: 3300,
                 nanoamps: 200_000,
-                range: Some(verge_probe::stream::CurrentRange::High),
+                range: Some(escapement_verge_probe::stream::CurrentRange::High),
                 under_range: n < 3,
             })
             .collect();
@@ -1054,39 +1069,48 @@ mod tests {
     #[test]
     fn a_capture_another_host_restarted_is_left_running() {
         struct RestartAfter {
-            inner: verge_probe::sim::SimAux,
-            bus: verge_probe::sim::SimBus,
-            device: verge_probe::UsbDevice,
+            inner: escapement_verge_probe::sim::SimAux,
+            bus: escapement_verge_probe::sim::SimBus,
+            device: escapement_verge_probe::UsbDevice,
             at: Duration,
         }
 
-        impl verge_probe::aux::AuxLink for RestartAfter {
-            fn write(&mut self, request: &[u8]) -> Result<(), verge_probe::dap::LinkError> {
+        impl escapement_verge_probe::aux::AuxLink for RestartAfter {
+            fn write(
+                &mut self,
+                request: &[u8],
+            ) -> Result<(), escapement_verge_probe::dap::LinkError> {
                 self.inner.write(request)
             }
 
-            fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, verge_probe::dap::LinkError> {
+            fn read(
+                &mut self,
+                timeout: Duration,
+            ) -> Result<Vec<u8>, escapement_verge_probe::dap::LinkError> {
                 if self.bus.now() >= self.at {
                     self.at = Duration::MAX;
                     let mut link = self.bus.open_dap(&self.device).unwrap();
                     let mut start = vec![0x90, 0];
                     start.extend_from_slice(&100_000u32.to_le_bytes());
-                    verge_probe::dap::DapLink::exchange(&mut link, &start).unwrap();
+                    escapement_verge_probe::dap::DapLink::exchange(&mut link, &start).unwrap();
                 }
                 self.inner.read(timeout)
             }
         }
 
-        let bus = verge_probe::sim::SimBus::scenario("ours-pro").unwrap();
-        let device = verge_probe::detect(&bus).unwrap().remove(0).device;
+        let bus = escapement_verge_probe::sim::SimBus::scenario("ours-pro").unwrap();
+        let device = escapement_verge_probe::detect(&bus)
+            .unwrap()
+            .remove(0)
+            .device;
         let link = RestartAfter {
             inner: bus.open_aux(&device).unwrap(),
             bus: bus.clone(),
             device: device.clone(),
             at: bus.now() + Duration::from_millis(50),
         };
-        let mut aux = verge_probe::aux::Aux::open(link).unwrap();
-        let mut pro: Pro<'_> = verge_probe::VergeControl::new(&mut aux);
+        let mut aux = escapement_verge_probe::aux::Aux::open(link).unwrap();
+        let mut pro: Pro<'_> = escapement_verge_probe::VergeControl::new(&mut aux);
         let options = Options {
             rate: 1000,
             every: Duration::from_millis(100),
@@ -1109,10 +1133,11 @@ mod tests {
     #[test]
     fn an_end_before_the_header_changes_nothing() {
         let (bus, device) = pro_with_a_capture();
-        let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
-        let mut pro: Pro<'_> = verge_probe::VergeControl::new(&mut aux);
+        let mut aux =
+            escapement_verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+        let mut pro: Pro<'_> = escapement_verge_probe::VergeControl::new(&mut aux);
         let mut model = Model::new("CJ3E7A91C2", Some(1000), Duration::from_secs(30));
-        let restarted = verge_probe::stream::parse(&[0xA2, 3, 9, 0, 0, 0]).unwrap();
+        let restarted = escapement_verge_probe::stream::parse(&[0xA2, 3, 9, 0, 0, 0]).unwrap();
         Stream::default()
             .follow(&mut pro, &mut model, restarted, 1.0)
             .unwrap();

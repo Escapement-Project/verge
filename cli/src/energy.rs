@@ -8,12 +8,12 @@ use std::time::Duration;
 use crate::output::outputln;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
-use verge_probe::aux::Aux;
-use verge_probe::bus::BusError;
-use verge_probe::detect::{Unit, detect_named};
-use verge_probe::pro::{Feature, ProLink, check_offered};
-use verge_probe::stream::EndReason;
-use verge_probe::{
+use escapement_verge_probe::aux::Aux;
+use escapement_verge_probe::bus::BusError;
+use escapement_verge_probe::detect::{Unit, detect_named};
+use escapement_verge_probe::pro::{Feature, ProLink, check_offered};
+use escapement_verge_probe::stream::EndReason;
+use escapement_verge_probe::{
     Bus, CalibrationRange, Cancel, CommandError, EnergyAccumulator, EnergyCalibration,
     EnergyCaptureSample, EnergyError, EnergyRanges, EnergyTotal, VergeControl, VergeInfo,
     VergeTransport, dap,
@@ -32,7 +32,7 @@ enum Switch {
     Off,
 }
 
-/// `--range`: verge_probe::EnergyRanges as the command line spells it.
+/// `--range`: escapement_verge_probe::EnergyRanges as the command line spells it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum Ranges {
     #[default]
@@ -162,7 +162,8 @@ type Pro<'a> = VergeControl<'a, dyn ProLink + 'a>;
 /// A Pro running Verge, whether its CMSIS-DAP is free or a debugger holds it.
 fn pro_running_verge(unit: &Unit) -> bool {
     unit.verge().is_some_and(|ours| {
-        ours.board.map(verge_probe::BoardKind::number) == Some(dap::Ours::BOARD_MCU_LINK_PRO)
+        ours.board.map(escapement_verge_probe::BoardKind::number)
+            == Some(dap::Ours::BOARD_MCU_LINK_PRO)
     })
 }
 
@@ -171,7 +172,7 @@ fn pro_running_verge(unit: &Unit) -> bool {
 fn find_pro<B: Bus>(bus: &B, serial: Option<&str>, feature: Feature) -> Result<Unit> {
     let units = detect_named(bus, serial).context("looking for MCU-Links")?;
     let unit = crate::pick_unit(&units, serial, pro_running_verge)?;
-    verge_probe::pro::validate(unit, feature)?;
+    escapement_verge_probe::pro::validate(unit, feature)?;
     Ok(unit.clone())
 }
 
@@ -183,10 +184,10 @@ fn with_pro<B: Bus, T>(
     f: impl FnOnce(&str, &mut Pro<'_>) -> Result<T>,
 ) -> Result<T> {
     let unit = find_pro(bus, serial, feature)?;
-    verge_probe::pro::with_pro(bus, &unit, feature, f)
+    escapement_verge_probe::pro::with_pro(bus, &unit, feature, f)
 }
 
-fn bind_attached_capture<T: verge_probe::pro::ProLink + ?Sized>(
+fn bind_attached_capture<T: escapement_verge_probe::pro::ProLink + ?Sized>(
     pro: &mut VergeControl<'_, T>,
 ) -> Result<()> {
     if pro.tracked_capture_id().is_none() {
@@ -194,7 +195,7 @@ fn bind_attached_capture<T: verge_probe::pro::ProLink + ?Sized>(
             bail!("no acknowledged attach is awaiting its capture header");
         }
         let message = pro.transport().message(Duration::from_secs(2))?;
-        let Some(verge_probe::stream::Message::Header(header)) = message else {
+        let Some(escapement_verge_probe::stream::Message::Header(header)) = message else {
             bail!("the attached stream did not provide its capture header");
         };
         pro.accept_energy_header(&header)?;
@@ -536,18 +537,22 @@ pub(crate) fn si(value: f64, unit: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{EnergyCommand, RangeArg, Ranges, energy, si};
+    use escapement_verge_probe::stream::{Header, Message};
+    use escapement_verge_probe::{Bus, Cancel, VergeControl};
     use std::time::Duration;
-    use verge_probe::stream::{Header, Message};
-    use verge_probe::{Bus, Cancel, VergeControl};
 
     /// Starts a capture on a simulated Pro with `energy start`, after another host asked for the
     /// high range, and returns the header of a stream of it.
     fn start(range: Option<Ranges>) -> Header {
-        let bus = verge_probe::sim::SimBus::scenario("ours-pro").unwrap();
-        let device = verge_probe::detect(&bus).unwrap().remove(0).device;
-        let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+        let bus = escapement_verge_probe::sim::SimBus::scenario("ours-pro").unwrap();
+        let device = escapement_verge_probe::detect(&bus)
+            .unwrap()
+            .remove(0)
+            .device;
+        let mut aux =
+            escapement_verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
         VergeControl::new(&mut aux)
-            .set_energy_ranges(verge_probe::EnergyRanges::High)
+            .set_energy_ranges(escapement_verge_probe::EnergyRanges::High)
             .unwrap();
         drop(aux);
         let command = EnergyCommand::Start {
@@ -555,7 +560,8 @@ mod tests {
             range: RangeArg { range },
         };
         energy(&bus, &command, None, &Cancel::new()).unwrap();
-        let mut aux = verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+        let mut aux =
+            escapement_verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
         VergeControl::new(&mut aux)
             .stream_energy_capture_identified(0)
             .unwrap();

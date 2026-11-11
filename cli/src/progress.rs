@@ -1,11 +1,11 @@
 //! An update's progress as `tracing` spans, drawn as bars by `tracing-indicatif`: one bar over
 //! the steps, and one for the step under way.
 
+use escapement_verge_probe::progress::{Progress, Step, Unit};
 use indicatif::ProgressStyle;
 use tracing::span::EnteredSpan;
 use tracing::{Span, info_span};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
-use verge_probe::progress::{Progress, Step, Unit};
 
 #[derive(Default)]
 pub struct Bars {

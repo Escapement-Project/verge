@@ -11,33 +11,33 @@ use std::process::ExitCode;
 use crate::output::outputln;
 use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Args, Parser, Subcommand};
+use escapement_verge_probe::batch::{
+    ArmError, Armed, Batch, Board, Entry, Filter, Observer, OursFilter, Record, RecordWriter,
+    StockFilter, open_record,
+};
+use escapement_verge_probe::board;
+use escapement_verge_probe::cache::Cache;
+use escapement_verge_probe::detect::{Guess, Hardware, State, detect_named};
+use escapement_verge_probe::ids::Role;
+use escapement_verge_probe::image::{Image, PAGE};
+use escapement_verge_probe::paths::ISP_IDENTITY_WARNING;
+use escapement_verge_probe::progress::{Progress, Step};
+use escapement_verge_probe::release::{DEFAULT_REPO, GitHub, Http, ReleaseError, Repo, Ureq};
+#[cfg(feature = "simulate")]
+use escapement_verge_probe::sim::http::SimHttp;
+#[cfg(feature = "simulate")]
+use escapement_verge_probe::sim::{SCENARIOS, SimBus};
+use escapement_verge_probe::source::{self, ImageVersion, LoadError, Loaded};
+use escapement_verge_probe::update::{self, Outcome, Timing, UpdateError};
+use escapement_verge_probe::usb::UsbBus;
+use escapement_verge_probe::version::Relation;
+use escapement_verge_probe::version::StockVersion;
+use escapement_verge_probe::{Bus, Cancel, Firmware, Path, Unit, dap, detect, offer};
 use tracing_indicatif::IndicatifLayer;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::{EnvFilter, filter_fn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use verge_probe::batch::{
-    ArmError, Armed, Batch, Board, Entry, Filter, Observer, OursFilter, Record, RecordWriter,
-    StockFilter, open_record,
-};
-use verge_probe::board;
-use verge_probe::cache::Cache;
-use verge_probe::detect::{Guess, Hardware, State, detect_named};
-use verge_probe::ids::Role;
-use verge_probe::image::{Image, PAGE};
-use verge_probe::paths::ISP_IDENTITY_WARNING;
-use verge_probe::progress::{Progress, Step};
-use verge_probe::release::{DEFAULT_REPO, GitHub, Http, ReleaseError, Repo, Ureq};
-#[cfg(feature = "simulate")]
-use verge_probe::sim::http::SimHttp;
-#[cfg(feature = "simulate")]
-use verge_probe::sim::{SCENARIOS, SimBus};
-use verge_probe::source::{self, ImageVersion, LoadError, Loaded};
-use verge_probe::update::{self, Outcome, Timing, UpdateError};
-use verge_probe::usb::UsbBus;
-use verge_probe::version::Relation;
-use verge_probe::version::StockVersion;
-use verge_probe::{Bus, Cancel, Firmware, Path, Unit, dap, detect, offer};
 
 use crate::progress::Bars;
 
@@ -370,9 +370,9 @@ fn init_tracing(verbose: u8) {
         // nusb logs a claim it could not make as an error of its own, which verge reports in its
         // own words where it matters: a unit another program holds is listed as such, and one not
         // asked for is left alone.
-        0 => "warn,nusb=off,verge_probe=info",
+        0 => "warn,nusb=off,escapement_verge_probe=info",
         // The bootloader and USB crates log every packet at info, so they wait for -vv.
-        1 => "warn,verge_probe=debug,verge=debug",
+        1 => "warn,escapement_verge_probe=debug,verge=debug",
         _ => "debug",
     };
     // The error that ends a run is printed whatever RUST_LOG selects: a script that narrows the
@@ -392,8 +392,12 @@ fn init_tracing(verbose: u8) {
         .with_writer(bars.get_stderr_writer())
         .with_filter(filter);
     // The level filter is the log's alone: a span it disabled would get no bar.
-    let ours =
-        filter_fn(|meta| meta.is_span() && meta.target().starts_with(env!("CARGO_CRATE_NAME")));
+    let ours = filter_fn(|meta| {
+        let target = meta.target();
+        meta.is_span()
+            && (target.starts_with(env!("CARGO_CRATE_NAME"))
+                || target.starts_with("escapement_verge_probe"))
+    });
     tracing_subscriber::registry()
         .with(log)
         .with(bars.with_filter(ours))
@@ -575,7 +579,7 @@ fn pro_running_ours(unit: &Unit) -> bool {
     matches!(
         &unit.state,
         State::Probe { firmware: Firmware::Ours(ours), .. }
-            if ours.board.map(verge_probe::BoardKind::number) == Some(dap::Ours::BOARD_MCU_LINK_PRO)
+            if ours.board.map(escapement_verge_probe::BoardKind::number) == Some(dap::Ours::BOARD_MCU_LINK_PRO)
     )
 }
 
@@ -1273,7 +1277,7 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
             unit.state
         );
     };
-    if let Some(board) = ours.board.map(verge_probe::BoardKind::number)
+    if let Some(board) = ours.board.map(escapement_verge_probe::BoardKind::number)
         && board != dap::Ours::BOARD_MCU_LINK_PRO
     {
         bail!("{serial} is not an MCU-Link Pro, so it has no DIO pins");
@@ -1290,7 +1294,9 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
         );
     };
     if before.pins == 0 {
-        if ours.board.map(verge_probe::BoardKind::number) == Some(dap::Ours::BOARD_MCU_LINK_PRO) {
+        if ours.board.map(escapement_verge_probe::BoardKind::number)
+            == Some(dap::Ours::BOARD_MCU_LINK_PRO)
+        {
             bail!(
                 "{serial} started with its USB-SIO jumper, J15, fitted, which turns the DIO pins off. Remove the jumper and replug the unit"
             );
@@ -1566,7 +1572,7 @@ mod tests {
     /// A release the lookup found and the tool then refused is not a failed lookup.
     #[test]
     fn a_refused_release_is_not_called_a_lookup() {
-        use verge_probe::release::HttpError;
+        use escapement_verge_probe::release::HttpError;
         let repo = Repo::default();
         let http = || HttpError::Status {
             status: 502,

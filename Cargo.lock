@@ -1866,6 +1866,86 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b5343afd4a8365a643ac588dab4cf234a190c7f6c88c9f6dd6ffe00837661b7"
 
 [[package]]
+name = "escapement-verge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "clap",
+ "ctrlc",
+ "dialoguer",
+ "escapement-verge",
+ "escapement-verge-probe",
+ "humantime",
+ "indicatif",
+ "parse_int",
+ "predicates",
+ "ratatui",
+ "rexpect",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-indicatif",
+ "tracing-subscriber",
+ "zip",
+]
+
+[[package]]
+name = "escapement-verge-gui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "dark-light",
+ "dirs",
+ "eframe",
+ "egui",
+ "egui_kittest",
+ "egui_plot",
+ "escapement-verge-probe",
+ "humantime",
+ "image",
+ "pollster 1.0.1",
+ "rfd",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "zbus",
+]
+
+[[package]]
+name = "escapement-verge-probe"
+version = "0.1.0"
+dependencies = [
+ "csv",
+ "dirs",
+ "hex",
+ "hidapi",
+ "humantime",
+ "minisign",
+ "minisign-verify",
+ "nusb",
+ "object 0.40.0",
+ "postcard",
+ "probe-rs",
+ "rblhost",
+ "rusqlite",
+ "same-file",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "srec",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "ureq",
+ "zip",
+]
+
+[[package]]
 name = "euclid"
 version = "0.22.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6156,86 +6236,6 @@ dependencies = [
  "hashbrown 0.17.1",
  "png",
  "vello_common",
-]
-
-[[package]]
-name = "verge"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "clap",
- "ctrlc",
- "dialoguer",
- "humantime",
- "indicatif",
- "parse_int",
- "predicates",
- "ratatui",
- "rexpect",
- "serde_json",
- "tempfile",
- "tracing",
- "tracing-indicatif",
- "tracing-subscriber",
- "verge",
- "verge-probe",
- "zip",
-]
-
-[[package]]
-name = "verge-gui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "ctrlc",
- "dark-light",
- "dirs",
- "eframe",
- "egui",
- "egui_kittest",
- "egui_plot",
- "humantime",
- "image",
- "pollster 1.0.1",
- "rfd",
- "serde_json",
- "tempfile",
- "tracing",
- "tracing-subscriber",
- "verge-probe",
- "zbus",
-]
-
-[[package]]
-name = "verge-probe"
-version = "0.1.0"
-dependencies = [
- "csv",
- "dirs",
- "hex",
- "hidapi",
- "humantime",
- "minisign",
- "minisign-verify",
- "nusb",
- "object 0.40.0",
- "postcard",
- "probe-rs",
- "rblhost",
- "rusqlite",
- "same-file",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "srec",
- "tempfile",
- "thiserror 2.0.21",
- "tracing",
- "ureq",
- "zip",
 ]
 
 [[package]]

@@ -9,6 +9,10 @@ use egui::{Color32, CornerRadius, Frame, Margin, ScrollArea, Stroke, Ui, Vec2, v
 use egui_plot::{
     FilledArea, GridInput, GridMark, Line, Plot, PlotUi, Points, Span, uniform_grid_spacer,
 };
+use escapement_verge_probe::capture::{
+    Archive, Envelope, Interval, Statistics, Supported, recovered_sessions,
+};
+use escapement_verge_probe::{EnergyRanges, Unit, pro};
 use query::{Answer, Queries, Query};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
@@ -18,10 +22,6 @@ use std::sync::{
     mpsc::{self, Receiver},
 };
 use std::time::{Duration, Instant, SystemTime};
-use verge_probe::capture::{
-    Archive, Envelope, Interval, Statistics, Supported, recovered_sessions,
-};
-use verge_probe::{EnergyRanges, Unit, pro};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Quantity {
@@ -95,8 +95,8 @@ pub struct Bench {
     answer: Option<Arc<Answer>>,
     interval: Option<Interval>,
     selection: Option<Interval>,
-    marker_after: Option<verge_probe::capture::MarkerCursor>,
-    marker_selected: Option<verge_probe::capture::MarkerCursor>,
+    marker_after: Option<escapement_verge_probe::capture::MarkerCursor>,
+    marker_selected: Option<escapement_verge_probe::capture::MarkerCursor>,
     span: u64,
     follow: bool,
     quantity: Quantity,
@@ -614,7 +614,7 @@ impl Bench {
             .max_height(150.0)
             .show(ui, |ui| {
                 for entry in &page.entries {
-                    let cursor = verge_probe::capture::MarkerCursor {
+                    let cursor = escapement_verge_probe::capture::MarkerCursor {
                         time_ns: entry.marker.time_ns,
                         id: entry.id,
                     };
@@ -622,7 +622,7 @@ impl Bench {
                         "{:.6}s · {} · {}",
                         seconds(entry.marker.time_ns),
                         entry.marker.number,
-                        verge_probe::record::marker_label(&entry.marker.label)
+                        escapement_verge_probe::record::marker_label(&entry.marker.label)
                     );
                     let response = ui.add(
                         egui::Button::new(text(Role::Code, words))
@@ -1271,7 +1271,7 @@ impl Bench {
     fn draw_markers(
         &self,
         ui: &mut Ui,
-        page: &verge_probe::capture::MarkerPage,
+        page: &escapement_verge_probe::capture::MarkerPage,
         transform: &egui_plot::PlotTransform,
     ) {
         let face = style::face(ui.ctx());
@@ -1296,7 +1296,7 @@ impl Bench {
             let label = format!(
                 "{} {}",
                 entry.marker.number,
-                verge_probe::record::marker_label(&entry.marker.label)
+                escapement_verge_probe::record::marker_label(&entry.marker.label)
             );
             let galley =
                 painter.layout_no_wrap(label.clone(), egui::FontId::monospace(11.0), face.ink);
@@ -1344,8 +1344,8 @@ impl Bench {
     fn digital_lanes(
         &self,
         ui: &mut Ui,
-        digital: &verge_probe::capture::DigitalView,
-        fallback: &[verge_probe::capture::DigitalBin],
+        digital: &escapement_verge_probe::capture::DigitalView,
+        fallback: &[escapement_verge_probe::capture::DigitalBin],
         transform: &egui_plot::PlotTransform,
     ) {
         if digital.pins == 0 {
@@ -1589,7 +1589,7 @@ impl Bench {
                         .set_buttons(rfd::MessageButtons::OkCancel)
                         .show();
                     if agree == rfd::MessageDialogResult::Ok {
-                        verge_probe::capture::remove(&path)?;
+                        escapement_verge_probe::capture::remove(&path)?;
                         return Ok(FileResult::Discarded(path));
                     }
                     return Ok(FileResult::Cancelled);
@@ -1744,7 +1744,7 @@ const LABEL_ROW: f32 = 16.0;
 
 /// The label rows to keep clear: all of them once the capture has a marker, so the fitted range
 /// does not change as markers scroll in and out of view.
-fn label_rows(page: &verge_probe::capture::MarkerPage) -> usize {
+fn label_rows(page: &escapement_verge_probe::capture::MarkerPage) -> usize {
     if page.total > 0 { LABEL_ROWS } else { 0 }
 }
 
@@ -1914,8 +1914,8 @@ fn draw_samples(
 mod tests {
     use super::*;
     use egui_kittest::{Harness, kittest::Queryable};
-    use verge_probe::capture::CaptureWriter;
-    use verge_probe::stream::{End, EndReason, Header, Message, Pair, Pairs};
+    use escapement_verge_probe::capture::CaptureWriter;
+    use escapement_verge_probe::stream::{End, EndReason, Header, Message, Pair, Pairs};
 
     /// `count` pairs at `rate`, each pair's current code from `code`; 65535 is 350 mA.
     fn capture(path: &Path, rate: u32, count: u32, code: impl Fn(u32) -> u16) {
@@ -1930,7 +1930,7 @@ mod tests {
         count: u32,
         code: impl Fn(u32) -> u16,
         dio: bool,
-        markers: &[verge_probe::stream::Marker],
+        markers: &[escapement_verge_probe::stream::Marker],
     ) {
         let header: Header = serde_json::from_value(serde_json::json!({"rate":rate,"setting_ma":350,"full_scale_mv":3300,"first_sequence":0,"previous_low":true,
             "low":[{"code":0,"current_nanoamps":0},{"code":65535,"current_nanoamps":350000000}],"high":[],"dio_mask":if dio {15} else {0},"dio_levels":if code(0)>1000 {8} else {0},"edge_resolution_ns":11})).unwrap();
@@ -1960,7 +1960,7 @@ mod tests {
                 for i in first..(first + 99).min(count) {
                     let levels = if code(i) > 1000 { 8 } else { 0 };
                     if levels != last_levels {
-                        edges.push(verge_probe::stream::Edge {
+                        edges.push(escapement_verge_probe::stream::Edge {
                             time_ns: u64::from(i) * period,
                             levels,
                         });
@@ -1969,12 +1969,12 @@ mod tests {
                 }
                 if !edges.is_empty() {
                     let flags = if first <= 20_050 && first + 99 > 20_050 {
-                        verge_probe::stream::Edges::LOST
+                        escapement_verge_probe::stream::Edges::LOST
                     } else {
                         0
                     };
                     writer
-                        .ingest(Message::Edges(verge_probe::stream::Edges::new(
+                        .ingest(Message::Edges(escapement_verge_probe::stream::Edges::new(
                             flags, edges,
                         )))
                         .unwrap();
@@ -1983,14 +1983,16 @@ mod tests {
         }
         for (index, chunk) in markers.chunks(11).enumerate() {
             writer
-                .ingest(Message::Markers(verge_probe::stream::Markers::new(
-                    if index == 0 {
-                        verge_probe::stream::Markers::LOST
-                    } else {
-                        0
-                    },
-                    chunk.to_vec(),
-                )))
+                .ingest(Message::Markers(
+                    escapement_verge_probe::stream::Markers::new(
+                        if index == 0 {
+                            escapement_verge_probe::stream::Markers::LOST
+                        } else {
+                            0
+                        },
+                        chunk.to_vec(),
+                    ),
+                ))
                 .unwrap();
         }
         writer
@@ -2303,22 +2305,22 @@ mod tests {
             noisy_marker,
             true,
             &[
-                verge_probe::stream::Marker {
+                escapement_verge_probe::stream::Marker {
                     time_ns: 20_050_000_000,
                     number: 7,
                     label: b"wake, read sensor".to_vec(),
                 },
-                verge_probe::stream::Marker {
+                escapement_verge_probe::stream::Marker {
                     time_ns: 20_200_000_000,
                     number: 8,
                     label: b"transmit".to_vec(),
                 },
-                verge_probe::stream::Marker {
+                escapement_verge_probe::stream::Marker {
                     time_ns: 21_300_000_000,
                     number: 9,
                     label: b"sleep".to_vec(),
                 },
-                verge_probe::stream::Marker {
+                escapement_verge_probe::stream::Marker {
                     time_ns: 26_000_000_000,
                     number: 10,
                     label: b"label with all thirty-two bytes!!".to_vec(),
@@ -2461,7 +2463,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("markers.vergecapture");
         let markers: Vec<_> = (0..30)
-            .map(|number| verge_probe::stream::Marker {
+            .map(|number| escapement_verge_probe::stream::Marker {
                 time_ns: u64::from(number + 1) * 1_000_000_000,
                 number,
                 label: format!("step {number}").into_bytes(),
@@ -2985,9 +2987,11 @@ mod tests {
         bench.start_confirm = true;
         bench.off_confirm = true;
         bench.connection = Some("old".into());
-        let unit = verge_probe::detect(&verge_probe::sim::SimBus::scenario("ours-pro").unwrap())
-            .unwrap()
-            .remove(0);
+        let unit = escapement_verge_probe::detect(
+            &escapement_verge_probe::sim::SimBus::scenario("ours-pro").unwrap(),
+        )
+        .unwrap()
+        .remove(0);
         bench.connect(&unit, &mut crate::worker::Manual::default());
         assert!(!bench.start_confirm);
         assert!(!bench.off_confirm);

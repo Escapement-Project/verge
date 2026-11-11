@@ -70,9 +70,9 @@ Use `--simulate` to run the CLI against the same simulator. Simulated releases a
 because each run generates a new signing key. Every download therefore needs confirmation:
 
 ```
-cargo run -p verge --features simulate -- --simulate bench
-cargo run -p verge --features simulate -- --simulate stock update --yes
-cargo run -p verge --features simulate -- --simulate arrivals batch --yes --count 3
+cargo run -p escapement-verge --features simulate -- --simulate bench
+cargo run -p escapement-verge --features simulate -- --simulate stock update --yes
+cargo run -p escapement-verge --features simulate -- --simulate arrivals batch --yes --count 3
 ```
 
 The scenarios are `bench`, `ours`, `stock`, `stock-old`, `stock-hid`, `isp`, `isp-jumper`,
@@ -96,10 +96,10 @@ GUI tests run headlessly through `egui_kittest` against the same simulator. A se
 renders each state to PNG, in the day face and the night face, and requires a GPU:
 
 ```
-VERGE_GUI_SHOTS=/tmp/shots cargo test -p verge-gui pictures -- --ignored
+VERGE_GUI_SHOTS=/tmp/shots cargo test -p escapement-verge-gui pictures -- --ignored
 ```
 
-`cargo run -p verge-gui --features simulate -- --simulate bench` opens the window on the
+`cargo run -p escapement-verge-gui --features simulate -- --simulate bench` opens the window on the
 simulated bench, labelled as such.
 
 Two tests read real images and are skipped by default:

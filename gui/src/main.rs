@@ -21,15 +21,15 @@ mod worker;
 use std::sync::Arc;
 
 use clap::Parser;
+use escapement_verge_probe::cache::Cache;
+use escapement_verge_probe::release::{DEFAULT_REPO, GitHub, Repo, Ureq};
+#[cfg(feature = "simulate")]
+use escapement_verge_probe::sim::http::SimHttp;
+use escapement_verge_probe::usb::UsbBus;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use verge_probe::cache::Cache;
-use verge_probe::release::{DEFAULT_REPO, GitHub, Repo, Ureq};
-#[cfg(feature = "simulate")]
-use verge_probe::sim::http::SimHttp;
-use verge_probe::usb::UsbBus;
 
 use crate::app::{Config, VergeApp};
 use crate::worker::Worker;
@@ -59,7 +59,7 @@ struct Args {
 
 /// The simulated bench, where the `simulate` feature builds one, and nothing otherwise.
 #[cfg(feature = "simulate")]
-type Simulated = verge_probe::sim::SimBus;
+type Simulated = escapement_verge_probe::sim::SimBus;
 #[cfg(not(feature = "simulate"))]
 type Simulated = std::convert::Infallible;
 
@@ -70,7 +70,7 @@ fn simulated(args: &Args) -> Option<(String, Simulated)> {
     match Simulated::scenario(name) {
         Some(bus) => Some((name.clone(), bus.paced(args.simulate_pace))),
         None => {
-            let names: Vec<&str> = verge_probe::sim::SCENARIOS
+            let names: Vec<&str> = escapement_verge_probe::sim::SCENARIOS
                 .iter()
                 .map(|(n, _)| *n)
                 .collect();
@@ -132,8 +132,8 @@ fn main() -> eframe::Result {
     let stderr = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")));
-    let window =
-        log::Capture(log.clone()).with_filter(EnvFilter::new("verge_probe=info,verge_gui=info"));
+    let window = log::Capture(log.clone())
+        .with_filter(EnvFilter::new("escapement_verge_probe=info,verge_gui=info"));
     tracing_subscriber::registry()
         .with(stderr)
         .with(window)
@@ -149,7 +149,7 @@ fn main() -> eframe::Result {
     let config = Config {
         repo: args.repo.clone(),
         simulated: simulated.as_ref().map(|(name, _)| name.clone()),
-        stock_dirs: verge_probe::stock::search_dirs(),
+        stock_dirs: escapement_verge_probe::stock::search_dirs(),
         record_dir: record_dir(),
         cache: cache.clone(),
     };

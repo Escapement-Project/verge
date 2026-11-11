@@ -1,9 +1,9 @@
 use anyhow::Result;
+use escapement_verge_probe::capture::{Archive, DigitalView, Envelope, Interval, Statistics, View};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use verge_probe::capture::{Archive, DigitalView, Envelope, Interval, Statistics, View};
 
 pub struct Query {
     pub generation: u64,
@@ -12,8 +12,8 @@ pub struct Query {
     pub interval: Option<Interval>,
     pub live_span: u64,
     pub selection: Option<Interval>,
-    pub marker_after: Option<verge_probe::capture::MarkerCursor>,
-    pub marker_selected: Option<verge_probe::capture::MarkerCursor>,
+    pub marker_after: Option<escapement_verge_probe::capture::MarkerCursor>,
+    pub marker_selected: Option<escapement_verge_probe::capture::MarkerCursor>,
     pub pixels: usize,
     pub cancel: Arc<AtomicBool>,
 }
@@ -22,11 +22,11 @@ pub struct Answer {
     /// draw before its own answer comes back.
     pub view: View,
     pub digital: DigitalView,
-    pub digital_fallback: Vec<verge_probe::capture::DigitalBin>,
-    pub markers: verge_probe::capture::MarkerPage,
-    pub marker_list: verge_probe::capture::MarkerPage,
-    pub marker_successor: Option<verge_probe::capture::StoredMarker>,
-    pub marker_selected: Option<verge_probe::capture::MarkerCursor>,
+    pub digital_fallback: Vec<escapement_verge_probe::capture::DigitalBin>,
+    pub markers: escapement_verge_probe::capture::MarkerPage,
+    pub marker_list: escapement_verge_probe::capture::MarkerPage,
+    pub marker_successor: Option<escapement_verge_probe::capture::StoredMarker>,
+    pub marker_selected: Option<escapement_verge_probe::capture::MarkerCursor>,
     pub visible: Interval,
     /// The visible range's own statistics.
     pub window: Statistics,

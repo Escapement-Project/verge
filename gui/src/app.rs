@@ -8,17 +8,17 @@ use std::time::Duration;
 use egui::{
     Color32, CornerRadius, Frame, Margin, ScrollArea, Stroke, Ui, ViewportCommand, pos2, vec2,
 };
-use verge_probe::board::{self, Board};
-use verge_probe::cache::Cache;
-use verge_probe::detect::{Firmware, Guess, Hardware, Jumpered, State};
-use verge_probe::image::{Image, PAGE};
-use verge_probe::paths::ISP_IDENTITY_WARNING;
-use verge_probe::progress::{Cancel, Step, Unit as StepUnit};
-use verge_probe::release::{Download, Release, Repo};
-use verge_probe::source::{self, ImageVersion, LoadError, Source};
-use verge_probe::stock::{self, StockImage};
-use verge_probe::update::Outcome;
-use verge_probe::{Path, Unit, offer};
+use escapement_verge_probe::board::{self, Board};
+use escapement_verge_probe::cache::Cache;
+use escapement_verge_probe::detect::{Firmware, Guess, Hardware, Jumpered, State};
+use escapement_verge_probe::image::{Image, PAGE};
+use escapement_verge_probe::paths::ISP_IDENTITY_WARNING;
+use escapement_verge_probe::progress::{Cancel, Step, Unit as StepUnit};
+use escapement_verge_probe::release::{Download, Release, Repo};
+use escapement_verge_probe::source::{self, ImageVersion, LoadError, Source};
+use escapement_verge_probe::stock::{self, StockImage};
+use escapement_verge_probe::update::Outcome;
+use escapement_verge_probe::{Path, Unit, offer};
 
 use crate::glyph::{self, Glyph};
 use crate::log::Log;
@@ -1397,19 +1397,19 @@ impl VergeApp {
                     Some(Ok(release)) => {
                         let standing = unit.and_then(Unit::build).map(|build| {
                             match build.compare(&release.tag) {
-                                verge_probe::version::Relation::UpToDate => {
+                                escapement_verge_probe::version::Relation::UpToDate => {
                                     "runs this release".to_owned()
                                 }
-                                verge_probe::version::Relation::OtherVariant => {
+                                escapement_verge_probe::version::Relation::OtherVariant => {
                                     format!("runs this release built as {build}")
                                 }
-                                verge_probe::version::Relation::Behind => {
+                                escapement_verge_probe::version::Relation::Behind => {
                                     format!("runs {build}, older")
                                 }
-                                verge_probe::version::Relation::Ahead => {
+                                escapement_verge_probe::version::Relation::Ahead => {
                                     format!("runs {build}, newer than this release")
                                 }
-                                verge_probe::version::Relation::Unknown => {
+                                escapement_verge_probe::version::Relation::Unknown => {
                                     format!("runs {build}, which carries no version to compare")
                                 }
                             }
@@ -1465,7 +1465,7 @@ impl VergeApp {
         }
         let release_refused = self.choice == Choice::Release
             && matches!((&self.release, unit.and_then(Unit::build)), (Some(Ok(release)), Some(build))
-                if matches!(build.compare(&release.tag), verge_probe::version::Relation::UpToDate | verge_probe::version::Relation::Ahead));
+                if matches!(build.compare(&release.tag), escapement_verge_probe::version::Relation::UpToDate | escapement_verge_probe::version::Relation::Ahead));
         if unit.is_some() && (release_refused || (self.force && self.choice == Choice::Release)) {
             Frame::new()
                 .stroke(Stroke::new(1.0, face.attention_ink))

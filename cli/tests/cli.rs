@@ -240,7 +240,7 @@ fn an_image_that_never_comes_back_says_what_to_do() {
 /// where the unit went rather than that it did not come back.
 #[test]
 fn an_image_on_another_usb_id_says_where_the_unit_went() {
-    use verge_probe::sim::{SimFirmware, firmware_srecord};
+    use escapement_verge_probe::sim::{SimFirmware, firmware_srecord};
     let image = std::env::temp_dir().join(format!("verge-cli-{}-other-id.s19", std::process::id()));
     std::fs::write(
         &image,
@@ -581,7 +581,7 @@ fn ours_is_refused_for_a_pro() {
 
 /// A simulated image of ours in a file of its own, declaring `boards` where they are given.
 fn sim_image(name: &str, boards: Option<u32>) -> PathBuf {
-    use verge_probe::sim::{SimFirmware, firmware_srecord, firmware_srecord_declaring};
+    use escapement_verge_probe::sim::{SimFirmware, firmware_srecord, firmware_srecord_declaring};
     let ours = SimFirmware::Ours {
         build: "v0.3.0".into(),
     };
@@ -596,7 +596,7 @@ fn sim_image(name: &str, boards: Option<u32>) -> PathBuf {
 
 /// A LinkServer-like directory holding the simulator's stock image of `version`.
 fn sim_stock_dir(name: &str, version: &str) -> PathBuf {
-    use verge_probe::sim::{SimFirmware, firmware_srecord};
+    use escapement_verge_probe::sim::{SimFirmware, firmware_srecord};
     let dir = std::env::temp_dir().join(format!("verge-cli-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -605,7 +605,7 @@ fn sim_stock_dir(name: &str, version: &str) -> PathBuf {
             version.replace('.', "_")
         )),
         firmware_srecord(&SimFirmware::Stock {
-            version: verge_probe::version::StockVersion::parse(version).unwrap(),
+            version: escapement_verge_probe::version::StockVersion::parse(version).unwrap(),
         }),
     )
     .unwrap();
