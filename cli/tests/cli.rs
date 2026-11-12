@@ -1641,9 +1641,10 @@ fn energy_record_lines_up_dio_edges_with_the_pairs() {
     let mut lines = text.lines();
     assert_eq!(
         lines.next(),
-        Some("sequence,time_ns,millivolts,nanoamps,range,dio3")
+        Some("sequence,time_ns,millivolts,nanoamps,range,dio3,dio_gap")
     );
     let rows: Vec<Vec<&str>> = lines.map(|line| line.split(',').collect()).collect();
+    assert!(rows.iter().all(|row| row[6] == "0"), "a gap with no loss");
     let times: Vec<u64> = rows.iter().map(|row| row[1].parse().unwrap()).collect();
     assert!(times.is_sorted(), "lines out of time order");
     let edges: Vec<(u64, &str)> = rows

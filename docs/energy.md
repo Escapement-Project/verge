@@ -120,14 +120,17 @@ out from the pairs either side, so the recording adds up to the total. Pairs mar
 high on a logic channel of their own, `UNDER`.
 
 A sigrok session shows each DIO pin recorded as a logic channel at the pair rate, with a pulse
-shorter than a pair stretched to one.
+shorter than a pair stretched to one. Where the probe lost DIO edges, the pins' levels are unknown,
+and a logic channel `DIO_GAP` is high.
 
 ### CSV
 
 `--csv` writes one line per pair instead: its sequence number, its time in ns since the capture
 started, millivolts, nanoamps, and the current range it was read on: `low`, `high`, or `under` for a
-pair marked under range. Then come the levels of the DIO pins recorded. Each edge of those pins is a
-line of its own, in time order, with its time and the levels after it.
+pair marked under range. Then come the levels of the DIO pins recorded, and `dio_gap`. Each edge of
+those pins is a line of its own, in time order, with its time and the levels after it. Where the
+probe lost DIO edges, `dio_gap` is 1 and the levels are empty; a line at each end of the loss marks
+where it starts and where the levels are known again.
 
 ### Markers
 

@@ -299,7 +299,7 @@ impl Writer {
                 match output {
                     Output::Begin { rate, pins, levels } => {
                         sink.include_markers()?;
-                        sink.begin(rate, pins, levels)?;
+                        sink.begin_with_dio_gaps(rate, pins, levels)?;
                     }
                     Output::Pairs(samples) => sink.samples(&samples)?,
                     Output::Edges(edges) => sink.edges(edges),
@@ -770,23 +770,22 @@ mod tests {
             .lines()
             .map(|line| {
                 let fields: Vec<&str> = line.split(',').collect();
-                format!("{}@{}={}", fields[0], fields[1], fields[5])
+                format!("{}@{}={}/{}", fields[0], fields[1], fields[5], fields[6])
             })
             .collect();
         assert_eq!(
             lines,
             [
-                "sequence@time_ns=dio0",
-                "1@0=0",
-                "2@1000000=0",
-                "@1500000=1",
-                "3@2000000=1",
-                "4@3000000=1",
-                // The loss starts: this file has no gap column, so the row keeps the last level.
-                "@3100000=1",
-                "@3200000=0",
-                "@4000000=1",
-                "5@4000000=1",
+                "sequence@time_ns=dio0/dio_gap",
+                "1@0=0/0",
+                "2@1000000=0/0",
+                "@1500000=1/0",
+                "3@2000000=1/0",
+                "4@3000000=1/0",
+                "@3100000=/1",
+                "@3200000=0/0",
+                "@4000000=1/0",
+                "5@4000000=1/0",
             ]
         );
     }
