@@ -10,7 +10,9 @@ use crate::output::outputln;
 use anyhow::{Context, Result, anyhow, bail};
 use escapement_verge_probe::aux::{Aux, AuxLink};
 use escapement_verge_probe::record::Sink;
-use escapement_verge_probe::stream::{Converter, Edge, EndReason, Markers, Message, Sample, Total};
+use escapement_verge_probe::stream::{
+    Converter, DioLost, Edge, EndReason, Markers, Message, Sample, Total,
+};
 use escapement_verge_probe::{
     Bus, Cancel, CommandError, EnergyCaptureSample, EnergyError, VergeControl,
 };
@@ -194,7 +196,7 @@ fn stream<B: Bus, L: AuxLink>(
                 }
                 pro.accept_energy_header(&header)?;
                 writer.send(Output::Begin {
-                    rate: header.rate,
+                    rate: header.whole_rate(),
                     pins: header.dio_mask,
                     levels: header.dio_levels,
                 })?;
@@ -254,8 +256,14 @@ fn stream<B: Bus, L: AuxLink>(
                     continue;
                 }
                 edges += message.edges.len() as u64;
-                edges_lost += u64::from(message.lost());
                 writer.send(Output::Edges(message.edges))?;
+            }
+            Message::DioLost(lost) => {
+                if converter.is_none() {
+                    continue;
+                }
+                edges_lost += 1;
+                writer.send(Output::DioLost(lost))?;
             }
             Message::Markers(markers) => {
                 if converter.is_some() {
@@ -271,6 +279,7 @@ enum Output {
     Begin { rate: u32, pins: u8, levels: u8 },
     Pairs(Vec<Sample>),
     Edges(Vec<Edge>),
+    DioLost(DioLost),
     Markers(Markers),
 }
 
@@ -294,6 +303,7 @@ impl Writer {
                     }
                     Output::Pairs(samples) => sink.samples(&samples)?,
                     Output::Edges(edges) => sink.edges(edges),
+                    Output::DioLost(lost) => sink.dio_lost(&lost),
                     Output::Markers(markers) => {
                         if !sink.markers(&markers)? && !dropped_markers {
                             dropped_markers = true;
@@ -564,8 +574,10 @@ mod tests {
     }
 
     fn header() -> Vec<u8> {
-        let mut header = vec![0xA1, 2];
-        header.extend_from_slice(&1000u32.to_le_bytes());
+        // Format 4: the clock and the period of 1,000 pairs a second.
+        let mut header = vec![0xA1, 4];
+        header.extend_from_slice(&96_000_000u32.to_le_bytes());
+        header.extend_from_slice(&96_000u32.to_le_bytes());
         header.push(1);
         header.extend_from_slice(&3300u16.to_le_bytes());
         header.extend_from_slice(&1u32.to_le_bytes());
@@ -581,6 +593,8 @@ mod tests {
         header.extend_from_slice(&[0; 4]);
         header.extend_from_slice(&[0; 16]);
         header.extend_from_slice(&1u64.to_le_bytes());
+        // Step 5's fields, zero.
+        header.extend_from_slice(&[0; 7]);
         header
     }
 
@@ -689,15 +703,15 @@ mod tests {
 
     fn header_with_dio(pins: u8, levels: u8) -> Vec<u8> {
         let mut header = header();
-        header[64] = pins;
-        header[65] = levels;
-        header[66] = 11;
+        header[68] = pins;
+        header[69] = levels;
+        header[70] = 11;
         header
     }
 
-    fn edges(lost: bool, edges: &[(u64, u8)]) -> Vec<u8> {
+    fn edges(edges: &[(u64, u8)]) -> Vec<u8> {
         escapement_verge_probe::stream::Edges::new(
-            u8::from(lost),
+            0,
             edges
                 .iter()
                 .map(|&(time_ns, levels)| edge(time_ns, levels))
@@ -718,9 +732,18 @@ mod tests {
             None,
             Some(header_with_dio(0x01, 0x00)),
             Some(pairs(1, 3)),
-            Some(edges(false, &[(1_500_000, 0x01)])),
+            Some(edges(&[(1_500_000, 0x01)])),
             Some(pairs(4, 2)),
-            Some(edges(true, &[(3_200_000, 0x00), (4_000_000, 0x01)])),
+            // Edges lost after 3.1 ms, the levels known again at 3.2 ms.
+            Some(
+                escapement_verge_probe::stream::DioLost {
+                    from_ns: 3_100_000,
+                    to_ns: 3_200_000,
+                    levels: 0x00,
+                }
+                .to_bytes(),
+            ),
+            Some(edges(&[(4_000_000, 0x01)])),
             Some(end),
         ];
         let mut aux = Aux::open(Playback(messages.into_iter().collect())).unwrap();
@@ -740,7 +763,7 @@ mod tests {
         writer.finish().unwrap();
         assert_eq!(
             (recorded.dio, recorded.edges, recorded.edges_lost),
-            (0x01, 3, 1)
+            (0x01, 2, 1)
         );
         let lines: Vec<String> = std::fs::read_to_string(&path)
             .unwrap()
@@ -759,6 +782,8 @@ mod tests {
                 "@1500000=1",
                 "3@2000000=1",
                 "4@3000000=1",
+                // The loss starts: this file has no gap column, so the row keeps the last level.
+                "@3100000=1",
                 "@3200000=0",
                 "@4000000=1",
                 "5@4000000=1",

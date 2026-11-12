@@ -470,7 +470,7 @@ fn record<B: Bus>(
     if recorded.edges_lost > 0 {
         outputln!(
             "Edges were lost {} times: the pins changed faster than the probe takes them, SPI had \
-             them, or this side did not read in time. The levels before each loss are not known.",
+             them, or this side did not read in time. The levels during each loss are not known.",
             recorded.edges_lost
         );
     }

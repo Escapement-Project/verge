@@ -1932,12 +1932,13 @@ mod tests {
         dio: bool,
         markers: &[escapement_verge_probe::stream::Marker],
     ) {
-        let header: Header = serde_json::from_value(serde_json::json!({"rate":rate,"setting_ma":350,"full_scale_mv":3300,"first_sequence":0,"previous_low":true,
+        let header: Header = serde_json::from_value(serde_json::json!({"clock_hz":rate,"period":1,"setting_ma":350,"full_scale_mv":3300,"first_sequence":0,"previous_low":true,
             "low":[{"code":0,"current_nanoamps":0},{"code":65535,"current_nanoamps":350000000}],"high":[],"dio_mask":if dio {15} else {0},"dio_levels":if code(0)>1000 {8} else {0},"edge_resolution_ns":11})).unwrap();
         let period = 1_000_000_000 / u64::from(rate);
         let mut writer = CaptureWriter::create(path).unwrap();
         writer.ingest(Message::Header(header)).unwrap();
         let mut last_levels = if code(0) > 1000 { 8 } else { 0 };
+        let mut sent_ns = 0;
         for first in (0..count).step_by(99) {
             let pairs = (first..(first + 99).min(count))
                 .map(|i| Pair {
@@ -1968,16 +1969,27 @@ mod tests {
                     }
                 }
                 if !edges.is_empty() {
-                    let flags = if first <= 20_050 && first + 99 > 20_050 {
-                        escapement_verge_probe::stream::Edges::LOST
-                    } else {
-                        0
-                    };
-                    writer
-                        .ingest(Message::Edges(escapement_verge_probe::stream::Edges::new(
-                            flags, edges,
-                        )))
-                        .unwrap();
+                    let newest = edges.last().unwrap().time_ns;
+                    // Edges lost before the message holding pair 20,050: unknown from the last edge
+                    // sent to what would have been this message's first, which the loss stands for.
+                    if first <= 20_050 && first + 99 > 20_050 {
+                        let lost = edges.remove(0);
+                        writer
+                            .ingest(Message::DioLost(escapement_verge_probe::stream::DioLost {
+                                from_ns: sent_ns,
+                                to_ns: lost.time_ns,
+                                levels: lost.levels,
+                            }))
+                            .unwrap();
+                    }
+                    if !edges.is_empty() {
+                        writer
+                            .ingest(Message::Edges(escapement_verge_probe::stream::Edges::new(
+                                0, edges,
+                            )))
+                            .unwrap();
+                    }
+                    sent_ns = newest;
                 }
             }
         }
@@ -2024,7 +2036,7 @@ mod tests {
         held: &[u32],
         hold_ns: u64,
     ) {
-        let header: Header = serde_json::from_value(serde_json::json!({"rate":rate,"setting_ma":350,"full_scale_mv":3300,"first_sequence":0,"previous_low":true,
+        let header: Header = serde_json::from_value(serde_json::json!({"clock_hz":rate,"period":1,"setting_ma":350,"full_scale_mv":3300,"first_sequence":0,"previous_low":true,
             "low":[{"code":0,"current_nanoamps":0},{"code":65535,"current_nanoamps":350000000}],"high":[],"dio_mask":0,"dio_levels":0,"edge_resolution_ns":11})).unwrap();
         let period = 1_000_000_000 / u64::from(rate);
         let time = |i: u32| {

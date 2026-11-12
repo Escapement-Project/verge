@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::output::outputln;
 use anyhow::{Context, Result, anyhow, bail};
-use escapement_verge_probe::stream::{Converter, EndReason, Message, Sample};
+use escapement_verge_probe::stream::{Converter, EndReason, Header, Message, Sample};
 use escapement_verge_probe::{
     Bus, Cancel, CommandError, EnergyCaptureSample, EnergyError, EnergyTotal,
 };
@@ -598,7 +598,8 @@ fn run<B: Bus>(
 #[derive(Default)]
 struct Stream {
     converter: Option<Converter>,
-    rate: u32,
+    /// The stream's header, which times its pairs.
+    header: Option<Header>,
     /// Seconds from the capture's clock to the watch's, set by the stream's first pairs.
     offset: Option<f64>,
 }
@@ -616,7 +617,7 @@ impl Stream {
             Message::Header(header) => {
                 pro.accept_energy_header(&header)?;
                 self.converter = Some(Converter::new(&header));
-                self.rate = header.rate;
+                self.header = Some(header.clone());
                 self.offset = None;
                 model.high_range_only = Some(header.high_range_only);
             }
@@ -626,7 +627,10 @@ impl Stream {
                 };
                 converter.add_message(&pairs);
                 // The newest pair is at most a message's 10 ms old as it arrives.
-                let newest = pairs.time_of(pairs.pairs.len().saturating_sub(1), self.rate);
+                let Some(header) = &self.header else {
+                    return Ok(());
+                };
+                let newest = pairs.time_of(pairs.pairs.len().saturating_sub(1), header);
                 let offset = *self.offset.get_or_insert(at - newest as f64 * 1e-9);
                 model.add_pairs(&converter.take_samples(), offset);
             }
@@ -642,7 +646,7 @@ impl Stream {
                         .context("streaming the restarted capture")?;
                 }
             }
-            Message::Edges(_) | Message::Markers(_) => {}
+            Message::Edges(_) | Message::DioLost(_) | Message::Markers(_) => {}
         }
         Ok(())
     }

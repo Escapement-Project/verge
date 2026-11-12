@@ -329,16 +329,19 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                     }
                     self.capture_id = Some(id);
                     self.synced = true;
-                    self.status.rate = Some(header.rate);
+                    self.status.rate = Some(header.whole_rate());
                     self.stream_mask = header.dio_mask;
                     self.stream_levels = header.dio_levels;
                     self.update_levels();
                     changed = true;
                 }
+                if let Message::DioLost(lost) = &message {
+                    self.status.edge_losses += 1;
+                    self.stream_levels = lost.levels;
+                    self.update_levels();
+                    changed = true;
+                }
                 if let Message::Edges(edges) = &message {
-                    if edges.lost() {
-                        self.status.edge_losses += 1;
-                    }
                     if let Some(edge) = edges.edges.last() {
                         self.stream_levels = edge.levels;
                     }
@@ -576,7 +579,7 @@ mod tests {
         s.close().unwrap();
         assert!(!s.status().capturing);
         let archive = escapement_verge_probe::capture::Archive::open(&path).unwrap();
-        assert_eq!(archive.header().unwrap().rate, 100_000);
+        assert_eq!(archive.header().unwrap().whole_rate(), 100_000);
     }
     #[test]
     fn restart_ends_recording_without_stopping_replacement_capture() {
