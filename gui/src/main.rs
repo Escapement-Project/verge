@@ -180,6 +180,8 @@ fn main() -> eframe::Result {
                 let ctx = ctx.clone();
                 move || ctx.request_repaint()
             };
+            // Without `simulate`, Simulated is Infallible and the first arm cannot run.
+            #[cfg_attr(not(feature = "simulate"), allow(unreachable_code))]
             let worker = match simulated {
                 Some((_, bus)) => simulated_worker(bus, args.repo.clone(), repaint),
                 None => Worker::spawn(
