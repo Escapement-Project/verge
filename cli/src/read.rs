@@ -7,7 +7,8 @@ use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use escapement_verge_probe::probe_rs::MemoryInterface;
 use escapement_verge_probe::probe_rs::probe::list::Lister;
-use escapement_verge_probe::probe_rs::probe::{ScanFormat, WireProtocol};
+use escapement_verge_probe::probe_rs::probe::{DebugProbeInfo, ProbeTransport, WireProtocol};
+use escapement_verge_probe::probe_rs::probe::cmsisdap::ScanFormat;
 
 #[derive(Args)]
 pub struct ReadArgs {
@@ -50,7 +51,7 @@ fn pick_probe() -> Result<Option<String>> {
     let items: Vec<String> = probes
         .iter()
         .map(|probe| {
-            let serial = probe.serial_number.as_deref().unwrap_or("-");
+            let serial = serial_number(probe).unwrap_or("-");
             format!("{serial:<14} {}", probe.identifier)
         })
         .collect();
@@ -60,13 +61,18 @@ fn pick_probe() -> Result<Option<String>> {
         .default(0)
         .interact()?;
     let probe = &probes[index];
-    let serial = probe.serial_number.clone().with_context(|| {
+    let serial = serial_number(probe).map(str::to_owned).with_context(|| {
         format!(
             "{} reports no serial, so it cannot be picked: unplug the other probes",
             probe.identifier
         )
     })?;
     Ok(Some(serial))
+}
+
+fn serial_number(probe: &DebugProbeInfo) -> Option<&str> {
+    let ProbeTransport::Usb(usb) = &probe.transport;
+    usb.serial_number.as_deref()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
