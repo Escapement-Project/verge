@@ -721,13 +721,13 @@ impl Bench {
             }
             return;
         }
+        ui.add(
+            egui::DragValue::new(&mut self.rate)
+                .range(1..=100_000)
+                .suffix(" pairs/s"),
+        );
         ui.horizontal_wrapped(|ui| {
-            ui.add(
-                egui::DragValue::new(&mut self.rate)
-                    .range(1..=100_000)
-                    .suffix(" pairs/s"),
-            );
-            for rate in [1_000, 10_000, 100_000] {
+            for rate in [1_000, 25_000, 75_000, 100_000] {
                 if choice(ui, &format!("{}k", rate / 1000), self.rate == rate).clicked() {
                     self.rate = rate;
                 }
