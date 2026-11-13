@@ -2,7 +2,7 @@
 //! session or a CSV file, with the edges of the DIO pins it asks for.
 
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
@@ -13,15 +13,21 @@ use escapement_verge_probe::record::Sink;
 use escapement_verge_probe::stream::{
     Converter, DioLost, Edge, EndReason, Markers, Message, Sample, Total,
 };
+use escapement_verge_probe::tickwave::{Context as Recording, FileWriter};
 use escapement_verge_probe::{
     Bus, Cancel, CommandError, EnergyCaptureSample, EnergyError, VergeControl,
 };
 
+#[derive(Clone)]
 pub struct Options {
     pub out: PathBuf,
     pub rate: u32,
     pub limit: Option<Duration>,
     pub csv: bool,
+    /// A tickwave recording instead of a sigrok session.
+    pub tickwave: bool,
+    /// The probe's firmware version, for a tickwave recording's source.
+    pub software: Option<String>,
     /// The DIO pins whose edges to record, bit `k` for DIO`k`.
     pub dio: u8,
     /// The current ranges for a capture this starts; automatic unless given.
@@ -94,14 +100,29 @@ pub fn record<B: Bus, L: AuxLink>(
             .with_context(|| format!("starting {name}'s capture; completion may be uncertain"))?;
     }
     let started = !running;
-    let sink = match Sink::create(&options.out, options.csv) {
-        Ok(sink) => sink,
+    let created = if options.tickwave {
+        let recording = Recording {
+            instrument: Some("MCU-Link Pro".into()),
+            software: options.software.clone(),
+            started_utc: Some(
+                humantime::format_rfc3339_millis(std::time::SystemTime::now()).to_string(),
+            ),
+        };
+        FileWriter::create(&options.out, recording)
+            .map(Writer::tickwave)
+            .map_err(anyhow::Error::from)
+    } else {
+        Sink::create(&options.out, options.csv)
+            .map(Writer::spawn)
+            .map_err(anyhow::Error::from)
+    };
+    let writer = match created {
+        Ok(writer) => writer,
         Err(error) => {
             leave(name, pro, started);
-            return Err(error.into());
+            return Err(error);
         }
     };
-    let writer = Writer::spawn(sink);
     let streamed = stream(bus, name, pro, &writer, started, options.limit, cancel);
     let written = writer
         .finish()
@@ -189,6 +210,7 @@ fn stream<B: Bus, L: AuxLink>(
             }
             continue;
         };
+        writer.message(&message)?;
         match message {
             Message::Header(header) => {
                 if converter.is_some() {
@@ -285,12 +307,40 @@ enum Output {
 
 /// The file, written on a thread of its own. Writing a sigrok chunk takes long enough that the
 /// probe's 16 messages would fill meanwhile and pairs be lost.
-struct Writer {
-    send: mpsc::Sender<Output>,
-    thread: thread::JoinHandle<Result<()>>,
+enum Writer {
+    Sink {
+        send: mpsc::Sender<Output>,
+        thread: thread::JoinHandle<Result<()>>,
+    },
+    /// A tickwave recording takes the stream's messages as they come.
+    Tickwave {
+        send: mpsc::Sender<Message>,
+        thread: thread::JoinHandle<Result<()>>,
+    },
 }
 
+/// How long the tickwave writer waits for a message before its clock runs: it closes a block at
+/// least every second.
+const TICK: Duration = Duration::from_millis(200);
+
 impl Writer {
+    fn tickwave(mut file: FileWriter) -> Writer {
+        let (send, receive) = mpsc::channel::<Message>();
+        let thread = thread::spawn(move || {
+            loop {
+                match receive.recv_timeout(TICK) {
+                    Ok(message) => {
+                        file.ingest(&message)?;
+                    }
+                    Err(RecvTimeoutError::Timeout) => file.flush()?,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            Ok(file.finish()?)
+        });
+        Writer::Tickwave { send, thread }
+    }
+
     fn spawn(mut sink: Sink) -> Writer {
         let (send, receive) = mpsc::channel();
         let thread = thread::spawn(move || {
@@ -316,20 +366,43 @@ impl Writer {
             }
             Ok(sink.finish()?)
         });
-        Writer { send, thread }
+        Writer::Sink { send, thread }
     }
 
-    /// Fails once the writer has stopped on an error, which [`Writer::finish`] returns.
+    /// A sigrok session's or CSV file's next piece. Fails once the writer has stopped on an
+    /// error, which [`Writer::finish`] returns.
     fn send(&self, output: Output) -> Result<()> {
-        self.send
-            .send(output)
-            .map_err(|_| anyhow!("the file stopped taking pairs"))
+        match self {
+            Writer::Sink { send, .. } => send
+                .send(output)
+                .map_err(|_| anyhow!("the file stopped taking pairs")),
+            Writer::Tickwave { .. } => Ok(()),
+        }
+    }
+
+    /// A stream message, for a tickwave recording.
+    fn message(&self, message: &Message) -> Result<()> {
+        match self {
+            Writer::Tickwave { send, .. } => send
+                .send(message.clone())
+                .map_err(|_| anyhow!("the file stopped taking pairs")),
+            Writer::Sink { .. } => Ok(()),
+        }
     }
 
     /// Waits for everything sent to be written, and the file finished.
     fn finish(self) -> Result<()> {
-        drop(self.send);
-        self.thread
+        let thread = match self {
+            Writer::Sink { send, thread } => {
+                drop(send);
+                thread
+            }
+            Writer::Tickwave { send, thread } => {
+                drop(send);
+                thread
+            }
+        };
+        thread
             .join()
             .map_err(|_| anyhow!("the file's writer panicked"))?
     }
@@ -859,6 +932,8 @@ mod tests {
             rate: 1000,
             limit: Some(Duration::from_millis(300)),
             csv,
+            tickwave: false,
+            software: None,
             dio: 0,
             range: Default::default(),
         }
@@ -955,6 +1030,42 @@ mod tests {
                 "{log:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_tickwave_recording_holds_every_pair_and_its_header() {
+        use escapement_verge_probe::tickwave::format::decode::Footer;
+        use escapement_verge_probe::tickwave::format::header::ChannelKind;
+        let (bus, device) = pro_link();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("run.tickwave");
+        let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+        let mut pro = VergeControl::new(&mut aux);
+        let options = Options {
+            tickwave: true,
+            software: Some("test".into()),
+            dio: 0b0101,
+            ..options(&out, false)
+        };
+        let recorded = record(&bus, "the unit", &mut pro, &options, &Cancel::new()).unwrap();
+        assert!(recorded.pairs > 100, "{}", recorded.pairs);
+        let file = std::fs::read(&out).unwrap();
+        let header = Footer::parse_file(&file).unwrap().header;
+        let ChannelKind::Analog { count, .. } = header.channels[0].data else {
+            panic!("V is analog");
+        };
+        assert_eq!(count, recorded.pairs);
+        let names: Vec<&str> = header.channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["V", "I", "low_range", "under_range", "DIO0", "DIO2"]
+        );
+        let source = &header.sources[0];
+        assert_eq!(source.software.as_deref(), Some("test"));
+        assert!(escapement_verge_probe::tickwave::header_from(&source.extra).is_some());
+        assert_eq!(source.extra["end_reason"], "stopped");
+        // Compacted in place: nothing left beside it.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

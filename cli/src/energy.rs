@@ -145,6 +145,12 @@ pub enum EnergyCommand {
         /// Voltage and current are read together at the pair's time.
         #[arg(long)]
         csv: bool,
+        /// Write a tickwave recording instead, which tickwave opens: voltage, current and power,
+        /// the range each pair was read on and its under-range mark, each DIO pin recorded, and
+        /// markers. It closes a block at least every second, so a crash loses at most that, and
+        /// rewrites the file with full-size blocks once recording ends.
+        #[arg(long, conflicts_with = "csv")]
+        tickwave: bool,
         /// Record the edges of these DIO pins too: 0 to 3, as `--dio 0,3`, or `dio0` to `dio3`,
         /// or `all`. A sigrok session shows each as a logic channel at the pair rate, a pulse
         /// shorter than a pair stretched to one; CSV gives each edge's time.
@@ -383,6 +389,7 @@ pub fn energy<B: Bus>(
             rate,
             limit,
             csv,
+            tickwave,
             dio,
             range,
         } => {
@@ -391,6 +398,8 @@ pub fn energy<B: Bus>(
                 rate: *rate,
                 limit: *limit,
                 csv: *csv,
+                tickwave: *tickwave,
+                software: None,
                 dio: dio.iter().fold(0, |mask, pin| mask | pin),
                 range: range.range,
             };
@@ -422,6 +431,10 @@ fn record<B: Bus>(
     let mut aux = Aux::open(link).with_context(|| format!("opening {name}'s Verge Aux"))?;
     let mut pro = VergeControl::new(&mut aux);
     check_offered(name, &mut pro, Feature::Energy)?;
+    let options = &record::Options {
+        software: unit.verge().map(|ours| ours.firmware.clone()),
+        ..options.clone()
+    };
     let recorded = record::record(bus, name, &mut pro, options, cancel)?;
     let file = options.out.display();
     let energy = si(recorded.total.nanojoules() as f64 * 1e-9, "J");

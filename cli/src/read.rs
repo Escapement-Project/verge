@@ -6,9 +6,9 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use escapement_verge_probe::probe_rs::MemoryInterface;
+use escapement_verge_probe::probe_rs::probe::cmsisdap::ScanFormat;
 use escapement_verge_probe::probe_rs::probe::list::Lister;
 use escapement_verge_probe::probe_rs::probe::{DebugProbeInfo, ProbeTransport, WireProtocol};
-use escapement_verge_probe::probe_rs::probe::cmsisdap::ScanFormat;
 
 #[derive(Args)]
 pub struct ReadArgs {

@@ -17,7 +17,7 @@ serde_json = "1.0.154"
 tracing = "0.1.44"
 tracing-indicatif = "0.3.14"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-escapement-verge-probe = { version = "0.1.0", path = "../../verge-probe" }
+escapement-verge-probe = { version = "0.1.0", path = "../../verge-probe", features = ["tickwave"] }
 
 [lints]
 workspace = true
