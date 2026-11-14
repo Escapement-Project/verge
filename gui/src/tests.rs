@@ -2385,6 +2385,29 @@ fn the_icon_decodes() {
     assert_eq!(icon.rgba.len(), 512 * 512 * 4);
 }
 
+/// The desktop entry and the macOS bundle carry the window's app id. A desktop entry named or
+/// pointing otherwise leaves the window without its entry's name and icon.
+#[test]
+fn the_desktop_entry_and_the_bundle_carry_the_app_id() {
+    let package = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("package");
+    let entry = std::fs::read_to_string(package.join(format!("linux/{}.desktop", crate::APP_ID)))
+        .expect("a desktop entry named for the app id");
+    for key in ["Icon", "StartupWMClass"] {
+        assert!(
+            entry
+                .lines()
+                .any(|line| line == format!("{key}={}", crate::APP_ID)),
+            "{key} in {entry}"
+        );
+    }
+    let plist = std::fs::read_to_string(package.join("macos/Info.plist")).unwrap();
+    let bundle = format!(
+        "<key>CFBundleIdentifier</key>\n\t<string>{}</string>",
+        crate::APP_ID.replace('_', "-")
+    );
+    assert!(plist.contains(&bundle), "{plist}");
+}
+
 /// Focus is a ring of ink just outside the widget, drawn over everything on its layer, so it shows
 /// on a chosen button's ink fill as well as on an outline.
 #[test]

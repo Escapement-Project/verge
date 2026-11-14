@@ -1,5 +1,5 @@
 # verge's own checks: rustfmt, clippy with warnings denied, the tests, a release build without
-# the simulator, and the Windows build, compiled but not run.
+# the simulator, verge-gui's desktop entry, and the Windows build, compiled but not run.
 
 name: check
 
@@ -20,7 +20,7 @@ jobs:
       - name: Install the toolchain
         run: >
           pacman -Syu --noconfirm --needed
-          git gcc pkgconf systemd-libs mingw-w64-gcc rustup
+          git gcc pkgconf systemd-libs mingw-w64-gcc rustup desktop-file-utils
 
       - uses: actions/checkout@v7
 
@@ -61,6 +61,9 @@ jobs:
               exit 1
             fi
           done
+
+      - name: verge-gui's desktop entry
+        run: desktop-file-validate gui/package/linux/*.desktop
 
       - name: Windows build, compiled only
         run: cargo check --workspace --all-targets --all-features --target x86_64-pc-windows-gnu

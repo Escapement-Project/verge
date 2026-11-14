@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Verge
+Comment=Update MCU-Link probes, and power and measure a target from an MCU-Link Pro
+Exec=verge-gui
+Icon=io.github.escapement_project.Verge
+Terminal=false
+Categories=Development;Electronics;
+Keywords=MCU-Link;CMSIS-DAP;debug probe;firmware;energy;
+StartupNotify=true
+StartupWMClass=io.github.escapement_project.Verge

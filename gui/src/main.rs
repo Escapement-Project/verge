@@ -120,6 +120,11 @@ fn record_dir() -> std::path::PathBuf {
     }
 }
 
+/// The window's Wayland app_id and X11 class. The Linux desktop entry is named for it and names it
+/// again, so the desktop pairs the window with the entry's name and icon; macOS's bundle identifier
+/// is the same with '-' for '_', which Apple does not allow.
+const APP_ID: &str = "io.github.escapement_project.Verge";
+
 /// Verge's app icon, the design tokens' 512 px rendering.
 fn icon() -> egui::IconData {
     eframe::icon_data::from_png_bytes(include_bytes!("../icons/verge-512.png"))
@@ -157,6 +162,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("verge")
+            .with_app_id(APP_ID)
             .with_inner_size([1080.0, 700.0])
             .with_min_inner_size([860.0, 560.0])
             .with_drag_and_drop(true)
