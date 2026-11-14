@@ -51,7 +51,8 @@ verge inspect FILE
 ```
 
 Reads an ELF or S-record file and says what it puts into flash, including the boards a Verge image
-declares. Touches no USB device. [Board declarations](updating.md#board-declarations).
+declares. Touches no USB device. [The board
+declaration](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/README.md#the-board-declaration).
 
 ## `read`
 

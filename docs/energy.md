@@ -14,10 +14,8 @@ The probe takes voltage and current together, as a pair. A capture takes pairs a
 to 100,000 a second, and adds each pair's energy to the total. Each pair is read on one of two
 current ranges ([below](#the-two-current-ranges)).
 
-Energy capture needs the board's HW_VER_5 strap fitted
-([Boards](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/BOARDS.md) lists the
-straps). The probe's calibration is checked in both of the Pro's current settings, 350 mA and 50 mA,
-which J16 to J18 select. Alongside the calibrated voltage and current, the probe keeps each pair's
+The probe's calibration is checked in both of the Pro's current settings, 350 mA and 50 mA, which
+J16 to J18 select. Alongside the calibrated voltage and current, the probe keeps each pair's
 raw ADC codes.
 
 A capture runs in the probe, not in verge. It goes on from `start` until `stop`, the next start or a
@@ -44,6 +42,21 @@ total until the next start or a restart.
 
 `verge energy calibration` lists the points each current range was calibrated at.
 
+## How accurate it is
+
+- The probe's 3.0 V reference sets the scale of every reading: within 0.5%, and 100 ppm more for
+  each °C.
+- NXP gives the 350 mA setting's high range 5% and the other ranges 1%. The probe calibrates at
+  3.3 V, so in that high range a 1.8 V target reads about 3% high. In the 50 mA setting it reads
+  0.35% high.
+- In the 350 mA setting, the high range reads currents under 2 mA 3 to 4% high on the Pro
+  measured. An `auto` capture reads them on the low range.
+- The high range's resistance can change from one start to the next, and J17's contact is part of
+  it. The probe measures it as it starts, so restart the probe after moving J16 to J18.
+- Rarely, the probe calibrates the 350 mA setting's high range high as it starts up: once in more
+  than twenty starts on the Pro measured, by 19%. `verge energy calibration` shows it: every
+  high-range code up by the same factor, with no jumper moved. A restart calibrates again.
+
 ## The two current ranges
 
 The probe reads current on a low range and a high range. `--range` sets how a capture uses them. It
@@ -59,9 +72,9 @@ back to the switch up on the low range alone, again and again. The probe then wa
 each switch down, up to about a second, so it reads such a target mostly on the high range.
 
 `high` holds the high range for the whole capture. Nothing switches, so the reading follows what the
-target draws. But the high range reads small currents unreliably. In the 350 mA setting that starts
-under about 0.36 mA: a target asleep at 166 µA read anywhere from 137 to 363 µA. Scaled to the 50 mA
-setting, the limit is about 46 µA, which has not been measured.
+target draws. But the high range reads small currents unreliably: under about 0.65 mA in the 350 mA
+setting, as the Pro measured reads it, and under about 90 µA in the 50 mA setting, scaled to its
+sense resistor and not measured.
 
 Either way, a pair read on the high range under that limit is marked under range. An `auto` capture
 marks the ones it reads after the current falls, before it switches down.
@@ -99,8 +112,7 @@ verge energy record --out run.sr --for 10s
 
 `record` saves every pair of a capture. Like `watch`, it starts a capture if none runs, and stops
 only a capture it started. It records until Ctrl-C, or for as long as `--for` says. It reads the
-pairs through Verge Aux, so it works while a debugger holds the probe, and needs a Verge build that
-has Verge Aux.
+pairs through Verge Aux, so it works while a debugger holds the probe.
 
 `--dio` records the edges of the Pro's DIO pins too: `--dio 0,3`, `dio0` to `dio3`, or `all`.
 
@@ -113,11 +125,11 @@ By default the file is a sigrok session, which PulseView opens. It has two analo
 volts and `mA` in milliamps. A session file stores no units, so sigrok shows both as volts; the
 channel names give the units.
 
-The probe measures nothing for a moment while it reads the target's supply, or times a debugger's
-reads. There the last pair repeats and a logic channel, `GAP`, is high, so the time axis stays true.
-A pair taken as the current range switched carries the current the probe's total gives it, worked
-out from the pairs either side, so the recording adds up to the total. Pairs marked under range are
-high on a logic channel of their own, `UNDER`.
+The probe measures nothing for a moment while it reads the target's supply, or while it measures how
+quickly the target answers a debugger. There the last pair repeats and a logic channel, `GAP`, is
+high, so the time axis stays true. A pair taken as the current range switched carries the current
+the probe's total gives it, worked out from the pairs either side, so the recording adds up to the
+total. Pairs marked under range are high on a logic channel of their own, `UNDER`.
 
 A sigrok session shows each DIO pin recorded as a logic channel at the pair rate, with a pulse
 shorter than a pair stretched to one. Where the probe lost DIO edges, the pins' levels are unknown,

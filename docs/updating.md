@@ -19,6 +19,10 @@ four ways:
 daplink-rs uses Arm's DAPLink USB ID, which other DAPLink probes share. verge recognises
 daplink-rs's MCU-Link build by its USB strings and leaves every other device with that ID alone.
 
+verge does not recognise a probe running the J-Link firmware that LinkServer ships for the
+MCU-Link. A probe running NXP's V2.x firmware, which speaks HID only, verge cannot ask what it
+runs: it lists the probe as probably stock, and a batch leaves it out.
+
 `verge` on its own lists each attached probe with the way verge would update it.
 
 ## Choosing the image
@@ -47,10 +51,12 @@ NXP's firmware names its board in the USB product string. Verge names it in its 
 reply. daplink-rs does not report it. verge recognises the standalone MCU-Link and the MCU-Link Pro,
 and lists each probe's board.
 
-A Verge image says which boards it runs on, in a [board declaration](#board-declarations) inside the
-image. An image without one runs only on the standalone MCU-Link. verge checks releases and local
-files against the probe's board. It refuses a board the image does not declare, and a board it does
-not know, such as an MCU-Link MR. NXP's firmware goes on any board NXP's firmware supports.
+A Verge image says which boards it runs on, in a [board
+declaration](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/README.md#the-board-declaration)
+inside the image. An image without one runs only on the standalone MCU-Link. verge checks releases
+and local files against the probe's board. It refuses a board the image does not declare, and a
+board it does not know, such as an MCU-Link MR. NXP's firmware goes on any board NXP's firmware
+supports.
 
 A probe in ISP mode cannot say which board it is. `verge isp flash` lists the image's boards when it
 asks you to confirm, but cannot check the probe against them. So `verge isp enter` sends a known
@@ -82,8 +88,7 @@ For an image that does not start, the ISP jumper is the way back. Fit it before 
 
 When an update needs the ISP jumper, or stops partway, verge prints the command that finishes it.
 The command names the board, where verge knows it, and the image: a release tag, a file, or
-`--stock`. `update` checks the board before it gives jumper instructions, and the library checks it
-again before it asks the probe into its bootloader.
+`--stock`. `update` checks the board before it gives jumper instructions.
 
 ### ISP mode
 
@@ -108,11 +113,7 @@ with `--port`. On Linux, `enter` works with another probe already in ISP mode, a
 flash. `update` and batches wait until that probe is flashed or unplugged.
 
 Use `flash` once the probe is in ISP mode, by the jumper or by `enter`. The bootloader can take a
-few seconds to answer. verge looks at the USB bus again just before it flashes, and goes ahead only
-if it would still pick the same bootloader. On Linux it also opens that device by its path.
-
-verge writes and checks whole 512-byte pages. Erased flash on the LPC55S69 has no valid ECC, and
-reading past the image can drop the bootloader off USB.
+few seconds to answer.
 
 After flashing, verge finds the restarted probe on the same USB port. If the system reports no port,
 exactly one new device has to appear; if two do, verge stops with an error.
@@ -272,7 +273,9 @@ A release has to carry three files:
 For example, `mculink-verge-v0.3.0.s19`, `mculink-verge-v0.3.0.s19.sha256` and
 `mculink-verge-v0.3.0.s19.minisig`. The tag is the version, and a probe built from that tag reports
 it, so verge can compare what is installed. The boards an image runs on are in its declaration,
-inside the signed image.
+inside the signed image ([Building the
+firmware](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/README.md#the-board-declaration)),
+and `verge inspect IMAGE` shows it.
 
 verge checks the signature against the public key built into it. It reports a missing signature, a
 signature from another key, and an image changed after signing. It takes minisign's default
@@ -286,22 +289,3 @@ file. mculink-verge's README, under
 how the firmware's releases are built, signed and published, how to make the key pair, and how to
 make the files by hand.
 
-### Board declarations
-
-A Verge image declares its boards in a 16-byte record that starts with a magic value. The firmware
-places it after CPU 0's vector table, and verge looks at every 4-byte-aligned address in the image.
-Fields are little-endian:
-
-| offset | size | field |
-| --- | --- | --- |
-| 0 | 8 | the ASCII bytes `VERGEIMG`, with no terminator |
-| 8 | 1 | format, 1 |
-| 9 | 1 | the record's length in bytes, 16 at format 1 |
-| 10 | 2 | zero |
-| 12 | 4 | boards: bit n set means the image runs on board n |
-
-The board numbers are the ones Verge's identification reply uses: 0 for the standalone MCU-Link, 1
-for the MCU-Link Pro and 2 for an on-board MCU-Link. verge ignores board bits it does not know.
-Later formats add fields at the end, read only in the formats that define them. verge refuses two
-declarations in one image, format 0, a length under 16, and a declaration that runs past its part of
-the image. `verge inspect IMAGE` shows the record.

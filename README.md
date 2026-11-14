@@ -42,12 +42,12 @@ mculink-verge's README under "Releases".
 
 ## Contributing
 
-CONTRIBUTING.md has how the tools are built and how to test them.
+[CONTRIBUTING.md](CONTRIBUTING.md) has how the tools are built and how to test them.
 
 ## Not done yet
 
-- Variant releases. A release carries one image, so a Verge build with a variant suffix, such
-  as `+armwire`, cannot be published beside the plain build.
+- Variant releases. A release carries one image, so a firmware build with a variant suffix, such
+  as the `+armwire` reference build, cannot be published beside the plain build.
 - The J-Link firmware that LinkServer ships for the MCU-Link. The tool does not recognise a unit
   running it.
 - Stock V2.x, which speaks HID only. Its USB product string has not been recorded from a real

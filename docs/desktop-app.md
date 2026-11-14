@@ -48,8 +48,8 @@ supply as commanded and the voltage as measured; they are separate readings.
 
 DIO shows each pin's direction and level. DIO0 to DIO2 change direction together, and DIO3 on its
 own. Switching to output asks first: check that the target is not driving those pins. Inputs have
-pull-downs, and outputs read back their own drive. DIO needs a current Verge build, which carries
-the DIO pins on Verge Aux, and the J15 jumper off when the probe started.
+pull-downs, and outputs read back their own drive. DIO needs the J15 jumper off when the probe
+started.
 
 ## Recording energy
 
@@ -61,11 +61,10 @@ probe's energy total, and its calibration can cut the target's power for about 0
 If another program already runs a capture, Record running capture records it at its own rate. Stop
 recording stops a capture the window started, and leaves another program's running.
 
-Starting, recording and watching need a Verge build with capture identities, which let a program
-stop the capture it started without stopping a capture another program has started since. Each keeps
-the identity of the capture it started or joined, so cleaning up leaves a newer capture running. If
-the reply to a start goes missing, the capture can be left running. Record running capture, or
-`verge energy stop`, sorts that out.
+A program stops only the capture it started or joined, not one another program has started since:
+each capture has an identity, and the window keeps the one it started or joined. If the reply to a
+start goes missing, the capture can be left running. Record running capture, or `verge energy stop`,
+sorts that out.
 
 ### The graph
 
@@ -116,5 +115,4 @@ Export writes the capture, or the selection, as CSV or as a sigrok session, with
 and a `GAP` channel. Exports include the DIO levels, and a `DIO_GAP` channel (`dio_gap` in CSV) for
 time whose levels are unknown. Both formats keep markers as `verge energy record` does ([Energy
 capture](energy.md#markers)). An export keeps whole pairs at its ends, with their own times, so it
-can start a little before the selection. A CSV export of a capture saved before the range column
-existed leaves the range empty.
+can start a little before the selection.
