@@ -774,7 +774,12 @@ fn update_unit<B: Bus, H: Http>(
     cancel: &Cancel,
 ) -> Result<()> {
     let units = detect_named(bus, serial).context("looking for MCU-Links")?;
-    let unit = pick_unit(&units, serial, |_| true)?;
+    let unit = pick_unit(&units, serial, |_| true).map_err(|refused| {
+        match isp_flash_hint(&units, &args.source, github) {
+            Some(hint) => anyhow::anyhow!("{refused}. {hint}"),
+            None => refused,
+        }
+    })?;
     let offer = offer(unit, &units);
     let Some(path) = offer.best() else {
         bail!(
@@ -857,6 +862,28 @@ fn update_unit<B: Bus, H: Http>(
     let again = again(&args.source, &loaded.version, github);
     report(&outcome.map_err(|error| explain(error, &again, Some(unit)))?)?;
     Ok(())
+}
+
+/// The command that flashes a unit in ISP mode, which has no serial to pick it by, when `units`
+/// hold one.
+fn isp_flash_hint<H: Http>(units: &[Unit], source: &Source, github: &GitHub<H>) -> Option<String> {
+    let isp: Vec<&Unit> = units
+        .iter()
+        .filter(|unit| matches!(unit.state, State::Bootloader))
+        .collect();
+    let command = again(source, &ImageVersion::Unknown, github);
+    match isp.as_slice() {
+        [] => None,
+        [unit] => Some(match unit.device.location.as_deref() {
+            Some(port) => format!(
+                "The unit in ISP mode, at {port}, has no serial: flash it with `{command} --port {port}`"
+            ),
+            None => format!("The unit in ISP mode has no serial: flash it with `{command}`"),
+        }),
+        _ => Some(format!(
+            "A unit in ISP mode has no serial: flash one with `{command} --port PORT`, with the port `verge list` names"
+        )),
+    }
 }
 
 /// What to know about flashing `unit` once it is in ISP mode, where nothing tells its board.

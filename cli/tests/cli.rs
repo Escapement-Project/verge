@@ -1516,6 +1516,19 @@ fn several_units_that_fit_need_a_serial_off_a_terminal() {
         ));
 }
 
+/// An update that cannot pick between a unit and one in ISP mode, which has no serial, names the
+/// command that flashes the one in ISP mode.
+#[test]
+fn an_update_beside_a_unit_in_isp_mode_names_how_to_flash_it() {
+    tool("ours-beside-isp")
+        .args(["update", "--file", "verge.elf", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "pick one by serial. The unit in ISP mode, at 1-2, has no serial: flash it with `verge isp flash --file verge.elf --port 1-2`",
+        ));
+}
+
 #[test]
 fn list_shows_only_the_unit_serial_names() {
     tool("bench")
