@@ -2,9 +2,8 @@
 
 verge-gui gives the verge command's update workflows a window: it updates probes, one at a time or
 in a batch. On a Pro it also switches the target supply, drives the DIO pins and records energy
-captures. On Linux and Windows it comes in the same archive as verge
-([Getting started](getting-started.md)); on macOS, build it from source
-([Building](../README.md#building)).
+captures. It comes in the same archive as verge, as Verge.app on macOS ([Getting
+started](getting-started.md#install-verge)).
 
 ## Updating a probe
 

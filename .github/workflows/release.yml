@@ -8,8 +8,10 @@
 #                                                the file and the tag
 #
 # Platforms: x86_64-linux (built on the oldest Ubuntu runner, so the binaries need no newer glibc
-# than it has), x86_64-windows, and universal-macos (arm64 and x86_64 joined by lipo). The macOS
-# archive carries verge alone: verge-gui is built from source there until it ships as a signed app.
+# than it has), x86_64-windows, and universal-macos (arm64 and x86_64 joined by lipo). The Linux
+# archive adds verge-gui's desktop entry and icons under share/; the Windows build embeds the icon
+# and manifest itself (gui/build.rs); the macOS archive holds verge-gui as Verge.app, signed ad hoc
+# and not notarized.
 #
 # The same split as the firmware's release workflow, with the same key: `build` has no secret,
 # `sign` runs only minisign in the `release` environment, which holds the key and waits for a
@@ -41,7 +43,7 @@ jobs:
           - platform: universal-macos
             runner: macos-latest
             targets: aarch64-apple-darwin x86_64-apple-darwin
-            tools: verge
+            tools: verge verge-gui
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -95,37 +97,52 @@ jobs:
           set -- ${{ matrix.targets }}
           case "${{ matrix.platform }}" in
             universal-macos)
-              for tool in ${{ matrix.tools }}; do
-                lipo -create -output "pkg/$stem/$tool" \
-                  "target/$1/release/$tool" "target/$2/release/$tool"
-              done
+              lipo -create -output "pkg/$stem/verge" "target/$1/release/verge" "target/$2/release/verge"
+              # verge-gui inside Verge.app. Signed ad hoc, which seals the bundle; without
+              # notarization the first launch needs Open Anyway (docs/getting-started.md).
+              app="pkg/$stem/Verge.app"
+              mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+              lipo -create -output "$app/Contents/MacOS/verge-gui" \
+                "target/$1/release/verge-gui" "target/$2/release/verge-gui"
+              sed "s/@VERSION@/${GITHUB_REF_NAME#v}/g" gui/package/macos/Info.plist > "$app/Contents/Info.plist"
+              plutil -lint "$app/Contents/Info.plist"
+              cp gui/icons/verge.icns "$app/Contents/Resources/"
+              codesign --force --sign - "$app"
+              codesign --verify --strict --verbose=2 "$app"
               ;;
             x86_64-windows)
               for tool in ${{ matrix.tools }}; do cp "target/$1/release/$tool.exe" "pkg/$stem/"; done
               ;;
-            *)
+            x86_64-linux)
               for tool in ${{ matrix.tools }}; do cp "target/$1/release/$tool" "pkg/$stem/"; done
+              # verge-gui's desktop entry and icons, laid out to copy under ~/.local/share.
+              id=io.github.escapement_project.Verge
+              install -Dm644 "gui/package/linux/$id.desktop" "pkg/$stem/share/applications/$id.desktop"
+              for size in 16 24 32 48 64 128 256 512; do
+                install -Dm644 "gui/icons/verge-$size.png" \
+                  "pkg/$stem/share/icons/hicolor/${size}x${size}/apps/$id.png"
+              done
+              install -Dm644 gui/icons/verge-icon.svg "pkg/$stem/share/icons/hicolor/scalable/apps/$id.svg"
+              ;;
+            *)
+              echo "no packaging for ${{ matrix.platform }}" >&2
+              exit 1
               ;;
           esac
           cp LICENSE "pkg/$stem/"
-          # The licences of everything the binaries link, for every target in the archive. Without
-          # verge-gui, the CLI's package alone, so the list holds only what the archive links.
+          # The licences of everything the binaries link, for every target in the archive.
           about_targets=""
           for target in ${{ matrix.targets }}; do about_targets="$about_targets --target $target"; done
-          about_scope=""
-          case " ${{ matrix.tools }} " in
-            *" verge-gui "*) ;;
-            *) about_scope="--manifest-path cli/Cargo.toml" ;;
-          esac
           # shellcheck disable=SC2086
-          cargo about generate --locked --fail -c about.toml $about_scope $about_targets \
+          cargo about generate --locked --fail -c about.toml $about_targets \
             -o "pkg/$stem/THIRD-PARTY-LICENSES.html" about.hbs
           if [ "${{ matrix.platform }}" = x86_64-windows ]; then
             name="$stem.zip"
             (cd pkg && 7z a -tzip "../out/$name" "$stem" > /dev/null)
           else
             name="$stem.tar.gz"
-            tar -C pkg -czf "out/$name" "$stem"
+            # No AppleDouble files for macOS's extended attributes; the bundle's seal is in files.
+            COPYFILE_DISABLE=1 tar -C pkg -czf "out/$name" "$stem"
           fi
           (cd out && sha256sum "$name" > "$name.sha256")
 

@@ -27,9 +27,8 @@ Each verge release has one archive per system:
 - Windows on x86_64;
 - macOS, one program for both Apple silicon and Intel.
 
-The Linux and Windows archives hold both programs, `verge` and `verge-gui`. The macOS archive holds
-`verge` alone; on macOS, build `verge-gui` from source ([Building](../README.md#building)). Each
-archive also holds `LICENSE` and `THIRD-PARTY-LICENSES.html`, the licence of every crate inside.
+Each archive holds both programs: `verge`, and the desktop app `verge-gui` (`Verge.app` on macOS).
+Each also holds `LICENSE` and `THIRD-PARTY-LICENSES.html`, the licence of every crate inside.
 Beside each archive are a `.sha256` checksum and a minisign signature, made with the same key that
 signs the firmware. To check an archive before you unpack it:
 
@@ -38,6 +37,23 @@ minisign -V -P <the public key> -m verge-v0.1.0-x86_64-linux.tar.gz
 ```
 
 To build verge from source instead, see [Building](../README.md#building) in its README.
+
+### The desktop app on Linux
+
+The Linux archive's `share` folder holds the app's menu entry and icons. Put `verge-gui` on your
+`PATH`, then copy them into your home folder from inside the unpacked archive:
+
+```
+cp -r share/. ~/.local/share/
+```
+
+Your desktop's app menu then lists Verge.
+
+### The desktop app on macOS
+
+Apple hasn't notarized `Verge.app`, so macOS blocks it the first time you open it. To allow it, open
+System Settings, then Privacy & Security, and choose Open Anyway beside the message about Verge.
+After that it opens like any other app. Move it to Applications first if you want it there.
 
 ### USB permissions on Linux
 
