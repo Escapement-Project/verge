@@ -691,10 +691,20 @@ mod tests {
         s.fail(anyhow::anyhow!("disk failure before first tick"));
         let mut control = VergeControl::new(&mut s.aux);
         assert!(control.energy_capture_status().unwrap().running);
-        assert!(matches!(
-            s.aux.message(Duration::from_millis(50)).unwrap(),
-            Some(Message::End(_))
-        ));
+        // What the stream sent before the probe took the end request comes ahead of the end.
+        let mut before = Vec::new();
+        loop {
+            match s.aux.message(Duration::from_millis(50)).unwrap() {
+                Some(Message::End(_)) => break,
+                Some(
+                    data @ (Message::Pairs(_)
+                    | Message::Edges(_)
+                    | Message::DioLost(_)
+                    | Message::Markers(_)),
+                ) if before.len() < 100 => before.push(data),
+                other => panic!("{other:?} after {before:?}"),
+            }
+        }
         assert!(s.aux.message(Duration::from_millis(50)).unwrap().is_none());
     }
 
