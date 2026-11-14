@@ -72,7 +72,7 @@ resumes any halted core when it finishes.
 | `WORDS` | how many values to read |
 | `--chip CHIP` | the target chip, as probe-rs names it |
 | `--protocol` | the wire: `swd`, the default, `jtag` or `cjtag`. cJTAG works on a probe running Verge |
-| `--cjtag-format FORMAT` | with `cjtag`, hold the target to one scan format: `oscan1`, `oscan2`, `oscan5` or `oscan6`. The target switches to it where it has it, and stays in OScan1 where not. Left out, the target runs the fastest format both it and the probe have |
+| `--cjtag-format FORMAT` | with `cjtag`, the scan format to connect in: `oscan1`, the default, `oscan2`, `oscan5` or `oscan6`. Ask only for a format the target has: nothing checks it, and a target without the format has not been tried. [Wires and clocks](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/wires.md#cjtag) says what each format gains |
 | `--speed KHZ` | the wire clock in kHz; the probe's default when left out |
 | `--time` | print the attach and read times on stderr |
 

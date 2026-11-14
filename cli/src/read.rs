@@ -21,8 +21,8 @@ pub struct ReadArgs {
     /// The wire clock in kHz. The probe's default when left out.
     #[arg(long)]
     speed: Option<u32>,
-    /// Hold cJTAG to one scan format. The target is switched to it where it has it, and stays in
-    /// OScan1 where not. Left out, the target runs the fastest format both it and the probe have.
+    /// The cJTAG scan format to connect in. OScan1 when left out. Nothing checks that the target
+    /// has the format: ask only for one it has.
     #[arg(long, value_enum, value_name = "FORMAT")]
     cjtag_format: Option<CjtagFormat>,
     /// Print the attach and read times on stderr.
