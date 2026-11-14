@@ -68,7 +68,7 @@ pub struct RangeArg {
     /// Which current ranges a capture this starts uses. auto, the default, switches between the
     /// low and high ranges as the current moves: it reads currents down to tens of nA, but each
     /// switch disturbs the reading for about a millisecond. high holds the high range, so the
-    /// reading follows the target undisturbed, but currents under about 0.36 mA in the 350 mA
+    /// reading follows the target undisturbed, but currents under about 0.65 mA in the 350 mA
     /// setting read unreliably. Either way, a high-range pair under that is marked under range.
     #[arg(long, value_enum)]
     pub range: Option<Ranges>,

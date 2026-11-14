@@ -754,7 +754,7 @@ impl Bench {
                                  dips the reading for about a millisecond."
                             }
                             EnergyRanges::High => {
-                                "Reads the target undisturbed, but currents under about 0.36 mA \
+                                "Reads the target undisturbed, but currents under about 0.65 mA \
                                  read unreliably and are marked under range."
                             }
                         },
@@ -1227,7 +1227,7 @@ impl Bench {
             ui.label(
                 text(
                     Role::Body,
-                    "This capture held the high range: currents under about 0.36 mA read unreliably",
+                    "This capture held the high range: currents under about 0.65 mA read unreliably",
                 )
                 .color(face.ink_2),
             );
