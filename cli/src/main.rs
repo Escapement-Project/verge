@@ -21,6 +21,7 @@ use escapement_verge_probe::detect::{Guess, Hardware, State, detect_named};
 use escapement_verge_probe::ids::Role;
 use escapement_verge_probe::image::{Image, PAGE};
 use escapement_verge_probe::paths::ISP_IDENTITY_WARNING;
+use escapement_verge_probe::pro::Feature;
 use escapement_verge_probe::progress::{Progress, Step};
 use escapement_verge_probe::release::{DEFAULT_REPO, GitHub, Http, ReleaseError, Repo, Ureq};
 #[cfg(feature = "simulate")]
@@ -32,7 +33,7 @@ use escapement_verge_probe::update::{self, Outcome, Timing, UpdateError};
 use escapement_verge_probe::usb::UsbBus;
 use escapement_verge_probe::version::Relation;
 use escapement_verge_probe::version::StockVersion;
-use escapement_verge_probe::{Bus, Cancel, Firmware, Path, Unit, dap, detect, offer};
+use escapement_verge_probe::{Bus, Cancel, CommandError, Firmware, Path, Unit, detect, offer};
 use tracing_indicatif::IndicatifLayer;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::{EnvFilter, filter_fn};
@@ -525,14 +526,6 @@ fn choose<'a>(units: &[&'a Unit]) -> Result<&'a Unit> {
         .default(0)
         .interact()?;
     Ok(units[index])
-}
-
-fn pro_running_ours(unit: &Unit) -> bool {
-    matches!(
-        &unit.state,
-        State::Probe { firmware: Firmware::Ours(ours), .. }
-            if ours.board.map(escapement_verge_probe::BoardKind::number) == Some(dap::Ours::BOARD_MCU_LINK_PRO)
-    )
 }
 
 fn describe_unit(unit: &Unit) -> String {
@@ -1164,87 +1157,55 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
             bail!("{} named in both {names}", dio_names(a & b));
         }
     }
-    let units = detect_named(bus, serial).context("looking for MCU-Links")?;
-    let unit = pick_unit(&units, serial, pro_running_ours)?;
-    let serial = unit.serial().unwrap_or("the unit");
-    if let State::Held { .. } = unit.state {
-        bail!(
-            "another program holds {serial}'s CMSIS-DAP interface, and the tool reaches the DIO pins only through it"
-        );
-    }
-    let State::Probe {
-        firmware: Firmware::Ours(ours),
-        ..
-    } = &unit.state
-    else {
-        bail!(
-            "{serial} is {}, not running Verge, so the tool cannot reach its DIO pins",
-            unit.state
-        );
-    };
-    if let Some(board) = ours.board.map(escapement_verge_probe::BoardKind::number)
-        && board != dap::Ours::BOARD_MCU_LINK_PRO
-    {
-        bail!("{serial} is not an MCU-Link Pro, so it has no DIO pins");
-    }
-    let mut link = bus
-        .open_dap(&unit.device)
-        .with_context(|| format!("opening {serial}"))?;
-    let Some(before) =
-        dap::dio(&mut link, 0, 0, 0).with_context(|| format!("reading {serial}'s DIO pins"))?
-    else {
-        bail!(
-            "{serial} runs build {}, which predates the DIO pins: update it first",
-            ours.firmware
-        );
-    };
-    if before.pins == 0 {
-        if ours.board.map(escapement_verge_probe::BoardKind::number)
-            == Some(dap::Ours::BOARD_MCU_LINK_PRO)
-        {
+    energy::with_pro(bus, serial, Feature::Dio, |serial, pro| {
+        let before = pro
+            .access_dio(0, 0, 0)
+            .with_context(|| format!("reading {serial}'s DIO pins"))?;
+        if before.pins == 0 {
             bail!(
                 "{serial} started with its USB-SIO jumper, J15, fitted, which turns the DIO pins off. Remove the jumper and replug the unit"
             );
         }
-        bail!("{serial} is not an MCU-Link Pro, so it has no DIO pins");
-    }
-    let mask = high | low | input;
-    let after = if mask == 0 {
-        before
-    } else {
-        if let Some(group) = before.split(mask, high | low) {
-            bail!(
-                "{} change direction together, so make them all outputs or all inputs",
-                dio_names(group)
-            );
-        }
-        let after = dap::dio(&mut link, mask, high | low, high)
-            .with_context(|| format!("setting {serial}'s DIO pins"))?
-            .with_context(|| format!("{serial} no longer knows the DIO command"))?;
-        if !after.accepted() {
-            bail!("{serial} refused the change to {}", dio_names(mask));
-        }
-        after
-    };
-    outputln!("{serial}'s DIO pins, on J19 pins 2 to 5:");
-    for n in 0..8 {
-        let bit = 1 << n;
-        if after.pins & bit == 0 {
-            continue;
-        }
-        let level = |on: bool| if on { "high" } else { "low" };
-        if after.outputs & bit != 0 {
-            outputln!(
-                "  DIO{n}  output  driven {}",
-                level(after.levels & bit != 0)
-            );
+        let mask = high | low | input;
+        let after = if mask == 0 {
+            before
         } else {
-            outputln!("  DIO{n}  input   reads {}", level(after.read & bit != 0));
+            if let Some(group) = before.split(mask, high | low) {
+                bail!(
+                    "{} change direction together, so make them all outputs or all inputs",
+                    dio_names(group)
+                );
+            }
+            match pro.access_dio(mask, high | low, high) {
+                Ok(after) => after,
+                Err(CommandError::Firmware(_)) => {
+                    bail!("{serial} refused the change to {}", dio_names(mask))
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("setting {serial}'s DIO pins"));
+                }
+            }
+        };
+        outputln!("{serial}'s DIO pins, on J19 pins 2 to 5:");
+        for n in 0..8 {
+            let bit = 1 << n;
+            if after.pins & bit == 0 {
+                continue;
+            }
+            let level = |on: bool| if on { "high" } else { "low" };
+            if after.outputs & bit != 0 {
+                outputln!(
+                    "  DIO{n}  output  driven {}",
+                    level(after.levels & bit != 0)
+                );
+            } else {
+                outputln!("  DIO{n}  input   reads {}", level(after.read & bit != 0));
+            }
         }
-    }
-    let groups: Vec<String> = after.groups.iter().map(|&g| dio_names(g)).collect();
-    outputln!("Direction groups: {}.", groups.join("; "));
-    Ok(())
+        let groups: Vec<String> = after.groups.iter().map(|&g| dio_names(g)).collect();
+        outputln!("Direction groups: {}.", groups.join("; "));
+        Ok(())
+    })
 }
 
 fn bootloader<B: Bus>(bus: &B, serial: Option<&str>, stock: bool, cancel: &Cancel) -> Result<()> {

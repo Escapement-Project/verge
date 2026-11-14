@@ -1142,7 +1142,7 @@ fn dio_refuses_an_image_that_predates_it() {
         .arg("dio")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("which predates the DIO pins"));
+        .stderr(predicate::str::contains("which predates its DIO pins"));
 }
 
 #[test]
@@ -1395,12 +1395,14 @@ fn energy_says_when_another_program_holds_the_probe() {
         ));
 }
 
-/// Every supply and energy command reaches a Pro over Verge Aux while a debugger holds CMSIS-DAP,
-/// and says what it says over CMSIS-DAP.
+/// Every supply, energy and DIO command reaches a Pro over Verge Aux while a debugger holds
+/// CMSIS-DAP, and says what it says over CMSIS-DAP.
 #[test]
-fn power_and_energy_work_while_a_debugger_holds_the_probe() {
+fn power_energy_and_dio_work_while_a_debugger_holds_the_probe() {
     for args in [
-        &["power"][..],
+        &["dio"][..],
+        &["dio", "--high", "dio0,2", "--low", "1"],
+        &["power"],
         &["power", "on"],
         &["energy", "start", "--rate", "2000"],
         &["energy", "latest"],
@@ -1429,17 +1431,6 @@ fn list_names_what_a_held_pro_runs() {
             "Verge, build 26ea505, its CMSIS-DAP held by another program",
         ))
         .stdout(predicate::str::is_match(r"\n +board +MCU-Link Pro\n").unwrap());
-}
-
-#[test]
-fn dio_says_a_debugger_holds_the_way_to_it() {
-    tool("ours-pro-debugger")
-        .arg("dio")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "holds CJ3E7A91C2's CMSIS-DAP interface, and the tool reaches the DIO pins only through it",
-        ));
 }
 
 /// Another program on Verge Aux leaves CMSIS-DAP, which the tool falls back to.

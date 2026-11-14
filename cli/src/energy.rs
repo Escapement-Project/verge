@@ -186,7 +186,7 @@ fn find_pro<B: Bus>(bus: &B, serial: Option<&str>, feature: Feature) -> Result<U
 }
 
 /// Runs `f` on the Pro [`find_pro`] finds.
-fn with_pro<B: Bus, T>(
+pub(crate) fn with_pro<B: Bus, T>(
     bus: &B,
     serial: Option<&str>,
     feature: Feature,
