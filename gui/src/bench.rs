@@ -137,7 +137,7 @@ impl Bench {
         Self {
             status: None,
             connection: None,
-            rate: 1000,
+            rate: 25_000,
             ranges: EnergyRanges::Auto,
             path: None,
             directory,
@@ -727,7 +727,7 @@ impl Bench {
                 .suffix(" pairs/s"),
         );
         ui.horizontal_wrapped(|ui| {
-            for rate in [1_000, 25_000, 75_000, 100_000] {
+            for rate in [1_000, 25_000, 65_000, 100_000] {
                 if choice(ui, &format!("{}k", rate / 1000), self.rate == rate).clicked() {
                     self.rate = rate;
                 }

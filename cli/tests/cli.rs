@@ -1232,7 +1232,7 @@ fn energy_start_reports_the_high_range_held() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "captures 1000 pairs a second, holding the high range.",
+            "captures 25000 pairs a second, holding the high range.",
         ));
 }
 
@@ -1320,7 +1320,7 @@ fn energy_watch_prints_a_line_a_read_and_leaves_a_running_capture_running() {
 #[test]
 fn energy_watch_stops_the_capture_it_started() {
     tool("ours-pro")
-        .args(["energy", "watch", "--for", "200ms"])
+        .args(["energy", "watch", "--rate", "1000", "--for", "200ms"])
         .assert()
         .success()
         .stdout(predicate::str::contains("no complete pair yet"))

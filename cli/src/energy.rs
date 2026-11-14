@@ -19,6 +19,9 @@ use escapement_verge_probe::{
     VergeTransport, dap,
 };
 
+/// Pairs a second for a capture the command starts. verge-gui starts at the same rate.
+const DEFAULT_RATE: u32 = 25_000;
+
 #[derive(Args)]
 pub struct PowerArgs {
     /// Turn the supply on or off. Left out, the tool reads it.
@@ -80,7 +83,7 @@ pub enum EnergyCommand {
     /// about 0.2 s: a target powered through J9 loses its supply for that time.
     Start {
         /// Voltage and current pairs a second, 1 to 100,000.
-        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+        #[arg(long, default_value_t = DEFAULT_RATE, value_parser = clap::value_parser!(u32).range(1..=100_000))]
         rate: u32,
         #[command(flatten)]
         range: RangeArg,
@@ -104,7 +107,7 @@ pub enum EnergyCommand {
     /// interval's mean from the total, which counts every pair.
     Watch {
         /// Voltage and current pairs a second, for a capture this starts.
-        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+        #[arg(long, default_value_t = DEFAULT_RATE, value_parser = clap::value_parser!(u32).range(1..=100_000))]
         rate: u32,
         /// How often to read the probe, as 100ms or 1s.
         #[arg(long, default_value = "100ms", value_parser = humantime::parse_duration)]
@@ -131,7 +134,7 @@ pub enum EnergyCommand {
         #[arg(long, value_name = "FILE")]
         out: std::path::PathBuf,
         /// Voltage and current pairs a second, for a capture this starts.
-        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+        #[arg(long, default_value_t = DEFAULT_RATE, value_parser = clap::value_parser!(u32).range(1..=100_000))]
         rate: u32,
         /// Stop after this long.
         #[arg(long = "for", value_name = "DURATION", value_parser = humantime::parse_duration)]

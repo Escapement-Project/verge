@@ -34,7 +34,7 @@ verge energy total                # the energy since the start
 verge energy stop                 # stop it, and show the total
 ```
 
-`start` takes 1,000 pairs a second unless `--rate` says otherwise. A start clears the total. It can
+`start` takes 25,000 pairs a second unless `--rate` says otherwise. A start clears the total. It can
 calibrate first, which disconnects J9 from the target for about 0.2 s: a target powered through J9
 loses its supply for that time.
 
