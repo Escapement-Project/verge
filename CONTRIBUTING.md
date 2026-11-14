@@ -22,8 +22,8 @@ The library and frontends use:
   the command line, and `tracing` with `tracing-indicatif` for logs and progress.
 - `dirs` for the cache and data directories.
 - `eframe` and `egui` for the GUI, `rfd` for its file dialog, `dark-light` for the desktop's light
-  or dark setting on Linux, `zbus` for its reduced-motion setting, and `egui_kittest` for GUI
-  tests.
+  or dark setting on Linux, `zbus`, `windows` and `objc2-app-kit` for the reduced-motion setting
+  on Linux, Windows and macOS, and `egui_kittest` for GUI tests.
 
 The GUI takes its colours, type and icon from the Escapement Project's design tokens:
 `gui/src/tokens.rs`, the fonts in `gui/fonts/` and the icons in `gui/icons/` are copies of files
@@ -37,9 +37,10 @@ portal it shows night.
 Verge's mark moves in two places: once at launch in the window's top strip, and in a loop above
 "Nothing" and "Plug in an MCU-Link" while nothing is attached. `gui/src/mark.rs` only draws it:
 its timing, shape and lines are `gui/src/tokens.rs`'s `mark` module, generated from the site's
-design tokens and marks with the landing page's, so the two cannot drift apart. On Linux the window reads the portal's reduced-motion setting at start and holds
-the mark still if the desktop asks for that; elsewhere it always moves. The tests hold it still, so
-their pictures do not depend on when they are taken.
+design tokens and marks with the landing page's, so the two cannot drift apart. The window reads
+the desktop's reduced-motion setting at start and holds the mark still if the desktop asks for
+that: the XDG portal's on Linux, the animation effects setting on Windows and "Reduce motion" on
+macOS. The tests hold it still, so their pictures do not depend on when they are taken.
 
 ## Testing
 

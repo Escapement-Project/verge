@@ -400,9 +400,7 @@ fn motion_id() -> Id {
 }
 
 /// Whether the mark may move: false when the desktop asks for reduced motion, and in the tests,
-/// whose pictures would otherwise depend on when they were taken. Only Linux's desktop setting is
-/// read (main.rs).
-#[cfg(any(target_os = "linux", test))]
+/// whose pictures would otherwise depend on when they were taken.
 pub fn set_motion(ctx: &egui::Context, on: bool) {
     ctx.data_mut(|d| d.insert_temp(motion_id(), on));
 }

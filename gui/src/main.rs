@@ -177,7 +177,6 @@ fn main() -> eframe::Result {
             style::install(&ctx);
             #[cfg(target_os = "linux")]
             follow_desktop_face(&ctx);
-            #[cfg(target_os = "linux")]
             if desktop_reduces_motion() {
                 mark::set_motion(&ctx, false);
             }
@@ -240,6 +239,30 @@ fn desktop_reduces_motion() -> bool {
             false
         }
     }
+}
+
+/// Whether Windows' animation setting is off ("Animation effects", or "Show animations in Windows"
+/// before Windows 11), read once at start. If it cannot be read, the mark moves.
+#[cfg(target_os = "windows")]
+fn desktop_reduces_motion() -> bool {
+    match windows::UI::ViewManagement::UISettings::new().and_then(|ui| ui.AnimationsEnabled()) {
+        Ok(enabled) => !enabled,
+        Err(error) => {
+            tracing::debug!("no animation setting: {error}");
+            false
+        }
+    }
+}
+
+/// Whether "Reduce motion" is on in macOS's accessibility settings, read once at start.
+#[cfg(target_os = "macos")]
+fn desktop_reduces_motion() -> bool {
+    objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+fn desktop_reduces_motion() -> bool {
+    false
 }
 
 /// Day or night as the desktop sets it. winit reports no system theme on Linux, so egui would stay

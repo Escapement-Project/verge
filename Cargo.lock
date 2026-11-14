@@ -1966,12 +1966,14 @@ dependencies = [
  "escapement-verge-probe",
  "humantime",
  "image",
+ "objc2-app-kit 0.3.2",
  "pollster 1.0.1",
  "rfd",
  "serde_json",
  "tempfile",
  "tracing",
  "tracing-subscriber",
+ "windows",
  "zbus",
 ]
 
