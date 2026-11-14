@@ -45,9 +45,10 @@ pub struct Recorded {
     /// Pairs the sequence skipped: messages the probe dropped because nobody read them in time.
     pub lost: u64,
     pub reason: EndReason,
-    /// The DIO pins the probe reported, their edges, and how often it lost some.
+    /// The DIO pins the probe reported, each one's edges (DIO0 first), and how often it lost
+    /// some.
     pub dio: u8,
-    pub edges: u64,
+    pub edges: [u64; 4],
     pub edges_lost: u64,
     /// The capture held the high range, as its header says.
     pub high_range_only: bool,
@@ -177,7 +178,9 @@ fn stream<B: Bus, L: AuxLink>(
     let mut asked_at = None;
     // A pairs message's samples wait for the next one: every edge up to them has come by then.
     let mut held: Vec<Sample> = Vec::new();
-    let (mut dio, mut edges, mut edges_lost) = (0u8, 0u64, 0u64);
+    let (mut dio, mut edges, mut edges_lost) = (0u8, [0u64; 4], 0u64);
+    // The levels the last edge or loss report left, to tell which pin each edge moved.
+    let mut levels = 0u8;
     let (mut high_range_only, mut under_range) = (false, 0u64);
     let mut count = |samples: Vec<Sample>| {
         under_range += samples.iter().filter(|s| s.under_range).count() as u64;
@@ -223,6 +226,7 @@ fn stream<B: Bus, L: AuxLink>(
                     levels: header.dio_levels,
                 })?;
                 dio = header.dio_mask;
+                levels = header.dio_levels;
                 high_range_only = header.high_range_only;
                 next_sequence = Some(header.first_sequence);
                 converter = Some(Converter::new(&header));
@@ -277,7 +281,13 @@ fn stream<B: Bus, L: AuxLink>(
                 if converter.is_none() {
                     continue;
                 }
-                edges += message.edges.len() as u64;
+                for edge in &message.edges {
+                    let moved = (levels ^ edge.levels) & dio;
+                    for (pin, count) in edges.iter_mut().enumerate() {
+                        *count += u64::from(moved >> pin & 1);
+                    }
+                    levels = edge.levels;
+                }
                 writer.send(Output::Edges(message.edges))?;
             }
             Message::DioLost(lost) => {
@@ -285,6 +295,7 @@ fn stream<B: Bus, L: AuxLink>(
                     continue;
                 }
                 edges_lost += 1;
+                levels = lost.levels;
                 writer.send(Output::DioLost(lost))?;
             }
             Message::Markers(markers) => {
@@ -836,7 +847,7 @@ mod tests {
         writer.finish().unwrap();
         assert_eq!(
             (recorded.dio, recorded.edges, recorded.edges_lost),
-            (0x01, 2, 1)
+            (0x01, [2, 0, 0, 0], 1)
         );
         let lines: Vec<String> = std::fs::read_to_string(&path)
             .unwrap()

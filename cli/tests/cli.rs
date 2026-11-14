@@ -1661,7 +1661,7 @@ fn energy_record_lines_up_dio_edges_with_the_pairs() {
         }
     }
     assert!(
-        stdout.contains(&format!("{} edges on DIO3.", edges.len())),
+        stdout.contains(&format!("{} edges on DIO3.\n", edges.len())),
         "{stdout}"
     );
 }

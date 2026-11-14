@@ -477,11 +477,7 @@ fn record<B: Bus>(
         );
     }
     if recorded.dio != 0 {
-        outputln!(
-            "{} edges on {}.",
-            recorded.edges,
-            crate::dio_names(recorded.dio)
-        );
+        outputln!("{}", edge_counts(recorded.dio, recorded.edges));
     }
     if recorded.edges_lost > 0 {
         outputln!(
@@ -491,6 +487,32 @@ fn record<B: Bus>(
         );
     }
     Ok(())
+}
+
+/// Each reported pin's edges, as "400 edges on DIO3. DIO0, DIO1, DIO2 did not change."
+fn edge_counts(pins: u8, edges: [u64; 4]) -> String {
+    let reported = (0..4).filter(|pin| pins >> pin & 1 != 0);
+    let moved: Vec<String> = reported
+        .clone()
+        .filter(|&pin| edges[pin] > 0)
+        .enumerate()
+        .map(|(i, pin)| match (i, edges[pin]) {
+            (0, 1) => format!("1 edge on DIO{pin}"),
+            (0, n) => format!("{n} edges on DIO{pin}"),
+            (_, n) => format!("{n} on DIO{pin}"),
+        })
+        .collect();
+    let still = reported
+        .filter(|&pin| edges[pin] == 0)
+        .fold(0, |mask, pin| mask | 1 << pin);
+    let mut sentences = Vec::new();
+    if !moved.is_empty() {
+        sentences.push(format!("{}.", moved.join(", ")));
+    }
+    if still != 0 {
+        sentences.push(format!("{} did not change.", crate::dio_names(still)));
+    }
+    sentences.join(" ")
 }
 
 /// The total as a clause, as "1.71 mJ over 1000 pairs since the start".
@@ -552,7 +574,7 @@ pub(crate) fn si(value: f64, unit: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{EnergyCommand, RangeArg, Ranges, energy, si};
+    use super::{EnergyCommand, RangeArg, Ranges, edge_counts, energy, si};
     use escapement_verge_probe::stream::{Header, Message};
     use escapement_verge_probe::{Bus, Cancel, VergeControl};
     use std::time::Duration;
@@ -588,6 +610,20 @@ mod tests {
                 None => panic!("no header"),
             }
         }
+    }
+
+    #[test]
+    fn edge_counts_name_each_pins_own() {
+        assert_eq!(
+            edge_counts(0x0F, [0, 0, 0, 400]),
+            "400 edges on DIO3. DIO0, DIO1, DIO2 did not change."
+        );
+        assert_eq!(
+            edge_counts(0x09, [3, 7, 0, 400]),
+            "3 edges on DIO0, 400 on DIO3."
+        );
+        assert_eq!(edge_counts(0x08, [0, 0, 0, 1]), "1 edge on DIO3.");
+        assert_eq!(edge_counts(0x05, [0; 4]), "DIO0, DIO2 did not change.");
     }
 
     /// `energy start` asks for its range every time, so an earlier request by another host does
