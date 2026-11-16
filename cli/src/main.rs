@@ -1,4 +1,5 @@
 use std::num::NonZeroUsize;
+mod dio_record;
 mod energy;
 mod output;
 mod progress;
@@ -7,6 +8,7 @@ mod read;
 use std::io::IsTerminal;
 use std::path::{Path as FsPath, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use crate::output::outputln;
 use anyhow::{Context, Result, bail};
@@ -17,7 +19,7 @@ use escapement_verge_probe::batch::{
 };
 use escapement_verge_probe::board;
 use escapement_verge_probe::cache::Cache;
-use escapement_verge_probe::detect::{Guess, Hardware, State, detect_named};
+use escapement_verge_probe::detect::{Guess, Hardware, Jumpered, State, detect_named};
 use escapement_verge_probe::ids::Role;
 use escapement_verge_probe::image::{Image, PAGE};
 use escapement_verge_probe::paths::ISP_IDENTITY_WARNING;
@@ -33,7 +35,9 @@ use escapement_verge_probe::update::{self, Outcome, Timing, UpdateError};
 use escapement_verge_probe::usb::UsbBus;
 use escapement_verge_probe::version::Relation;
 use escapement_verge_probe::version::StockVersion;
-use escapement_verge_probe::{Bus, Cancel, CommandError, Firmware, Path, Unit, detect, offer};
+use escapement_verge_probe::{
+    BoardKind, Bus, Cancel, CommandError, Firmware, Path, Unit, dap, detect, offer,
+};
 use tracing_indicatif::IndicatifLayer;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::{EnvFilter, filter_fn};
@@ -132,14 +136,24 @@ enum Command {
         /// An ELF or S-record file.
         file: PathBuf,
     },
-    /// Drive and read the four DIO pins on an MCU-Link Pro's J19 header, on a unit running Verge.
+    /// Drive and read the four DIO pins of a unit running Verge: on an MCU-Link Pro's J19 header,
+    /// or on a standalone MCU-Link's J8 pads.
     ///
     /// With no options it reads them. --high and --low make pins outputs at that level, and
-    /// --input makes them inputs again. DIO0, DIO1 and DIO2 change direction together, and DIO3
-    /// on its own, so a change has to turn a whole group round. The pins keep their state between
-    /// debug sessions and go back to inputs when the unit restarts. LED6 (SIO) is lit while any
-    /// of them is driven.
-    Dio(DioArgs),
+    /// --input makes them inputs again. On a Pro, DIO0, DIO1 and DIO2 change direction together,
+    /// and DIO3 on its own, so a change has to turn a whole group round; there LED6 (SIO) is lit
+    /// while any of them is driven. On a standalone MCU-Link each pin changes on its own, and J8
+    /// is wired straight to the probe's MCU: 3.3 V only, with no ground pin of its own. The pins
+    /// keep their state between debug sessions and go back to inputs when the unit restarts.
+    #[command(args_conflicts_with_subcommands = true)]
+    Dio(DioCommand),
+    /// Restart a unit running Verge, as unplugging it would, and wait for it to come back.
+    ///
+    /// The request goes to the probe's USB core rather than through CMSIS-DAP, so it works while a
+    /// debugger holds the probe and when a CMSIS-DAP command never finishes. Everything the probe
+    /// holds is lost: the DIO pins go back to inputs, a Pro's target supply turns off and an energy
+    /// capture ends.
+    Restart,
     /// Read or switch the target supply of an MCU-Link Pro running Verge.
     ///
     /// The supply feeds the target through J6, at 3.3 V or, with J5 fitted, 1.8 V, up to 400 mA.
@@ -155,6 +169,30 @@ enum Command {
     /// only once the debugger lets go.
     #[command(subcommand)]
     Energy(energy::EnergyCommand),
+}
+
+#[derive(Args)]
+struct DioCommand {
+    #[command(subcommand)]
+    action: Option<DioAction>,
+    #[command(flatten)]
+    args: DioArgs,
+}
+
+#[derive(Subcommand)]
+enum DioAction {
+    /// Record a standalone MCU-Link's DIO pins to a tickwave recording, which tickwave opens.
+    ///
+    /// Each pin is a digital channel. The probe stamps an edge as its interrupt takes it, a little
+    /// after the edge, to 7 ns. There are no energy readings. A Pro without its energy measurement
+    /// circuit records the same way. Any other Pro records its pins beside its energy capture, with
+    /// `verge energy record --dio`. The recording goes through Verge Aux, so a debugger can hold
+    /// the probe meanwhile, and `verge dio` can drive the pins through CMSIS-DAP while it records.
+    /// Where the probe lost edges, the recording marks the pins unknown. A crash loses about the
+    /// last second. The probe reports its time while the pins are quiet, so the recording a crash
+    /// leaves covers quiet stretches too. A crash before the first edge leaves nothing to recover.
+    /// Once recording ends, verge rewrites the file with full-size blocks.
+    Record(dio_record::RecordArgs),
 }
 
 #[derive(Args)]
@@ -477,7 +515,12 @@ fn run<B: Bus + Sync, H: Http>(
     match &cli.command {
         Some(Command::Batch(args)) => batch(bus, github, args, cancel, stop),
         None | Some(Command::List) => list(bus, cli.verbose > 0, serial),
-        Some(Command::Dio(args)) => dio(bus, args, serial),
+        Some(Command::Dio(DioCommand {
+            action: Some(DioAction::Record(args)),
+            ..
+        })) => dio_record::record(bus, args, serial, cancel),
+        Some(Command::Dio(DioCommand { args, .. })) => dio(bus, args, serial),
+        Some(Command::Restart) => restart(bus, serial),
         Some(Command::Power(args)) => energy::power(bus, args, serial),
         Some(Command::Energy(command)) => energy::energy(bus, command, serial, cancel),
         Some(Command::Update(args)) => update_unit(bus, github, args, serial, cancel),
@@ -1185,15 +1228,38 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
         }
     }
     energy::with_pro(bus, serial, Feature::Dio, |serial, pro| {
+        let pro_board = pro
+            .info()
+            .ok()
+            .flatten()
+            .and_then(|info| info.board)
+            .is_none_or(|board| board == BoardKind::Pro);
         let before = pro
             .access_dio(0, 0, 0)
             .with_context(|| format!("reading {serial}'s DIO pins"))?;
-        if before.pins == 0 {
+        if before.pins == 0 && pro_board {
             bail!(
                 "{serial} started with its USB-SIO jumper, J15, fitted, which turns the DIO pins off. Remove the jumper and replug the unit"
             );
         }
         let mask = high | low | input;
+        // On the standalone MCU-Link, a pin left out is one a bench tool's command marker holds.
+        let held = if before.pins == 0 {
+            0x0F
+        } else {
+            mask & !before.pins
+        };
+        if held != 0 {
+            bail!(
+                "a bench tool has given {serial}'s {} to its command marker. Run `verge restart` to give {} back",
+                if held == 0x0F {
+                    "J8 pins".into()
+                } else {
+                    dio_names(held)
+                },
+                if held.count_ones() == 1 { "it" } else { "them" }
+            );
+        }
         let after = if mask == 0 {
             before
         } else {
@@ -1213,7 +1279,12 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
                 }
             }
         };
-        outputln!("{serial}'s DIO pins, on J19 pins 2 to 5:");
+        let header = if pro_board {
+            "J19 pins 2 to 5"
+        } else {
+            "J8 pins 1 to 4"
+        };
+        outputln!("{serial}'s DIO pins, on {header}:");
         for n in 0..8 {
             let bit = 1 << n;
             if after.pins & bit == 0 {
@@ -1229,11 +1300,88 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
                 outputln!("  DIO{n}  input   reads {}", level(after.read & bit != 0));
             }
         }
-        let groups: Vec<String> = after.groups.iter().map(|&g| dio_names(g)).collect();
+        let held = if pro_board { 0 } else { 0x0F & !after.pins };
+        if held != 0 {
+            outputln!(
+                "A bench tool's command marker holds {} until the unit restarts.",
+                dio_names(held)
+            );
+        }
+        let groups: Vec<String> = after
+            .groups
+            .iter()
+            .map(|&g| g & after.pins)
+            .filter(|&g| g != 0)
+            .map(dio_names)
+            .collect();
         outputln!("Direction groups: {}.", groups.join("; "));
         Ok(())
     })
 }
+
+/// Whether `unit` runs Verge, as far as what it answered and its USB identity say. One whose
+/// CMSIS-DAP no longer answers says no more than its product string.
+fn runs_verge(unit: &Unit) -> bool {
+    unit.verge().is_some()
+        || matches!(
+            unit.state,
+            State::SwdJumper {
+                firmware: Jumpered::Ours
+            }
+        )
+        || (matches!(unit.state, State::Unreadable { .. })
+            && unit
+                .device
+                .product
+                .as_deref()
+                .is_some_and(|product| product.starts_with("Verge ")))
+}
+
+fn restart<B: Bus>(bus: &B, serial: Option<&str>) -> Result<()> {
+    let units = detect_named(bus, serial).context("looking for MCU-Links")?;
+    let unit = pick_unit(&units, serial, runs_verge)?;
+    let name = unit.serial().unwrap_or("the unit");
+    if !runs_verge(unit) {
+        bail!(
+            "{name} is {}, not running Verge, so it takes no restart request",
+            unit.state
+        );
+    }
+    bus.device_control_out(
+        &unit.device,
+        dap::REBOOT_REQUEST_TYPE,
+        dap::REBOOT_REQUEST,
+        dap::REBOOT_RESTART,
+        0,
+    )
+    .with_context(|| format!("opening {name}"))?
+    .with_context(|| format!("asking {name} to restart"))?;
+    // It leaves USB, resets and enumerates again. Windows can give it back the same instance, so
+    // there it counts as back only once it has been seen gone.
+    let deadline = bus.now() + RESTART_RETURNS;
+    let mut gone = false;
+    while bus.now() < deadline {
+        bus.sleep(Duration::from_millis(100));
+        let devices = bus.devices().context("looking for MCU-Links")?;
+        match devices.iter().find(|d| d.serial == unit.device.serial) {
+            None => gone = true,
+            Some(device) if gone || device.instance != unit.device.instance => {
+                if device.role() == Some(Role::Probe) {
+                    outputln!("{name} restarted.");
+                    return Ok(());
+                }
+            }
+            Some(_) => {}
+        }
+    }
+    bail!(
+        "{name} did not come back within {} s. `verge list` shows what is attached",
+        RESTART_RETURNS.as_secs()
+    )
+}
+
+/// How long a restarted unit has to come back on USB.
+const RESTART_RETURNS: Duration = Duration::from_secs(5);
 
 fn bootloader<B: Bus>(bus: &B, serial: Option<&str>, stock: bool, cancel: &Cancel) -> Result<()> {
     let units = detect_named(bus, serial).context("looking for MCU-Links")?;

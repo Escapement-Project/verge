@@ -215,6 +215,9 @@ fn stream<B: Bus, L: AuxLink>(
         };
         writer.message(&message)?;
         match message {
+            Message::DioHeader(_) => bail!("{name} began a DIO stream, which has no energy"),
+            // Only a DIO stream's: one this stream replaced.
+            Message::DioTime(_) => {}
             Message::Header(header) => {
                 if converter.is_some() {
                     bail!("{name} began a second stream before ending the first");
@@ -308,7 +311,7 @@ fn stream<B: Bus, L: AuxLink>(
 }
 
 /// What the read loop hands the writer. Every edge up to a batch of pairs comes before it.
-enum Output {
+pub(crate) enum Output {
     Begin { rate: u32, pins: u8, levels: u8 },
     Pairs(Vec<Sample>),
     Edges(Vec<Edge>),
@@ -318,7 +321,7 @@ enum Output {
 
 /// The file, written on a thread of its own. Writing a sigrok chunk takes long enough that the
 /// probe's 16 messages would fill meanwhile and pairs be lost.
-enum Writer {
+pub(crate) enum Writer {
     Sink {
         send: mpsc::Sender<Output>,
         thread: thread::JoinHandle<Result<()>>,
@@ -335,7 +338,7 @@ enum Writer {
 const TICK: Duration = Duration::from_millis(200);
 
 impl Writer {
-    fn tickwave(mut file: FileWriter) -> Writer {
+    pub(crate) fn tickwave(mut file: FileWriter) -> Writer {
         let (send, receive) = mpsc::channel::<Message>();
         let thread = thread::spawn(move || {
             loop {
@@ -392,17 +395,17 @@ impl Writer {
     }
 
     /// A stream message, for a tickwave recording.
-    fn message(&self, message: &Message) -> Result<()> {
+    pub(crate) fn message(&self, message: &Message) -> Result<()> {
         match self {
             Writer::Tickwave { send, .. } => send
                 .send(message.clone())
-                .map_err(|_| anyhow!("the file stopped taking pairs")),
+                .map_err(|_| anyhow!("the file stopped taking the stream")),
             Writer::Sink { .. } => Ok(()),
         }
     }
 
     /// Waits for everything sent to be written, and the file finished.
-    fn finish(self) -> Result<()> {
+    pub(crate) fn finish(self) -> Result<()> {
         let thread = match self {
             Writer::Sink { send, thread } => {
                 drop(send);

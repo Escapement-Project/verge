@@ -614,6 +614,10 @@ impl Stream {
         at: f64,
     ) -> Result<()> {
         match message {
+            // A board without energy capture streams its DIO pins alone, which a watch never asks.
+            Message::DioHeader(_) => bail!("the probe began a DIO stream, which has no energy"),
+            // Only a DIO stream's: one this stream replaced.
+            Message::DioTime(_) => {}
             Message::Header(header) => {
                 pro.accept_energy_header(&header)?;
                 self.converter = Some(Converter::new(&header));

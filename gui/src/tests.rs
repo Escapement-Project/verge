@@ -900,6 +900,59 @@ fn pictures() {
     until_contains(&mut h, "This capture held the high range");
     press(&mut h, "Stop recording");
     until(&mut h, "Start recording");
+
+    // A standalone MCU-Link gives the bench its DIO pins alone.
+    let worker = Worker::spawn(
+        SimBus::scenario("ours-plain").unwrap(),
+        GitHub::new(SimHttp::new(repo()), repo(), None),
+        || {},
+    );
+    let app = VergeApp::new(
+        Box::new(worker),
+        Log::default(),
+        Config {
+            repo: repo(),
+            simulated: Some("test".into()),
+            stock_dirs: vec![],
+            record_dir: dir.clone(),
+            cache: None,
+        },
+    );
+    let mut h = rendered(app);
+    until(&mut h, "Bench");
+    press(&mut h, "Bench");
+    until(&mut h, "DIO3 output");
+    shoot(&mut h, "24-bench-standalone");
+    press(&mut h, "DIO1 output");
+    until(&mut h, "Drive pins");
+    shoot(&mut h, "25-bench-standalone-drive-confirmation");
+    press(&mut h, "Drive pins");
+    until(&mut h, "Set high");
+    shoot(&mut h, "26-bench-standalone-output");
+
+    // A Pro without its energy circuit gives the bench its target supply and DIO pins.
+    let worker = Worker::spawn(
+        SimBus::scenario("ours-pro-unfitted").unwrap(),
+        GitHub::new(SimHttp::new(repo()), repo(), None),
+        || {},
+    );
+    let app = VergeApp::new(
+        Box::new(worker),
+        Log::default(),
+        Config {
+            repo: repo(),
+            simulated: Some("test".into()),
+            stock_dirs: vec![],
+            record_dir: dir.clone(),
+            cache: None,
+        },
+    );
+    let mut h = rendered(app);
+    until(&mut h, "Bench");
+    press(&mut h, "Bench");
+    until(&mut h, "DIO0–2 output");
+    until(&mut h, "Turn on");
+    shoot(&mut h, "27-bench-pro-without-energy");
 }
 
 /// A directory of its own for a test's batch record.
@@ -2181,7 +2234,6 @@ fn bench_dio_explains_each_unavailable_state() {
             "ours-pro-aux-taken",
             "Close the program holding it and reconnect.",
         ),
-        ("ours-plain", "not an MCU-Link Pro"),
     ] {
         let mut h = harness(sim_app(SimBus::scenario(scenario).unwrap(), vec![]));
         until(&mut h, "Update to v0.3.0");
@@ -2201,6 +2253,117 @@ fn bench_dio_explains_each_unavailable_state() {
     }
 }
 
+/// A standalone MCU-Link connects for its DIO pins alone. Each pin turns on its own, after the same
+/// question, and the bench neither reads nor offers a supply or a recording.
+#[test]
+fn bench_drives_a_standalone_units_dio_pins() {
+    let bus = SimBus::scenario("ours-plain").unwrap();
+    let mut h = harness(sim_app(bus.clone(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until(&mut h, "DIO3 output");
+    for pin in 0..4 {
+        assert!(h.query_by_label(&format!("DIO{pin} input")).is_some());
+    }
+    for absent in [
+        "Turn on",
+        "Turn off",
+        "Start recording",
+        "Record running capture",
+    ] {
+        assert!(h.query_by_label(absent).is_none(), "{absent}");
+    }
+    press(&mut h, "DIO1 output");
+    until(&mut h, "Drive DIO1?");
+    until_contains(&mut h, "driving this pin. ");
+    until_contains(&mut h, "J8 drives 3.3 V");
+    press(&mut h, "Drive pins");
+    for _ in 0..400 {
+        h.step();
+        if h.query_all_by_label("Set high").count() == 1 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(h.query_all_by_label("Set high").count(), 1);
+    let log = bus.log();
+    assert!(log.iter().any(|s| s.contains("AUX 8e020200")));
+    // Opening Aux ends any stream the last program left, `0x90` mode 7, on every board.
+    assert!(
+        !log.iter()
+            .any(|s| s.contains("AUX 8f") || (s.contains("AUX 90") && !s.ends_with("AUX 9007"))),
+        "{log:#?}"
+    );
+}
+
+/// A Pro without its energy circuit and with J15 fitted still switches its target supply, and its
+/// DIO panel says why it has no pins.
+#[test]
+fn bench_switches_the_supply_of_a_pro_without_its_energy_circuit_or_dio() {
+    let bus = SimBus::scenario("ours-pro-unfitted-j15").unwrap();
+    let mut h = harness(sim_app(bus.clone(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until(&mut h, "Turn on");
+    until_contains(&mut h, "remove J15");
+    assert!(h.query_by_label_contains("output").is_none());
+    press(&mut h, "Turn on");
+    until(&mut h, "Turn off");
+}
+
+/// A standalone MCU-Link whose J8 pins a bench tool's command marker holds says so, and how to
+/// give them back, in place of the pins.
+#[test]
+fn bench_says_when_the_bench_marker_holds_every_dio_pin() {
+    let bus = SimBus::scenario("ours-plain").unwrap();
+    bus.mark_dio(0, 0x0F);
+    let mut h = harness(sim_app(bus.clone(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until_contains(
+        &mut h,
+        "A bench tool has given the DIO pins to its command marker.",
+    );
+    assert!(h.query_by_label_contains("output").is_none());
+}
+
+/// A Pro without its energy circuit switches its target supply and drives its DIO pins as `verge
+/// power` and `verge dio` do, says why it measures nothing, and its question before driving a pin
+/// has no word of J8.
+#[test]
+fn bench_drives_a_pro_without_its_energy_circuits_supply_and_dio_pins() {
+    use escapement_verge_probe::{Bus, DapTransport, VergeControl, detect};
+    let bus = SimBus::scenario("ours-pro-unfitted").unwrap();
+    // Another program turned the supply on: Bench shows it as it is.
+    let unit = detect(&bus).unwrap().remove(0);
+    let mut link = bus.open_dap(&unit.device).unwrap();
+    assert!(
+        VergeControl::new(&mut DapTransport(&mut link))
+            .set_target_power(true)
+            .unwrap()
+    );
+    drop(link);
+    let mut h = harness(sim_app(bus.clone(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until(&mut h, "DIO0–2 output");
+    until_contains(&mut h, "no energy measurement circuit fitted");
+    for absent in [
+        "Start recording",
+        "Record running capture",
+        "No reading without a capture",
+    ] {
+        assert!(h.query_by_label(absent).is_none(), "{absent}");
+    }
+    until(&mut h, "Turn off");
+    press(&mut h, "Turn off");
+    until(&mut h, "Turn on");
+    press(&mut h, "DIO0–2 output");
+    until(&mut h, "Drive DIO0–2?");
+    until_contains(&mut h, "driving these pins. ");
+    assert!(h.query_all_by_label_contains("J8").next().is_none());
+}
+
 #[test]
 fn bench_dio_asks_before_driving_and_keeps_inputs_on_cancel() {
     let bus = SimBus::scenario("ours-pro-held").unwrap();
@@ -2211,6 +2374,8 @@ fn bench_dio_asks_before_driving_and_keeps_inputs_on_cancel() {
     h.get_by_label("high");
     press(&mut h, "DIO0–2 output");
     until(&mut h, "Drive DIO0–2?");
+    until_contains(&mut h, "driving these pins. ");
+    assert!(h.query_all_by_label_contains("J8").next().is_none());
     assert!(!bus.log().iter().any(|s| s.contains("AUX 8e0707")));
     press(&mut h, "Keep as inputs");
     for _ in 0..10 {
@@ -2244,7 +2409,7 @@ fn bench_refuses_older_firmware_and_reaches_a_debugger_held_pro() {
     let mut h = harness(sim_app(SimBus::scenario("ours").unwrap(), vec![]));
     until(&mut h, "Update to v0.3.0");
     press(&mut h, "Bench");
-    until_contains(&mut h, "which recording needs");
+    until_contains(&mut h, "has no Verge Aux");
     assert!(h.query_by_label("Start recording").is_none());
     let mut h = harness(sim_app(
         SimBus::scenario("ours-pro-debugger").unwrap(),
@@ -2278,6 +2443,9 @@ fn a_worker_failure_during_recording_unlocks_the_window() {
         .push_back(Event::Bench(Status {
             instance,
             connected: true,
+            target_power: true,
+            energy: true,
+            board: Some(escapement_verge_probe::BoardKind::Pro),
             recording: true,
             ..Status::default()
         }));
@@ -2356,6 +2524,9 @@ fn a_recording_failure_keeps_a_pending_close_open() {
         .push_back(Event::Bench(Status {
             instance: instance.clone(),
             connected: true,
+            target_power: true,
+            energy: true,
+            board: Some(escapement_verge_probe::BoardKind::Pro),
             recording: true,
             ..Status::default()
         }));
@@ -2368,6 +2539,9 @@ fn a_recording_failure_keeps_a_pending_close_open() {
         .push_back(Event::Bench(Status {
             instance,
             connected: true,
+            target_power: true,
+            energy: true,
+            board: Some(escapement_verge_probe::BoardKind::Pro),
             recording: false,
             error: Some("disk full".into()),
             ..Status::default()

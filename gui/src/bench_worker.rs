@@ -5,7 +5,8 @@ use escapement_verge_probe::aux::Aux;
 use escapement_verge_probe::capture::Recorder;
 use escapement_verge_probe::stream::{EndReason, Message};
 use escapement_verge_probe::{
-    Bus, CommandError, DioState, EnergyCaptureSample, EnergyError, Refused, Unit, VergeControl,
+    BoardKind, Bus, CommandError, DioState, EnergyCaptureSample, EnergyError, Refused, Unit,
+    VergeControl,
 };
 use escapement_verge_probe::{EnergyRanges, pro};
 use std::path::PathBuf;
@@ -40,6 +41,22 @@ pub enum Command {
     Stop,
 }
 
+/// A direction group's name: its pin, or its first and last pins when they run in order.
+pub fn group_name(mask: u8) -> String {
+    let pins: Vec<u8> = (0..8).filter(|n| mask >> n & 1 != 0).collect();
+    match pins.as_slice() {
+        [pin] => format!("DIO{pin}"),
+        [first, .., last] if usize::from(last - first) + 1 == pins.len() => {
+            format!("DIO{first}–{last}")
+        }
+        _ => pins
+            .iter()
+            .map(|pin| format!("DIO{pin}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum DioUnavailable {
     Feature(String),
@@ -53,7 +70,7 @@ impl std::fmt::Display for DioUnavailable {
             Self::Aux => {
                 f.write_str("Verge Aux is unavailable. Close the program holding it and reconnect.")
             }
-            Self::Disconnected => f.write_str("Reconnect to an available Pro to use DIO."),
+            Self::Disconnected => f.write_str("Reconnect to use DIO."),
         }
     }
 }
@@ -75,6 +92,12 @@ impl DioUnavailable {
 pub struct Status {
     pub instance: String,
     pub connected: bool,
+    /// The unit switches a target supply, as any Pro does.
+    pub target_power: bool,
+    /// The unit measures energy, as a Pro does with its energy circuit fitted.
+    pub energy: bool,
+    /// Which board the unit is, which says where its DIO pins are.
+    pub board: Option<BoardKind>,
     pub supply: bool,
     pub capturing: bool,
     pub recording: bool,
@@ -105,12 +128,32 @@ pub struct Session<L: escapement_verge_probe::aux::AuxLink> {
 
 impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
     pub fn open<B: Bus<Aux = L>>(bus: &B, unit: &Unit) -> Result<Self> {
-        let aux = pro::open_stream(bus, unit)?;
+        let pro_board = pro::validate(unit, pro::Feature::Energy).is_ok();
+        let (mut aux, energy) = if pro_board {
+            match pro::open_stream(bus, unit) {
+                Ok(aux) => (aux, true),
+                // A Pro without its energy circuit still switches its target supply, with J15
+                // fitted or not.
+                Err(pro::ProError::NotFitted { .. }) => {
+                    (pro::open_aux(bus, unit, pro::Feature::Supply)?, false)
+                }
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            (pro::open_aux(bus, unit, pro::Feature::Dio)?, false)
+        };
+        let name = unit.serial().unwrap_or("the unit");
+        let target_power =
+            pro::check_offered(name, &mut VergeControl::new(&mut aux), pro::Feature::Supply)
+                .is_ok();
         let mut session = Self {
             aux,
             status: Status {
                 instance: unit.device.instance.clone(),
                 connected: true,
+                target_power,
+                energy,
+                board: unit.verge().and_then(|ours| ours.board),
                 ..Status::default()
             },
             recorder: None,
@@ -122,13 +165,16 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
             stream_mask: 0,
             stream_levels: 0,
         };
-        session.status.dio_reason = pro::check_offered(
-            unit.serial().unwrap_or("the unit"),
-            &mut VergeControl::new(&mut session.aux),
-            pro::Feature::Dio,
-        )
-        .err()
-        .map(|e| DioUnavailable::Feature(e.to_string()));
+        // Opening a standalone unit's Aux has checked DIO already.
+        if pro_board {
+            session.status.dio_reason = pro::check_offered(
+                name,
+                &mut VergeControl::new(&mut session.aux),
+                pro::Feature::Dio,
+            )
+            .err()
+            .map(|e| DioUnavailable::Feature(e.to_string()));
+        }
         session.poll()?;
         Ok(session)
     }
@@ -140,22 +186,26 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
     }
     fn poll(&mut self) -> Result<()> {
         let mut control = VergeControl::new(&mut self.aux);
-        self.status.supply = control.read_target_power()?;
-        match control.latest_energy_sample() {
-            Ok(EnergyCaptureSample::Sample(sample)) => {
-                self.status.capturing = true;
-                self.status.millivolts = sample.calibrated.map(|c| c.voltage_millivolts);
-                self.status.nanoamps = sample.calibrated.map(|c| c.current_nanoamps);
+        if self.status.target_power {
+            self.status.supply = control.read_target_power()?;
+        }
+        if self.status.energy {
+            match control.latest_energy_sample() {
+                Ok(EnergyCaptureSample::Sample(sample)) => {
+                    self.status.capturing = true;
+                    self.status.millivolts = sample.calibrated.map(|c| c.voltage_millivolts);
+                    self.status.nanoamps = sample.calibrated.map(|c| c.current_nanoamps);
+                }
+                Ok(EnergyCaptureSample::NoSample) => self.status.capturing = true,
+                Ok(EnergyCaptureSample::Stopped)
+                | Err(CommandError::Firmware(EnergyError::DmaError)) => {
+                    self.status.capturing = false;
+                    self.status.millivolts = None;
+                    self.status.nanoamps = None;
+                }
+                Err(error) => return Err(error.into()),
+                _ => bail!("unsupported capture state"),
             }
-            Ok(EnergyCaptureSample::NoSample) => self.status.capturing = true,
-            Ok(EnergyCaptureSample::Stopped)
-            | Err(CommandError::Firmware(EnergyError::DmaError)) => {
-                self.status.capturing = false;
-                self.status.millivolts = None;
-                self.status.nanoamps = None;
-            }
-            Err(error) => return Err(error.into()),
-            _ => bail!("unsupported capture state"),
         }
         if self.status.dio_reason.is_none() {
             let mut state = control.access_dio(0, 0, 0)?;
@@ -194,10 +244,12 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 }
                 let mut control = VergeControl::new(&mut self.aux);
                 let state = control.access_dio(0, 0, 0)?;
-                if state.split(change.mask, change.outputs).is_some() {
+                if let Some(group) = state.split(change.mask, change.outputs) {
                     self.status.dio = Some(state);
-                    self.status.error =
-                        Some("DIO0–2 must change direction together; DIO3 changes alone.".into());
+                    self.status.error = Some(format!(
+                        "{} must change direction together.",
+                        group_name(group)
+                    ));
                     return Ok(());
                 }
                 if change.mask & change.outputs & !state.outputs != 0 && !confirmed {

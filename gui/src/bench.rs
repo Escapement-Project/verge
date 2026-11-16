@@ -1,8 +1,9 @@
-//! Pro bench view. Acquisition and archive queries continue independently of frames.
+//! Bench view: a Pro's supply, energy and DIO pins, or a standalone MCU-Link's DIO pins.
+//! Acquisition and archive queries continue independently of frames.
 
 mod query;
 use crate::app::{choice, edged, label, outline, sentence, sentence_case};
-use crate::bench_worker::{Command, DioChange, Status};
+use crate::bench_worker::{Command, DioChange, Status, group_name};
 use crate::style::{self, Role, space, text};
 use crate::worker::{Backend, Request};
 use egui::{Color32, CornerRadius, Frame, Margin, ScrollArea, Stroke, Ui, Vec2, vec2};
@@ -12,7 +13,7 @@ use egui_plot::{
 use escapement_verge_probe::capture::{
     Archive, Envelope, Interval, Statistics, Supported, recovered_sessions,
 };
-use escapement_verge_probe::{EnergyRanges, Unit, pro};
+use escapement_verge_probe::{BoardKind, EnergyRanges, Unit, pro};
 use query::{Answer, Queries, Query};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
@@ -440,6 +441,10 @@ impl Bench {
         match chosen {
             Some(unit) => match pro::validate(unit, pro::Feature::Energy) {
                 Ok(()) => self.connect(unit, backend),
+                // A standalone MCU-Link, for its DIO pins.
+                Err(_) if pro::validate(unit, pro::Feature::Dio).is_ok() => {
+                    self.connect(unit, backend);
+                }
                 Err(error) => {
                     self.disconnect(backend);
                     ui.add_space(space::S);
@@ -451,8 +456,22 @@ impl Bench {
         match (&self.status, chosen) {
             (Some(status), _) if status.connected => {
                 let status = status.clone();
-                self.supply(ui, &status, backend);
-                self.acquisition(ui, &status, backend);
+                if status.target_power {
+                    self.supply(ui, &status, backend);
+                }
+                if status.energy {
+                    self.acquisition(ui, &status, backend);
+                } else {
+                    let note = if status.board == Some(BoardKind::Pro) {
+                        "This Pro has no energy measurement circuit fitted, so it measures no \
+                         energy."
+                    } else {
+                        "A standalone MCU-Link has DIO pins. Supply control and energy \
+                         measurement need a Pro."
+                    };
+                    ui.add_space(space::S);
+                    ui.add(egui::Label::new(text(Role::Body, note).color(face.ink_2)).wrap());
+                }
             }
             // The worker dropped the session, after a failure: the notice below says why.
             (Some(_), Some(unit)) => {
@@ -496,17 +515,38 @@ impl Bench {
                     chosen.and_then(|unit| {
                         pro::validate(unit, pro::Feature::Dio)
                             .err()
-                            .map(|e| e.to_string())
+                            .map(|error| error.to_string())
                     })
                 })
-                .unwrap_or_else(|| "Select an available Pro running Verge to use DIO.".into());
+                .unwrap_or_else(|| {
+                    "Select a Pro or standalone MCU-Link running Verge to use DIO.".into()
+                });
             ui.add_enabled(false, egui::Label::new(text(Role::Body, reason)));
             return;
         };
-        for group in &state.groups {
-            let name = if *group == 7 { "DIO0–2" } else { "DIO3" };
+        if state.pins == 0 {
+            ui.add(
+                egui::Label::new(
+                    text(
+                        Role::Body,
+                        "A bench tool has given the DIO pins to its command marker. Run verge \
+                         restart to give them back.",
+                    )
+                    .color(face.ink_2),
+                )
+                .wrap(),
+            );
+            return;
+        }
+        // Pins the marker holds are not DIO pins. On the standalone MCU-Link each is a group.
+        for group in state
+            .groups
+            .iter()
+            .filter(|&&group| group & state.pins != 0)
+        {
+            let name = group_name(*group);
             ui.horizontal(|ui| {
-                ui.label(text(Role::Code, name));
+                ui.label(text(Role::Code, &name));
                 for output in [false, true] {
                     let selected = (state.outputs & group != 0) == output;
                     let words = format!("{name} {}", if output { "output" } else { "input" });
@@ -571,12 +611,23 @@ impl Bench {
                     ui.end_row();
                 }
             });
-        ui.label(
-            text(
-                Role::Body,
-                "Inputs have pull-downs. Outputs read their drive.",
+        let place = match chosen.and_then(Unit::verge).and_then(|ours| ours.board) {
+            Some(BoardKind::Plain) => {
+                "DIO0 to DIO3 are J8's pads, left to right with the USB connector on the left. \
+                 They work at 3.3 V only. "
+            }
+            Some(BoardKind::Pro) => "DIO0 to DIO3 are J19 pins 2 to 5. ",
+            _ => "",
+        };
+        ui.add(
+            egui::Label::new(
+                text(
+                    Role::Body,
+                    format!("{place}Inputs have pull-downs. Outputs read their drive."),
+                )
+                .color(face.ink_2),
             )
-            .color(face.ink_2),
+            .wrap(),
         );
     }
 
@@ -692,6 +743,10 @@ impl Bench {
                     .color(if status.supply { face.ink } else { face.ink_2 }),
             );
         });
+        // Without an energy circuit there is nothing to measure it with.
+        if !status.energy {
+            return;
+        }
         ui.label(
             match status.millivolts {
                 None => text(Role::Body, "No reading without a capture"),
@@ -976,13 +1031,24 @@ impl Bench {
                     });
                 });
         }
-        if let Some(change) = self.status.as_ref().and_then(|s| s.confirm_dio) {
-            let group = if change.mask & 7 != 0 {
-                "DIO0–2"
+        if let Some(status) = self.status.as_ref()
+            && let Some(change) = status.confirm_dio
+        {
+            let group = group_name(change.mask);
+            let pins = if change.mask.count_ones() == 1 {
+                "this pin"
             } else {
-                "DIO3"
+                "these pins"
             };
-            let warning = "Check that the target is not driving these pins. The probe cannot detect contention.";
+            let voltage = if status.board == Some(BoardKind::Plain) {
+                " J8 drives 3.3 V, which can damage a target that runs at a lower voltage."
+            } else {
+                ""
+            };
+            let warning = format!(
+                "Check that the target is not driving {pins}. The probe cannot detect \
+                 contention.{voltage}"
+            );
             egui::Window::new(format!("Drive {group}?"))
                 .collapsible(false)
                 .resizable(false)
@@ -1096,6 +1162,12 @@ impl Bench {
                                 Role::Body,
                                 if self.path.is_some() {
                                     "Loading the capture…"
+                                } else if self
+                                    .status
+                                    .as_ref()
+                                    .is_some_and(|s| s.connected && !s.energy)
+                                {
+                                    "Open a capture."
                                 } else {
                                     "Start a recording, or open a capture."
                                 },
@@ -2011,6 +2083,7 @@ mod tests {
             .ingest(Message::End(End {
                 reason: EndReason::Stopped,
                 last_sequence: count - 1,
+                time_ns: None,
             }))
             .unwrap();
         writer.finish().unwrap();
@@ -2080,6 +2153,7 @@ mod tests {
             .ingest(Message::End(End {
                 reason: EndReason::Stopped,
                 last_sequence: count - 1,
+                time_ns: None,
             }))
             .unwrap();
         writer.finish().unwrap();
@@ -3011,6 +3085,9 @@ mod tests {
         bench.receive(Status {
             instance: unit.device.instance.clone(),
             connected: true,
+            target_power: true,
+            energy: true,
+            board: Some(BoardKind::Pro),
             recording: true,
             path: Some(path.clone()),
             ..Status::default()
@@ -3021,6 +3098,9 @@ mod tests {
         bench.receive(Status {
             instance: unit.device.instance,
             connected: true,
+            target_power: true,
+            energy: true,
+            board: Some(BoardKind::Pro),
             recording: false,
             path: Some(path.clone()),
             ..Status::default()
@@ -3029,5 +3109,53 @@ mod tests {
         bench.worker_failed("gone");
         assert!(!bench.recording());
         assert_eq!(bench.path.as_ref(), Some(&path));
+    }
+    /// A pin the bench marker holds is not offered, and with all four held the panel says why.
+    #[test]
+    fn marker_held_pins_are_left_out() {
+        use escapement_verge_probe::sim::SimBus;
+        let bus = SimBus::scenario("ours-plain").unwrap();
+        let unit = escapement_verge_probe::detect(&bus).unwrap().remove(0);
+        let mut dio = pro::with_pro(&bus, &unit, pro::Feature::Dio, |_, pro| {
+            anyhow::Ok(pro.access_dio(0, 0, 0)?)
+        })
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let rig = (
+            Bench::new(dir.path()),
+            vec![unit.clone()],
+            Some(unit.device.instance.clone()),
+            crate::worker::Manual::default(),
+        );
+        let mut h = Harness::builder()
+            .with_size(vec2(1080.0, 700.0))
+            .with_context_setup(style::install)
+            .build_ui_state(
+                |ui, (bench, units, selected, backend): &mut (Bench, Vec<Unit>, _, _)| {
+                    bench.show(ui, units, selected, backend);
+                },
+                rig,
+            );
+        h.step();
+        for (pins, offered) in [(0x0f, 0x0f), (0x0a, 0x0a), (0, 0)] {
+            dio.pins = pins;
+            h.state_mut().0.receive(Status {
+                instance: unit.device.instance.clone(),
+                connected: true,
+                board: Some(BoardKind::Plain),
+                dio: Some(dio.clone()),
+                ..Status::default()
+            });
+            h.step();
+            for pin in 0..4 {
+                let shown = h.query_by_label(&format!("DIO{pin} output")).is_some();
+                assert_eq!(shown, offered & 1 << pin != 0, "pins {pins:#x}, DIO{pin}");
+            }
+            let told = h
+                .query_all_by_label_contains("command marker")
+                .next()
+                .is_some();
+            assert_eq!(told, pins == 0, "pins {pins:#x}");
+        }
     }
 }

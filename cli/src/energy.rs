@@ -1,6 +1,6 @@
 //! `verge power` and `verge energy`: an MCU-Link Pro's target supply and its energy measurement.
 
-mod record;
+pub(crate) mod record;
 mod watch;
 
 use std::time::Duration;
@@ -16,7 +16,7 @@ use escapement_verge_probe::stream::EndReason;
 use escapement_verge_probe::{
     Bus, CalibrationRange, Cancel, CommandError, EnergyAccumulator, EnergyCalibration,
     EnergyCaptureSample, EnergyError, EnergyRanges, EnergyTotal, VergeControl, VergeInfo,
-    VergeTransport, dap,
+    VergeTransport,
 };
 
 /// Pairs a second for a capture the command starts. verge-gui starts at the same rate.
@@ -168,24 +168,36 @@ pub enum EnergyCommand {
 /// CMSIS-DAP.
 type Pro<'a> = VergeControl<'a, dyn ProLink + 'a>;
 
-/// A Pro running Verge, whether its CMSIS-DAP is free or a debugger holds it.
-fn pro_running_verge(unit: &Unit) -> bool {
-    unit.verge().is_some_and(|ours| {
-        ours.board.map(escapement_verge_probe::BoardKind::number)
-            == Some(dap::Ours::BOARD_MCU_LINK_PRO)
-    })
+/// A unit running Verge on a board with `feature`, whether its CMSIS-DAP is free or a debugger
+/// holds it.
+fn running_verge_with(unit: &Unit, feature: Feature) -> bool {
+    unit.verge()
+        .and_then(|ours| ours.board)
+        .is_some_and(|board| feature.on(board))
 }
 
-/// The Pro `serial` names, or the one [`crate::pick_unit`] finds, refusing anything else in a
-/// sentence that says why.
-fn find_pro<B: Bus>(bus: &B, serial: Option<&str>, feature: Feature) -> Result<Unit> {
+/// The unit `serial` names, or the one [`crate::pick_unit`] finds with `feature`, refusing anything
+/// else in a sentence that says why.
+pub(crate) fn find_pro<B: Bus>(bus: &B, serial: Option<&str>, feature: Feature) -> Result<Unit> {
+    find_pro_where(bus, serial, feature, |_| true)
+}
+
+/// As [`find_pro`], picking without a serial only among the units `fits` takes.
+pub(crate) fn find_pro_where<B: Bus>(
+    bus: &B,
+    serial: Option<&str>,
+    feature: Feature,
+    fits: impl Fn(&Unit) -> bool,
+) -> Result<Unit> {
     let units = detect_named(bus, serial).context("looking for MCU-Links")?;
-    let unit = crate::pick_unit(&units, serial, pro_running_verge)?;
+    let unit = crate::pick_unit(&units, serial, |unit| {
+        running_verge_with(unit, feature) && fits(unit)
+    })?;
     escapement_verge_probe::pro::validate(unit, feature)?;
     Ok(unit.clone())
 }
 
-/// Runs `f` on the Pro [`find_pro`] finds.
+/// Runs `f` on the unit [`find_pro`] finds.
 pub(crate) fn with_pro<B: Bus, T>(
     bus: &B,
     serial: Option<&str>,

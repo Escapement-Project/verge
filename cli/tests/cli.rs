@@ -1177,12 +1177,196 @@ fn dio_turns_a_group_to_input() {
 }
 
 #[test]
-fn dio_refuses_a_board_without_the_pins() {
+fn dio_reads_a_standalone_units_j8() {
     tool("ours-plain")
         .arg("dio")
         .assert()
+        .success()
+        .stdout(predicate::str::contains("DIO pins, on J8 pins 1 to 4:"))
+        .stdout(predicate::str::contains("DIO3  input   reads low"))
+        .stdout(predicate::str::contains(
+            "Direction groups: DIO0; DIO1; DIO2; DIO3.",
+        ));
+}
+
+#[test]
+fn dio_turns_one_j8_pin_on_its_own() {
+    tool("ours-plain")
+        .args(["dio", "--high", "0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DIO0  output  driven high"))
+        .stdout(predicate::str::contains("DIO1  input   reads low"));
+}
+
+/// A standalone unit's DIO pins go to a tickwave recording of those pins alone, as long as the
+/// recording ran.
+#[test]
+fn dio_record_writes_a_standalone_units_pins_alone() {
+    use escapement_verge_probe::tickwave::format::decode::Index;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("pins.tickwave");
+    tool("ours-plain")
+        .args([
+            "dio", "record", "--for", "300ms", "--pins", "0,dio2", "--out",
+        ])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "CJ3E7A91C2: DIO0 0 edges, DIO2 0 edges over 0.3",
+        ));
+    let file = std::fs::read(&out).unwrap();
+    let header = Index::of_file(&file).unwrap().footer.header;
+    let names: Vec<&str> = header.channels.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["DIO0", "DIO2"]);
+    assert!(header.derived.is_empty());
+    // The simulator times DIO streams to the microsecond.
+    assert!(
+        (300_000..400_000).contains(&header.length),
+        "{}",
+        header.length
+    );
+}
+
+/// Each pin's edges are counted as the stream reports them: here DIO1 toggling every 50 ms.
+#[test]
+fn dio_record_counts_each_pins_edges() {
+    let dir = tempfile::tempdir().unwrap();
+    tool("ours-plain-busy")
+        .args(["dio", "record", "--for", "300ms", "--pins", "0,1", "--out"])
+        .arg(dir.path().join("pins.tickwave"))
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match("DIO0 0 edges, DIO1 [67] edges over 0\\.3").unwrap());
+}
+
+/// Beside a Pro that records its pins with its energy capture, `dio record` picks the unit that
+/// streams them alone, without being told which.
+#[test]
+fn dio_record_picks_the_unit_that_streams_its_pins_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    tool("ours-pro-and-plain")
+        .args(["dio", "record", "--for", "100ms", "--out"])
+        .arg(dir.path().join("pins.tickwave"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DIO0 0 edges"));
+}
+
+/// Where the probe lost edges, the recording says how often.
+#[test]
+fn dio_record_counts_the_probes_losses() {
+    let dir = tempfile::tempdir().unwrap();
+    tool("ours-plain-edge-loss")
+        .args(["dio", "record", "--for", "300ms", "--pins", "1", "--out"])
+        .arg(dir.path().join("pins.tickwave"))
+        .assert()
+        .success()
+        // Six toggles in 300 ms, the first lost: not an edge.
+        .stdout(predicate::str::contains("DIO1 5 edges over 0.3"))
+        .stdout(predicate::str::contains(
+            "The probe lost edges 1 time: the recording marks those spans unknown.",
+        ));
+}
+
+/// `verge dio` lists only the pins a bench tool's command marker leaves, says which it holds, and
+/// refuses to drive a held one, naming it and the way to give it back.
+#[test]
+fn dio_names_the_pins_the_bench_marker_holds() {
+    tool("ours-plain-marked")
+        .arg("dio")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DIO1  input"))
+        .stdout(predicate::str::contains("DIO2").count(1))
+        .stdout(predicate::str::contains(
+            "A bench tool's command marker holds DIO2, DIO3 until the unit restarts.",
+        ));
+    tool("ours-plain-marked")
+        .args(["dio", "--high", "0,2"])
+        .assert()
         .failure()
-        .stderr(predicate::str::contains("is not an MCU-Link Pro"));
+        .stderr(predicate::str::contains(
+            "'s DIO2 to its command marker. Run `verge restart` to give it back",
+        ));
+}
+
+/// Pins a bench tool's command marker holds are left out, with a warning, and a recording with
+/// none left fails with the way to give them back and leaves no file.
+#[test]
+fn dio_record_leaves_out_pins_the_bench_marker_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("pins.tickwave");
+    tool("ours-plain-marked")
+        .args(["dio", "record", "--for", "100ms", "--pins", "2,3", "--out"])
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "reports none of the pins asked for: a bench tool has given them to its command marker. Run `verge restart`",
+        ));
+    assert!(!out.exists());
+    tool("ours-plain-marked")
+        .args(["dio", "record", "--for", "100ms", "--out"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "reports DIO0, DIO1 of the pins asked for: a bench tool holds the rest",
+        ))
+        .stdout(predicate::str::contains("DIO0 0 edges, DIO1 0 edges over"));
+}
+
+/// A Pro without its energy circuit streams its DIO pins as a standalone unit does, and the
+/// recording names the board.
+#[test]
+fn dio_record_takes_a_pro_without_its_energy_circuit() {
+    use escapement_verge_probe::tickwave::format::decode::Index;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("pins.tickwave");
+    tool("ours-pro-unfitted")
+        .args(["dio", "record", "--for", "100ms", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    let header = Index::of_file(&std::fs::read(&out).unwrap())
+        .unwrap()
+        .footer
+        .header;
+    assert_eq!(
+        header.sources[0].instrument.as_deref(),
+        Some("MCU-Link Pro")
+    );
+}
+
+#[test]
+fn dio_record_sends_a_pro_to_its_energy_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    tool("ours-pro")
+        .args(["dio", "record", "--for", "100ms", "--out"])
+        .arg(dir.path().join("pins.tickwave"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("use `verge energy record --dio`"));
+}
+
+#[test]
+fn restart_restarts_a_unit_running_verge() {
+    tool("ours-plain")
+        .arg("restart")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("CJ3E7A91C2 restarted."));
+}
+
+#[test]
+fn restart_refuses_stock() {
+    tool("stock")
+        .arg("restart")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not running Verge"));
 }
 
 #[test]
