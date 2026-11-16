@@ -1,9 +1,9 @@
 # verge
 
 A command-line tool and a desktop app to install, update and control Verge, the open CMSIS-DAP
-firmware for NXP's MCU-Link and MCU-Link Pro (mculink-verge). They update NXP's firmware too, and on
-a Pro they switch the target supply, drive the DIO pins and record energy captures. Both are built
-on verge-probe.
+firmware for NXP's MCU-Link and MCU-Link Pro (mculink-verge). They update NXP's firmware too, and
+drive the DIO pins of both probes. On a Pro they also switch the target supply and record energy
+captures. Both are built on verge-probe.
 
 [Verge's page](https://escapement-project.github.io/verge/) covers using them. Its docs live here
 and in mculink-verge:

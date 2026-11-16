@@ -1,8 +1,8 @@
 # The desktop app
 
 verge-gui gives the verge command's update workflows a window: it updates probes, one at a time or
-in a batch. On a Pro it also switches the target supply, drives the DIO pins and records energy
-captures. It comes in the same archive as verge, as Verge.app on macOS ([Getting
+in a batch. It also drives the DIO pins of both probes, and on a Pro it switches the target
+supply and records energy captures. It comes in the same archive as verge, as Verge.app on macOS ([Getting
 started](getting-started.md#install-verge)).
 
 ## Updating a probe
@@ -36,20 +36,27 @@ Once armed, the view shows the tally, the update under way, the queue and the fi
 takes no new probes. After Stop, the button "Cancel the unit under way" stops the active update at its next safe point. While the image is still loading, Stop or closing the window ends the batch at
 once; no probe has been flashed yet.
 
-## The Pro's bench
+## Bench
 
-Bench reaches a Pro's target supply, DIO pins and energy capture through Verge Aux, a second USB
-interface that debuggers leave alone ([The
+Bench reaches the probe through Verge Aux, a second USB interface that debuggers leave alone ([The
 Pro](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/pro.md#verge-aux)). So a
-debugger can keep CMSIS-DAP open meanwhile.
+debugger can keep CMSIS-DAP open meanwhile. On a standalone MCU-Link, Bench has the DIO pins. On a
+Pro, it also has the target supply and energy capture. A Pro without its energy measurement circuit
+has the target supply and the DIO pins, and no energy capture.
 
 The supply switches at once. Turning it off while a capture runs asks first. The panel shows the
-supply as commanded and the voltage as measured; they are separate readings.
+supply as commanded and the voltage as measured; they are separate readings. Without the energy
+circuit, there is no measured voltage.
 
-DIO shows each pin's direction and level. DIO0 to DIO2 change direction together, and DIO3 on its
-own. Switching to output asks first: check that the target is not driving those pins. Inputs have
-pull-downs, and outputs read back their own drive. DIO needs the J15 jumper off when the probe
-started.
+DIO shows each pin's direction and level. Switching to output asks first: check that the target is
+not driving those pins. Inputs have pull-downs, and outputs read back their own drive.
+
+On a Pro, DIO0 to DIO2 change direction together, and DIO3 on its own. DIO needs the J15 jumper off
+when the probe started.
+
+On a standalone MCU-Link, the pins are J8's pads, and each changes direction on its own. They work
+at 3.3 V only, so a pin driven high can damage a target that runs at a lower voltage ([Probes and
+jumpers](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/probes.md#the-mcu-links-dio-pins)).
 
 ## Recording energy
 

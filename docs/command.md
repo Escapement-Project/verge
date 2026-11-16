@@ -32,9 +32,40 @@ Pro needs no serial. `list` and `release` show only the probe `--serial` names.
 | `release` | shows a Verge release, and how each attached probe compares to it | [below](#release) |
 | `inspect` | says what an image file puts into flash | [below](#inspect) |
 | `read` | reads target memory over SWD, JTAG or cJTAG | [below](#read) |
-| `dio` | drives and reads the DIO pins of an MCU-Link Pro running Verge | [The Pro](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/pro.md#dio-pins) |
+| `dio` | drives and reads the DIO pins of an MCU-Link or MCU-Link Pro running Verge; `dio record` records a standalone MCU-Link's | [below](#dio-record), [Probes and jumpers](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/probes.md#the-mcu-links-dio-pins), [The Pro](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/pro.md#dio-pins) |
+| `restart` | restarts a probe running Verge, even one a debugger holds or whose CMSIS-DAP has stopped answering | [below](#restart) |
 | `power` | reads or switches the target supply of an MCU-Link Pro running Verge | [The Pro](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/pro.md#target-supply) |
 | `energy` | measures a target's voltage, current and energy through an MCU-Link Pro running Verge | [Energy capture](energy.md) |
+
+## `restart`
+
+```
+verge restart
+```
+
+Restarts a probe running Verge, as unplugging it would, and waits for it to come back. The request
+goes to the probe's USB core rather than through CMSIS-DAP, so it works while a debugger holds the
+probe, and when a CMSIS-DAP command never finishes. Everything the probe holds is lost: the DIO
+pins go back to inputs, a Pro's target supply turns off and an energy capture ends.
+
+## `dio record`
+
+```
+verge dio record --out FILE [--for DURATION] [--pins PINS]
+```
+
+Records a standalone MCU-Link's DIO pins to a tickwave recording, which tickwave opens. Each pin
+`--pins` names is a digital channel, all four unless you name some. The probe stamps an edge as
+its interrupt takes it, a little after the edge itself, to 7 ns. There are no energy readings. A
+Pro without its energy measurement circuit records the same way. Any other Pro records its pins
+beside its energy capture, with `verge energy record --dio` ([Energy capture](energy.md)).
+
+The recording goes through Verge Aux, so a debugger can hold the probe meanwhile, and `verge dio`
+can drive the pins through CMSIS-DAP while it runs. It runs until `--for` is up, or until Ctrl-C.
+Where the probe lost edges, the recording marks the pins unknown. A crash loses about the last
+second. The probe reports its time while the pins are quiet, so the recording a crash leaves covers
+quiet stretches too. A crash before the first edge leaves nothing to recover. Once recording ends,
+verge rewrites the file with full-size blocks.
 
 ## `release`
 

@@ -76,21 +76,23 @@ cargo run -p escapement-verge --features simulate -- --simulate stock update --y
 cargo run -p escapement-verge --features simulate -- --simulate arrivals batch --yes --count 3
 ```
 
-The scenarios are `bench`, `ours`, `stock`, `stock-old`, `stock-hid`, `isp`, `isp-jumper`,
-`two-isp`, `ours-beside-isp`, `isp-ours`, `two-isp-ours`, `mini`, `isp-mini`, `busy`, `arrivals`,
-`pro`, `ours-pro`, `ours-pro-debugger`, `ours-pro-aux-taken`, `ours-pro-energy`,
-`ours-pro-energy-failed`, `ours-pro-held`, `ours-plain`, `pro-old`, `fails-writes`, `unnamed-board`,
-`swd-jumper`, `pro-swd-jumper` and `stock-swd-jumper`. In `arrivals`, five units are plugged in over
-the first eight seconds. In `pro`, the one unit is an MCU-Link Pro; in `pro-old`, a Pro on stock
-V3.108, which needs the jumper. In `ours-pro-energy`, a Pro running Verge has its target supply on
-and has captured for 10 s; its target sleeps at 20 µA and wakes at 5 mA for 10 ms in every 100 ms.
-In `ours-pro-energy-failed`, that capture has stopped with an acquisition fault. In
-`ours-pro-debugger`, another program holds a Pro's CMSIS-DAP interface, as a debugger would; in
-`ours-pro-aux-taken`, another program holds its Verge Aux. In `fails-writes`, the bootloader refuses
-every write. In `unnamed-board`, the unit's product string names no board. In `swd-jumper` and
-`pro-swd-jumper`, a standalone MCU-Link and a Pro run Verge with the SWD jumper fitted; in
-`stock-swd-jumper`, a standalone MCU-Link runs stock with it. A simulated unit boots only the
-simulator's own images. A real image flashed there, such as stock from your LinkServer install,
+The scenarios are `bench`, `ours`, `stock`, `stock-old`, `stock-hid`, `daplink-rs`, `isp`,
+`isp-jumper`, `two-isp`, `ours-beside-isp`, `isp-ours`, `two-isp-ours`, `mini`, `isp-mini`, `busy`,
+`arrivals`, `pro`, `ours-pro`, `ours-pro-old-aux`, `ours-pro-edge-loss`, `ours-pro-j15`,
+`ours-pro-debugger`, `ours-pro-aux-taken`, `ours-pro-energy`, `ours-pro-energy-failed`,
+`ours-pro-and-plain`, `ours-pro-held`, `ours-pro-unfitted`, `ours-pro-unfitted-j15`, `ours-plain`,
+`ours-plain-marked`, `ours-plain-busy`, `ours-plain-edge-loss`, `pro-old`, `fails-writes`,
+`unnamed-board`, `swd-jumper`, `pro-swd-jumper` and `stock-swd-jumper`. In `arrivals`, five units
+are plugged in over the first eight seconds. In `pro`, the one unit is an MCU-Link Pro; in
+`pro-old`, a Pro on stock V3.108, which needs the jumper. In `ours-pro-energy`, a Pro running Verge
+has its target supply on and has captured for 10 s; its target sleeps at 20 µA and wakes at 5 mA for
+10 ms in every 100 ms. In `ours-pro-energy-failed`, that capture has stopped with an acquisition
+fault. In `ours-pro-debugger`, another program holds a Pro's CMSIS-DAP interface, as a debugger
+would; in `ours-pro-aux-taken`, another program holds its Verge Aux. In `fails-writes`, the
+bootloader refuses every write. In `unnamed-board`, the unit's product string names no board. In
+`swd-jumper` and `pro-swd-jumper`, a standalone MCU-Link and a Pro run Verge with the SWD jumper
+fitted; in `stock-swd-jumper`, a standalone MCU-Link runs stock with it. A simulated unit boots only
+the simulator's own images. A real image flashed there, such as stock from your LinkServer install,
 leaves the unit silent.
 
 GUI tests run headlessly through `egui_kittest` against the same simulator. A separate test
