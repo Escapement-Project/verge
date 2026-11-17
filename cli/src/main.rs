@@ -190,8 +190,8 @@ enum DioAction {
     /// the probe meanwhile, and `verge dio` can drive the pins through CMSIS-DAP while it records.
     /// Where the probe lost edges, the recording marks the pins unknown. A crash loses about the
     /// last second. The probe reports its time while the pins are quiet, so the recording a crash
-    /// leaves covers quiet stretches too. A crash before the first edge leaves nothing to recover.
-    /// Once recording ends, verge rewrites the file with full-size blocks.
+    /// leaves covers quiet stretches too, even before the first edge. Once recording ends, verge
+    /// rewrites the file with full-size blocks.
     Record(dio_record::RecordArgs),
 }
 
