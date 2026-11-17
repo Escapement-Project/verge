@@ -75,8 +75,10 @@ sorts that out.
 
 ### The graph
 
-The graph shows current, voltage or power. Live follows the newest pairs. Inspect holds the view
-while the recording carries on.
+The graph shows current, voltage or power. While a recording runs, the graph follows its newest
+pairs: 1s, 10s and 60s set how much of them it shows. The Live button at the right end of the time
+axis stops following, and starts it again. Dragging along time, or selecting, also stops following;
+zooming keeps it.
 
 Drag or scroll the graph to move along time, and ctrl-scroll or pinch to zoom. The window's marker
 in the overview below the graph drags too. The vertical axis fits what is visible until you move it:
@@ -113,13 +115,14 @@ on it. The panel reports markers the probe lost.
 
 ### Keeping, opening and exporting
 
-Each recording goes to disk as it arrives, for as long as the disk has room. Recordings stay in a
-`captures` folder in the data directory until you discard them. Kept on disk reopens one, including
-a recording cut short by a crash. Save as copies the open capture somewhere else, and Open reads one
-back.
+Each recording goes to disk as it arrives, for as long as the disk has room, as a
+[tickwave](https://github.com/Escapement-Project/tickwave) recording (`.tickwave`), which tickwave
+opens too. Recordings stay in a `captures` folder in the data directory until you discard them. Kept
+on disk reopens one, and repairs a recording a crash cut short. Once a recording stops, Save as
+copies it somewhere else, and Open reads a recording back.
 
-Export writes the capture, or the selection, as CSV or as a sigrok session, with voltage, current
-and a `GAP` channel. Exports include the DIO levels, and a `DIO_GAP` channel (`dio_gap` in CSV) for
-time whose levels are unknown. Both formats keep markers as `verge energy record` does ([Energy
-capture](energy.md#markers)). An export keeps whole pairs at its ends, with their own times, so it
-can start a little before the selection.
+Once a recording stops, Export writes it, or the selection, as CSV or as a sigrok session, with
+voltage, current and a `GAP` channel. Exports include the DIO levels, and a `DIO_GAP` channel
+(`dio_gap` in CSV) for time whose levels are unknown. Both formats keep markers as
+`verge energy record` does ([Energy capture](energy.md#markers)). An export keeps whole pairs at its
+ends, with their own times, so it can start a little before the selection.
