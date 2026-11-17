@@ -238,6 +238,9 @@ pub const FONT_LICENCES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The licence of the icon, one of the project's marks, for the About view and the distribution.
+pub const ICON_LICENCE: &str = include_str!("../icons/CC-BY-4.0.txt");
+
 fn fonts() -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     let fallbacks = fonts

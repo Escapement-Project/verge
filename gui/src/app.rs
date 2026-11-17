@@ -901,7 +901,8 @@ impl VergeApp {
             let mut open = true;
             egui::Window::new("Licences")
                 .open(&mut open)
-                .default_size(vec2(560.0, 420.0))
+                // Wide enough for the licence texts' 80 columns, which break mid-sentence narrower.
+                .default_size(vec2(720.0, 420.0))
                 .show(&ctx, |ui| {
                     ScrollArea::vertical().show(ui, |ui| {
                         ui.label(text(Role::Body, "verge is licensed under Apache-2.0. Its fonts are under the SIL Open Font License 1.1, unmodified:"));
@@ -910,6 +911,11 @@ impl VergeApp {
                             label(ui, faces);
                             ui.label(text(Role::Code, *licence));
                         }
+                        ui.add_space(space::L);
+                        ui.label(text(Role::Body, "Its icon is one of the Escapement Project's marks, under the Creative Commons Attribution 4.0 International licence (CC BY 4.0):"));
+                        ui.add_space(space::S);
+                        label(ui, "Verge's icon");
+                        ui.label(text(Role::Code, style::ICON_LICENCE));
                     });
                 });
             self.about_open = open;

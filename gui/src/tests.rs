@@ -174,6 +174,16 @@ fn press_as(h: &mut Harness<'_, VergeApp>, role: Role, label: &str) {
 }
 
 #[test]
+fn the_licences_give_the_fonts_and_the_icon() {
+    let mut h = harness(sim_app(SimBus::scenario("bench").unwrap(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Licences");
+    h.get_by_label_contains("SIL Open Font License 1.1");
+    h.get_by_label("Verge's icon");
+    h.get_by_label_contains("Creative Commons Attribution 4.0 International Public License");
+}
+
+#[test]
 fn the_bench_is_listed_with_the_release_to_install() {
     let mut h = harness(sim_app(SimBus::scenario("bench").unwrap(), vec![]));
     until(&mut h, "Update to v0.3.0");
@@ -544,6 +554,9 @@ fn pictures() {
     shoot(&mut d, "02c-hover-and-focus");
     press(&mut d, "Licences");
     shoot(&mut d, "02d-licences");
+    d.get_by_label("Verge's icon").scroll_to_me();
+    d.run_steps(20);
+    shoot(&mut d, "02e-licences-icon");
     press(&mut h, "Install v0.3.0");
     shoot(&mut h, "03-confirm");
 
