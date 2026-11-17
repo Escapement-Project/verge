@@ -64,8 +64,8 @@ The recording goes through Verge Aux, so a debugger can hold the probe meanwhile
 can drive the pins through CMSIS-DAP while it runs. It runs until `--for` is up, or until Ctrl-C.
 Where the probe lost edges, the recording marks the pins unknown. A crash loses about the last
 second. The probe reports its time while the pins are quiet, so the recording a crash leaves covers
-quiet stretches too. A crash before the first edge leaves nothing to recover. Once recording ends,
-verge rewrites the file with full-size blocks.
+quiet stretches too, even before the first edge. Once recording ends, verge rewrites the file with
+full-size blocks.
 
 ## `release`
 
