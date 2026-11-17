@@ -57,3 +57,8 @@ mculink-verge's README under "Releases".
 
 Apache-2.0, in `LICENSE`. The fonts in `gui/fonts/` are under the SIL Open Font License, with
 their licence texts beside them. The GUI's Licences button displays the texts too.
+
+Verge's icon in `gui/icons/` is one of the Escapement Project's marks, under CC BY 4.0 in
+`gui/icons/CC-BY-4.0.txt`. Credit the Escapement Project. Use the marks to refer to the project or
+its tools. Don't use them, changed or not, as another project's mark, or to suggest that the project
+made or endorses something it didn't.

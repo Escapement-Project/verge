@@ -16,6 +16,8 @@ accepted = [
     "CDLA-Permissive-2.0",
     "OFL-1.1",
     "Ubuntu-font-1.0",
+    # verge-gui's icons, the project's marks: credit and the licence's text, which the page carries.
+    "CC-BY-4.0",
     # File-level copyleft: the source of each MPL file stays available from the crate it ships in,
     # which the page links.
     "MPL-2.0",

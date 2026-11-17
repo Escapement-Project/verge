@@ -1,7 +1,8 @@
 [package]
 name = "escapement-verge-gui"
 edition.workspace = true
-license.workspace = true
+# The icons in icons/ are the project's marks, under CC BY 4.0.
+license = "Apache-2.0 AND CC-BY-4.0"
 version.workspace = true
 
 [dependencies]
