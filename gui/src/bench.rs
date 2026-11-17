@@ -1,21 +1,21 @@
 //! Bench view: a Pro's supply, energy and DIO pins, or a standalone MCU-Link's DIO pins.
-//! Acquisition and archive queries continue independently of frames.
+//! Acquisition, and the recording's queries and drawing through tickwave, continue independently
+//! of frames.
 
-mod query;
 use crate::app::{choice, edged, label, outline, sentence, sentence_case};
 use crate::bench_worker::{Command, DioChange, Status, group_name};
 use crate::style::{self, Role, space, text};
 use crate::worker::{Backend, Request};
-use egui::{Color32, CornerRadius, Frame, Margin, ScrollArea, Stroke, Ui, Vec2, vec2};
-use egui_plot::{
-    FilledArea, GridInput, GridMark, Line, Plot, PlotUi, Points, Span, uniform_grid_spacer,
+use egui::{CornerRadius, Frame, Margin, ScrollArea, Stroke, Ui, vec2};
+use escapement_tickwave_egui::view::{
+    Answer, ChannelStatistics, MarkerCursor, Recording, Statistics,
 };
-use escapement_verge_probe::capture::{
-    Archive, Envelope, Interval, Statistics, Supported, recovered_sessions,
+use escapement_tickwave_egui::{
+    Extras, Graph, Palette, Shown, Strip, ViewState, Viewer, Window, Y,
 };
+use escapement_verge_probe::tickwave::{self as recordings, Snapshots};
 use escapement_verge_probe::{BoardKind, EnergyRanges, Unit, pro};
-use query::{Answer, Queries, Query};
-use std::ops::RangeInclusive;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -31,34 +31,11 @@ enum Quantity {
     Power,
 }
 impl Quantity {
-    /// The unit the graph's values are in.
-    fn unit(self) -> &'static str {
-        match self {
-            Self::Current => "mA",
-            Self::Voltage => "V",
-            Self::Power => "mW",
-        }
-    }
     fn word(self) -> &'static str {
         match self {
             Self::Current => "Current",
             Self::Voltage => "Voltage",
             Self::Power => "Power",
-        }
-    }
-    fn extrema(self, s: &Statistics) -> Option<(f64, f64)> {
-        Some(match self {
-            Self::Current => (f64::from(s.min_na?) * 1e-6, f64::from(s.max_na?) * 1e-6),
-            Self::Voltage => (f64::from(s.min_mv?) * 1e-3, f64::from(s.max_mv?) * 1e-3),
-            Self::Power => (s.min_mv_na? as f64 * 1e-9, s.max_mv_na? as f64 * 1e-9),
-        })
-    }
-    fn value(self, s: &Supported) -> f64 {
-        let (millivolts, nanoamps) = (f64::from(s.sample.millivolts), f64::from(s.sample.nanoamps));
-        match self {
-            Self::Current => nanoamps * 1e-6,
-            Self::Voltage => millivolts * 1e-3,
-            Self::Power => millivolts * nanoamps * 1e-9,
         }
     }
 }
@@ -75,7 +52,81 @@ enum FileResult {
     Cancelled,
     Recovery(Vec<PathBuf>),
     Discarded(PathBuf),
+    /// The recording was compacted in place; its view reads the copy.
+    Compacted,
+    /// A recording a crash cut off, finished by compacting it, to open.
+    Repaired(PathBuf),
 }
+
+/// What the panel reads from a recording once: its channels, and how fast its ticks run.
+struct Channels {
+    /// The trace for each quantity, where the recording has it.
+    i: Option<usize>,
+    v: Option<usize>,
+    p: Option<usize>,
+    under: Option<usize>,
+    lanes: Vec<usize>,
+    /// Ticks a second.
+    rate: f64,
+    timebase: escapement_tickwave_egui::view::format::model::Ratio,
+    /// The capture held the high range.
+    high_range_only: bool,
+}
+impl Channels {
+    fn read(r: &Recording) -> Self {
+        let timebase = r.timebase();
+        let header = r
+            .sources()
+            .first()
+            .and_then(|source| recordings::header_from(&source.extra));
+        Self {
+            i: r.channel("I"),
+            v: r.channel("V"),
+            p: r.channel("P"),
+            under: r.channel("under_range"),
+            lanes: (0..4)
+                .filter_map(|k| r.channel(&format!("DIO{k}")))
+                .collect(),
+            rate: timebase.num() as f64 / timebase.den() as f64,
+            timebase,
+            high_range_only: header.is_some_and(|h| h.high_range_only),
+        }
+    }
+    fn trace(&self, quantity: Quantity) -> Option<usize> {
+        match quantity {
+            Quantity::Current => self.i,
+            Quantity::Voltage => self.v,
+            Quantity::Power => self.p,
+        }
+    }
+    fn seconds(&self, ticks: i64) -> f64 {
+        ticks as f64 / self.rate
+    }
+    fn ticks(&self, seconds: f64) -> i64 {
+        (seconds * self.rate).round() as i64
+    }
+}
+
+/// The recording under way, while it is the one open.
+struct Live {
+    slot: Snapshots,
+    /// Where the last snapshot's data ends, and when it was published.
+    end: Option<(i64, Instant)>,
+}
+
+/// A recording to compact, and the view that reads it meanwhile.
+struct Compaction {
+    path: PathBuf,
+    viewer: Option<Arc<Viewer>>,
+}
+
+/// How far a followed window may run ahead of the data, so a stalled stream doesn't scroll on into
+/// blank time.
+const AHEAD: Duration = Duration::from_millis(50);
+/// Markers listed a page at a time.
+const MARKER_PAGE: usize = 50;
+/// The strip's height under the graph.
+const STRIP: f32 = 64.0;
 
 pub struct Bench {
     pub status: Option<Status>,
@@ -84,43 +135,38 @@ pub struct Bench {
     /// The current ranges for a capture the panel starts.
     ranges: EnergyRanges,
     path: Option<PathBuf>,
+    /// A recording to open on the next frame, which has the context a view needs.
+    to_open: Option<PathBuf>,
     directory: PathBuf,
     recovered: Vec<PathBuf>,
-    queries: Queries,
-    generation: u64,
-    /// The last query failed: asking again waits for something to change.
-    query_failed: bool,
-    pending: bool,
-    dirty: bool,
-    queried_at: Instant,
-    answer: Option<Arc<Answer>>,
-    interval: Option<Interval>,
-    selection: Option<Interval>,
-    marker_after: Option<escapement_verge_probe::capture::MarkerCursor>,
-    marker_selected: Option<escapement_verge_probe::capture::MarkerCursor>,
-    span: u64,
-    follow: bool,
+    /// The open recording's view. The file thread holds it too, to let go of the file for a
+    /// compaction's rename.
+    viewer: Option<Arc<Viewer>>,
+    channels: Option<Channels>,
+    live: Option<Live>,
+    state: ViewState,
     quantity: Quantity,
-    select_mode: bool,
-    drag_start: Option<u64>,
-    /// Move the plot to `interval`, or to the live window, on the next frame.
-    reset_bounds: bool,
-    /// Y follows the visible data until the user moves it.
-    y_fit: bool,
-    /// The vertical travel of the drag or scroll under way while Y fits.
-    travel: f32,
-    /// The travel that took Y off the fit, applied on the next frame.
-    carry: f32,
+    marker_after: Option<MarkerCursor>,
+    marker_selected: Option<MarkerCursor>,
+    /// The window and value range the graph drew last frame.
+    shown: Option<Shown>,
     io: Option<Receiver<Result<FileResult, String>>>,
     failed: bool,
     notice: Option<String>,
     start_confirm: bool,
     off_confirm: bool,
-    /// The height under the plot, measured on the frame before.
+    /// The height under the graph, measured on the frame before.
     footer: f32,
-    /// The plot as last drawn.
-    #[cfg(test)]
-    shown: Option<egui_plot::PlotTransform>,
+    /// Compactions waiting for the file thread, and the one it runs.
+    compactions: Vec<Compaction>,
+    compacting: Option<PathBuf>,
+    /// The worker's latest recording, as its statuses name it, whichever file is shown; whether
+    /// it is still being written; and its snapshots.
+    recorded: Option<PathBuf>,
+    writing: bool,
+    recorded_slot: Option<Snapshots>,
+    /// The followed window's width, in seconds, which carries over to the next file opened.
+    span_seconds: f64,
 }
 
 impl Bench {
@@ -130,7 +176,7 @@ impl Bench {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(
-                recovered_sessions(&recovery)
+                recordings::recordings(&recovery)
                     .map(FileResult::Recovery)
                     .map_err(|e| e.to_string()),
             );
@@ -141,43 +187,36 @@ impl Bench {
             rate: 25_000,
             ranges: EnergyRanges::Auto,
             path: None,
+            to_open: None,
             directory,
             recovered: Vec::new(),
-            queries: Queries::new(),
-            generation: 0,
-            query_failed: false,
-            pending: false,
-            dirty: true,
-            queried_at: Instant::now(),
-            answer: None,
-            interval: None,
-            selection: None,
+            viewer: None,
+            channels: None,
+            live: None,
+            state: following(0),
+            quantity: Quantity::Current,
             marker_after: None,
             marker_selected: None,
-            span: 10_000_000_000,
-            follow: true,
-            quantity: Quantity::Current,
-            select_mode: false,
-            drag_start: None,
-            reset_bounds: true,
-            y_fit: true,
-            travel: 0.0,
-            carry: 0.0,
+            shown: None,
             io: Some(rx),
             failed: false,
             notice: None,
             start_confirm: false,
             off_confirm: false,
             footer: 120.0,
-            #[cfg(test)]
-            shown: None,
+            compactions: Vec::new(),
+            compacting: None,
+            recorded: None,
+            writing: false,
+            recorded_slot: None,
+            span_seconds: 10.0,
         }
     }
     pub fn recording(&self) -> bool {
         self.status.as_ref().is_some_and(|s| s.recording)
     }
     pub fn busy(&self) -> bool {
-        self.recording() || self.io.is_some()
+        self.recording() || self.io.is_some() || !self.compactions.is_empty()
     }
     pub fn take_failure(&mut self) -> bool {
         std::mem::take(&mut self.failed)
@@ -188,52 +227,64 @@ impl Bench {
         self.start_confirm = false;
         self.off_confirm = false;
         self.notice = Some(message.to_owned());
-        self.invalidate();
-    }
-    /// The range on screen: the live window, or where the user moved the plot, which the last
-    /// answer may not have caught up with.
-    fn current(&self) -> Option<Interval> {
-        let answer = self.answer.as_ref()?;
-        Some(if self.follow {
-            answer.visible
-        } else {
-            self.interval.unwrap_or(answer.visible)
-        })
-    }
-    pub fn inspect(&mut self, interval: Interval, selection: Option<Interval>) {
-        self.follow = false;
-        self.interval = Some(interval);
-        self.selection = selection;
-        self.reset_bounds = true;
-        self.invalidate();
+        // The worker closed the recording as it failed: finish it as a stop would.
+        if self.writing
+            && let Some(path) = self.recorded.clone()
+        {
+            self.ended(path);
+        }
     }
     #[cfg(test)]
-    pub fn selection_statistics(&self) -> Option<(Interval, &Statistics)> {
-        self.answer
-            .as_ref()?
-            .selection
-            .as_ref()
-            .map(|(interval, stats)| (*interval, stats))
+    pub(crate) fn answer(&self) -> Option<Arc<Answer>> {
+        self.viewer.as_ref()?.answer()
+    }
+    #[cfg(test)]
+    pub(crate) fn ticks_per_second(&self) -> Option<f64> {
+        Some(self.channels.as_ref()?.rate)
+    }
+    #[cfg(test)]
+    pub(crate) fn select(&mut self, selection: Range<i64>) {
+        self.state.selection = Some(selection);
+    }
+    /// The selection's readings, once the answer is for the selection on screen.
+    #[cfg(test)]
+    pub(crate) fn selection_statistics(&self) -> Option<Statistics> {
+        let selection = self.state.selection.as_ref()?;
+        self.answer()?
+            .statistics
+            .get(1)
+            .filter(|s| s.interval == *selection)
+            .cloned()
     }
     pub fn receive(&mut self, status: Status) {
         if self.connection.as_deref() != Some(status.instance.as_str()) {
             return;
         }
         self.off_confirm = status.confirm_off;
-        if self
-            .status
-            .as_ref()
-            .is_some_and(|old| old.recording && !status.recording)
+        if let Some(path) = status.path.clone()
+            && self.recorded.as_ref() != Some(&path)
         {
-            self.invalidate();
-        }
-        if let Some(path) = &status.path
-            && self.status.as_ref().and_then(|s| s.path.as_ref()) != Some(path)
-        {
-            if path.parent() == Some(self.directory.as_path()) && !self.recovered.contains(path) {
+            // A recording began: the panel follows it. One that began and ended between two
+            // statuses is finished at once.
+            if path.parent() == Some(self.directory.as_path()) && !self.recovered.contains(&path) {
                 self.recovered.push(path.clone());
+                self.recovered.sort();
             }
-            self.open(path.clone());
+            self.recorded = Some(path.clone());
+            self.recorded_slot = status.snapshots.clone();
+            self.writing = status.recording;
+            if status.recording {
+                self.follow_recording();
+            } else {
+                self.close();
+                self.path = Some(path.clone());
+                self.ended(path);
+            }
+        } else if self.writing
+            && !status.recording
+            && let Some(path) = self.recorded.clone()
+        {
+            self.ended(path);
         }
         if let Some(error) = &status.error {
             if self.status.as_ref().and_then(|old| old.error.as_ref()) != Some(error) {
@@ -244,32 +295,129 @@ impl Bench {
         }
         self.status = Some(status);
     }
-    fn open(&mut self, path: PathBuf) {
+    /// Shows the recording under way, as it is written.
+    fn follow_recording(&mut self) {
+        let Some(path) = self.recorded.clone() else {
+            return;
+        };
+        self.close();
         self.path = Some(path);
+        self.live = self
+            .recorded_slot
+            .clone()
+            .map(|slot| Live { slot, end: None });
+    }
+    /// The recording at `path` was finished by its writer. Shown, its view reads the finished
+    /// file at once, then a compacted copy; shown without a view, the copy opens once made; not
+    /// shown, it is compacted without a word. A recording whose header never came left no file.
+    fn ended(&mut self, path: PathBuf) {
+        self.writing = false;
+        self.recorded_slot = None;
+        let shown = self.path.as_ref() == Some(&path);
+        if shown {
+            self.live = None;
+        }
+        if !path.exists() {
+            self.recovered.retain(|p| p != &path);
+            if shown {
+                self.close();
+            }
+            return;
+        }
+        let viewer = self.viewer.clone().filter(|_| shown);
+        if let Some(viewer) = &viewer
+            && let Err(error) = viewer.reopen()
+        {
+            // The compaction's own reopen tries again once its copy is in place.
+            self.notice = Some(format!("Reading the finished capture: {error}"));
+        }
+        self.compact(path, viewer);
+    }
+    /// Lets go of the view of the open recording.
+    fn close(&mut self) {
+        self.viewer = None;
+        self.live = None;
+        self.path = None;
+        self.shown = None;
         self.marker_after = None;
         self.marker_selected = None;
-        self.interval = None;
-        self.selection = None;
-        self.answer = None;
-        self.follow = true;
-        self.reset_bounds = true;
-        self.y_fit = true;
-        self.invalidate();
+        if let (Window::Follow { span }, Some(channels)) = (&self.state.window, &self.channels) {
+            self.span_seconds = channels.seconds(*span);
+        }
+        self.channels = None;
+        self.state = following(0);
     }
-    /// What is asked for changed: answers to earlier questions are dropped.
-    fn invalidate(&mut self) {
-        self.query_failed = false;
-        self.queries.cancel();
-        self.generation += 1;
-        self.pending = false;
-        self.dirty = true;
+    fn open(&mut self, path: PathBuf) {
+        // The recording under way opens as it is written: repairing it would cut it short.
+        if self.writing && self.recorded.as_ref() == Some(&path) {
+            if self.live.is_none() {
+                self.follow_recording();
+            }
+            return;
+        }
+        self.close();
+        self.path = Some(path.clone());
+        self.to_open = Some(path);
     }
-    /// The range moved. The query under way finishes and draws, and the next one asks for where
-    /// the range is then: cancelling on every frame of a pan would leave nothing drawn until it
-    /// stopped.
-    fn requery(&mut self) {
-        self.query_failed = false;
-        self.dirty = true;
+    /// Opens `to_open`: a finished recording at once; one a crash cut off once compacting has
+    /// finished it.
+    fn open_now(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.to_open.clone() else {
+            return;
+        };
+        // A second reader would hold the file at the compaction's rename, which Windows refuses:
+        // it opens once the copy is in place.
+        if self.compacting.as_ref() == Some(&path)
+            || self.compactions.iter().any(|c| c.path == path)
+        {
+            return;
+        }
+        self.to_open = None;
+        match recordings::finished(&path) {
+            Ok(true) => match Viewer::open(ctx, &path) {
+                Ok(viewer) => self.show_viewer(Arc::new(viewer)),
+                Err(error) => self.notice = Some(format!("Opening {}: {error}", path.display())),
+            },
+            Ok(false) => {
+                self.notice = Some("Repairing the capture a crash cut off…".into());
+                self.compact(path, None);
+            }
+            Err(error) => self.notice = Some(format!("Opening {}: {error}", path.display())),
+        }
+    }
+    fn show_viewer(&mut self, viewer: Arc<Viewer>) {
+        let channels = viewer.recording(Channels::read);
+        if let Window::Follow { span } = &mut self.state.window
+            && *span <= 0
+        {
+            *span = channels.ticks(self.span_seconds);
+        }
+        self.channels = Some(channels);
+        self.viewer = Some(viewer);
+    }
+    /// Compacts the recording at `path` on the file thread once it is free, `viewer` reading the
+    /// original until the copy takes its place, then the copy. Without a view, the copy opens if
+    /// it is still the file asked for.
+    fn compact(&mut self, path: PathBuf, viewer: Option<Arc<Viewer>>) {
+        self.compactions.push(Compaction { path, viewer });
+    }
+    fn start_compaction(&mut self) {
+        if self.io.is_some() || self.compactions.is_empty() {
+            return;
+        }
+        let Compaction { path, viewer } = self.compactions.remove(0);
+        self.compacting = Some(path.clone());
+        let (send, receive) = mpsc::channel();
+        self.io = Some(receive);
+        std::thread::spawn(move || {
+            let result = compact_beside(&path, viewer.as_deref())
+                .map(|()| match viewer {
+                    Some(_) => FileResult::Compacted,
+                    None => FileResult::Repaired(path),
+                })
+                .map_err(|error| format!("{error:#}"));
+            let _ = send.send(result);
+        });
     }
     pub fn disconnect(&mut self, backend: &mut dyn Backend) {
         self.start_confirm = false;
@@ -294,7 +442,7 @@ impl Bench {
         let now = humantime::format_rfc3339_millis(SystemTime::now())
             .to_string()
             .replace(':', "-");
-        let path = self.directory.join(format!("capture-{now}.vergecapture"));
+        let path = self.directory.join(format!("capture-{now}.tickwave"));
         backend.send(Request::Bench(Command::Start {
             rate: self.rate,
             ranges: self.ranges,
@@ -312,20 +460,24 @@ impl Bench {
         });
         if let Some(result) = received {
             self.io = None;
+            self.compacting = None;
             match result {
                 Ok(FileResult::Open(path)) => self.open(path),
+                Ok(FileResult::Repaired(path)) => {
+                    if self.path.as_ref() == Some(&path) {
+                        self.notice = None;
+                        self.open(path);
+                    }
+                }
                 Ok(FileResult::Done(message)) => {
                     self.notice = Some(message);
                 }
-                Ok(FileResult::Cancelled) => {}
+                Ok(FileResult::Cancelled | FileResult::Compacted) => {}
                 Ok(FileResult::Recovery(paths)) => self.recovered = paths,
                 Ok(FileResult::Discarded(path)) => {
                     self.recovered.retain(|p| p != &path);
                     if self.path.as_ref() == Some(&path) {
-                        self.path = None;
-                        self.answer = None;
-                        self.selection = None;
-                        self.invalidate();
+                        self.close();
                     }
                     self.notice = Some("Capture discarded.".into());
                 }
@@ -337,44 +489,50 @@ impl Bench {
             }
         }
     }
+    /// Takes in what came since the last frame: file results, a recording to open, and the
+    /// recording under way's latest snapshot.
     fn poll(&mut self, ui: &Ui) {
         self.tick();
-        if let Some((generation, result)) = self.queries.take()
-            && generation == self.generation
-        {
-            self.pending = false;
-            match result {
-                Ok(answer) => self.answer = Some(Arc::new(answer)),
-                Err(error) => {
-                    self.notice = Some(error);
-                    self.query_failed = true;
+        self.start_compaction();
+        self.open_now(ui.ctx());
+        if let Some(live) = &mut self.live {
+            let published = live.slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(published) = published {
+                // The recorder publishes again when its clock flushes a stalled stream: the same
+                // end keeps its first publish time, or the followed window would step back.
+                live.end = match (live.end, published.end) {
+                    (Some((end, at)), Some(next)) if next == end => Some((end, at)),
+                    (_, next) => next.map(|end| (end, published.at)),
+                };
+                match &self.viewer {
+                    Some(viewer) => viewer.update(published.snapshot),
+                    None => match self
+                        .path
+                        .as_deref()
+                        .map(|path| Viewer::live(ui.ctx(), path, published.snapshot))
+                    {
+                        Some(Ok(viewer)) => self.show_viewer(Arc::new(viewer)),
+                        Some(Err(error)) => {
+                            self.notice = Some(format!("Showing the recording: {error}"));
+                            self.live = None;
+                        }
+                        None => {}
+                    },
                 }
             }
         }
-        let refresh = self.follow
-            && self.recording()
-            && self.queried_at.elapsed() > Duration::from_millis(250);
-        if let Some(path) = self.path.clone()
-            && !self.pending
-            && (self.dirty || (self.answer.is_none() && !self.query_failed) || refresh)
-        {
-            self.queried_at = Instant::now();
-            self.pending = true;
-            self.dirty = false;
-            self.queries.send(Query {
-                generation: self.generation,
-                path,
-                interval: if self.follow { None } else { self.interval },
-                live_span: self.span,
-                selection: self.selection,
-                marker_after: self.marker_after,
-                marker_selected: self.marker_selected,
-                pixels: ui.available_width().max(64.0) as usize,
-                cancel: Arc::new(AtomicBool::new(false)),
-            });
+        if let Some(failure) = self.viewer.as_ref().and_then(|v| v.failure()) {
+            self.notice = Some(failure);
         }
-        ui.ctx().request_repaint_after(Duration::from_millis(50));
     }
+    /// The host's now for the graph, while a recording is written: the last snapshot's end and the
+    /// time since, at most `AHEAD` past it.
+    fn now(&self) -> Option<i64> {
+        let (end, at) = self.live.as_ref()?.end?;
+        let rate = self.channels.as_ref()?.rate;
+        Some(end + (at.elapsed().min(AHEAD).as_secs_f64() * rate).round() as i64)
+    }
+
     /// The view: its controls and readings in a left panel, the graph in the rest.
     pub fn show(
         &mut self,
@@ -632,67 +790,58 @@ impl Bench {
     }
 
     fn markers(&mut self, ui: &mut Ui) {
-        let Some(answer) = self.answer.clone() else {
+        let (Some(answer), Some(channels)) = (self.answer_now(), self.channels.as_ref()) else {
             return;
         };
-        let page = &answer.marker_list;
-        if page.total == 0 && page.loss_events == 0 {
+        let Some(page) = answer.markers.list.as_ref() else {
+            return;
+        };
+        let losses = self.marker_losses();
+        if page.total == 0 && losses == 0 {
             return;
         }
         let face = style::face(ui.ctx());
         ui.add_space(space::L);
         label(ui, "Markers");
         ui.label(text(Role::Figures, format!("{} received", page.total)).color(face.ink));
-        if page.loss_events > 0 {
+        if losses > 0 {
             ui.label(
                 text(
                     Role::Body,
                     format!(
-                        "{} marker-loss {}. Some markers are missing.",
-                        page.loss_events,
-                        if page.loss_events == 1 {
-                            "report"
-                        } else {
-                            "reports"
-                        }
+                        "{losses} marker-loss {}. Some markers are missing.",
+                        if losses == 1 { "report" } else { "reports" }
                     ),
                 )
                 .color(face.attention_ink),
             );
         }
+        let mut picked = None;
         ScrollArea::vertical()
             .id_salt("marker-list")
             .max_height(150.0)
             .show(ui, |ui| {
-                for entry in &page.entries {
-                    let cursor = escapement_verge_probe::capture::MarkerCursor {
-                        time_ns: entry.marker.time_ns,
-                        id: entry.id,
-                    };
-                    let words = format!(
-                        "{:.6}s · {} · {}",
-                        seconds(entry.marker.time_ns),
-                        entry.marker.number,
-                        escapement_verge_probe::record::marker_label(&entry.marker.label)
-                    );
+                for marker in &page.entries {
+                    let a = &marker.annotation;
+                    let number = a.values.as_ref().and_then(|v| v.get("number"));
+                    let words = [
+                        Some(format!("{:.6}s", channels.seconds(marker.cursor.tick))),
+                        number.cloned(),
+                        a.label.clone(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" · ");
                     let response = ui.add(
                         egui::Button::new(text(Role::Code, words))
-                            .selected(self.marker_selected == Some(cursor))
+                            .selected(self.marker_selected == Some(marker.cursor))
                             .wrap(),
                     );
                     if response.clicked() {
-                        self.marker_selected = Some(cursor);
-                        let width = self
-                            .current()
-                            .map_or(self.span, Interval::duration_ns)
-                            .max(1);
-                        let start = cursor.time_ns.saturating_sub(width / 2);
-                        self.inspect(
-                            Interval::new(start, start.saturating_add(width)),
-                            self.selection,
-                        );
+                        picked = Some(marker.cursor);
                     }
-                    if entry.lost_before {
+                    if a.kind.as_deref() == Some("marker-after-loss") {
                         ui.label(
                             text(Role::Body, "Markers lost before this one")
                                 .color(face.attention_ink),
@@ -700,20 +849,27 @@ impl Bench {
                     }
                 }
             });
+        if let Some(cursor) = picked {
+            self.marker_selected = Some(cursor);
+            let width = self.window_width().max(1);
+            let start = cursor.tick - width / 2;
+            self.state.window = Window::At(start..start + width);
+        }
+        let next = page.next;
         ui.horizontal(|ui| {
             if outline(ui, "First", self.marker_after.is_some()).clicked() {
                 self.marker_after = None;
-                self.invalidate();
             }
-            if outline(ui, "Next", page.next.is_some()).clicked() {
-                self.marker_after = page.next;
-                self.invalidate();
+            if outline(ui, "Next", next.is_some()).clicked() {
+                self.marker_after = next;
             }
         });
         let successor = answer
-            .marker_successor
+            .markers
+            .successor
             .as_ref()
-            .filter(|_| answer.marker_selected == self.marker_selected);
+            .filter(|(of, _)| Some(*of) == self.marker_selected)
+            .and_then(|(_, next)| next.as_ref());
         if outline(
             ui,
             "Select to next marker",
@@ -722,8 +878,37 @@ impl Bench {
         .clicked()
             && let (Some(start), Some(end)) = (self.marker_selected, successor)
         {
-            self.selection = Some(Interval::new(start.time_ns, end.marker.time_ns));
-            self.invalidate();
+            self.state.selection = Some(start.tick..end.cursor.tick);
+        }
+    }
+
+    /// Marker-loss reports: counted by the worker while the recording is written, from the
+    /// recording once it is finished.
+    fn marker_losses(&self) -> u64 {
+        if self.live.is_some() {
+            return self.status.as_ref().map_or(0, |s| s.marker_losses);
+        }
+        self.viewer.as_ref().map_or(0, |viewer| {
+            viewer.recording(|r| {
+                r.sources()
+                    .first()
+                    .and_then(|s| s.extra.get("marker_losses"))
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0)
+            })
+        })
+    }
+
+    /// The latest answer, for the panel's text.
+    fn answer_now(&self) -> Option<Arc<Answer>> {
+        self.viewer.as_ref()?.answer()
+    }
+
+    /// The window's width on screen, in ticks.
+    fn window_width(&self) -> i64 {
+        match &self.shown {
+            Some(shown) => shown.window.end - shown.window.start,
+            None => span(&self.state.window),
         }
     }
 
@@ -847,16 +1032,17 @@ impl Bench {
 
     /// The visible window's readings and the selection's, side by side.
     fn measurements(&mut self, ui: &mut Ui) {
-        let Some(answer) = self.answer.clone() else {
+        let (Some(answer), Some(channels)) = (self.answer_now(), self.channels.as_ref()) else {
             return;
         };
         let face = style::face(ui.ctx());
         ui.add_space(space::L);
         label(ui, "Measurements");
-        if let Some(mut selection) = self.selection {
+        if let Some(selection) = self.state.selection.clone() {
+            let mut changed = None;
             ui.horizontal(|ui| {
-                let mut start = seconds(selection.start_ns);
-                let mut end = seconds(selection.end_ns);
+                let mut start = channels.seconds(selection.start);
+                let mut end = channels.seconds(selection.end);
                 let from = ui.add(
                     egui::DragValue::new(&mut start)
                         .speed(0.001)
@@ -871,29 +1057,31 @@ impl Bench {
                         .suffix(" s"),
                 );
                 if from.changed() || to.changed() {
-                    selection = Interval::new(nanos(start), nanos(end));
-                    self.selection = Some(selection);
-                    self.requery();
+                    let (a, b) = (channels.ticks(start), channels.ticks(end));
+                    changed = Some(a.min(b)..a.max(b));
                 }
             });
+            if let Some(selection) = changed {
+                self.state.selection = Some(selection);
+            }
             ui.horizontal(|ui| {
                 if outline(ui, "Zoom to selection", true).clicked() {
-                    self.inspect(selection, Some(selection));
+                    self.state.window = Window::At(selection.clone());
                 }
                 if outline(ui, "Clear", true).clicked() {
-                    self.selection = None;
-                    self.invalidate();
+                    self.state.selection = None;
                 }
             });
         }
-        let window = (answer.visible, answer.window.clone());
-        let selection = self.selection.map(|selection| match &answer.selection {
-            Some((queried, statistics)) if *queried == selection => {
-                Some((selection, statistics.clone()))
-            }
-            // The answer for this selection has not come back yet.
-            _ => None,
+        let window = answer.statistics.first();
+        // The answer's selection is the one asked; one moved since waits for its own.
+        let selection = self.state.selection.as_ref().map(|selection| {
+            answer
+                .statistics
+                .get(1)
+                .filter(|statistics| statistics.interval == *selection)
         });
+        let extent = answer.extent.clone().unwrap_or(0..0);
         egui::Grid::new("bench-measurements")
             .num_columns(3)
             .spacing(vec2(space::M, space::XS))
@@ -905,15 +1093,14 @@ impl Bench {
                     label(ui, "Selection");
                 }
                 ui.end_row();
-                let columns: Vec<Option<&(Interval, Statistics)>> = std::iter::once(Some(&window))
-                    .chain(selection.as_ref().map(Option::as_ref))
-                    .collect();
+                let columns: Vec<Option<&Statistics>> =
+                    std::iter::once(window).chain(selection).collect();
                 for (name, value) in READINGS {
                     label(ui, &sentence_case(name));
                     for column in &columns {
                         let words = column.map_or_else(
                             || "…".to_owned(),
-                            |(interval, statistics)| value(*interval, statistics),
+                            |statistics| value(&Reading::new(statistics, channels)),
                         );
                         ui.label(text(Role::Figures, words).color(face.ink));
                     }
@@ -921,14 +1108,14 @@ impl Bench {
                 }
                 label(ui, "Unmeasured");
                 for column in &columns {
-                    let missing = column.map(|(interval, statistics)| {
-                        unmeasured_ns(*interval, answer.view.extent, statistics)
+                    let missing = column.and_then(|statistics| {
+                        let current = Reading::new(statistics, channels).current?;
+                        let ticks = current.unmeasured(&statistics.interval, &extent);
+                        Some(ticks.as_f64() / channels.rate)
                     });
                     ui.label(match missing {
-                        Some(0) => text(Role::Figures, "none").color(face.ink_2),
-                        Some(ns) => {
-                            text(Role::Figures, si(seconds(ns), "s")).color(face.attention_ink)
-                        }
+                        Some(s) if s <= 0.0 => text(Role::Figures, "none").color(face.ink_2),
+                        Some(s) => text(Role::Figures, si(s, "s")).color(face.attention_ink),
                         None => text(Role::Figures, "…").color(face.ink),
                     });
                 }
@@ -939,8 +1126,11 @@ impl Bench {
     /// The open capture's name and what can be done with it, under the graph.
     fn files(&mut self, ui: &mut Ui) {
         let face = style::face(ui.ctx());
-        let idle = self.io.is_none();
-        let open = self.path.is_some();
+        let idle = self.io.is_none() && self.compactions.is_empty();
+        let open = self.path.is_some() && self.viewer.is_some();
+        // A DIO-only recording has no pairs for the exports' columns.
+        let exportable =
+            open && !self.recording() && self.channels.as_ref().is_some_and(|c| c.i.is_some());
         ui.horizontal_wrapped(|ui| {
             if let Some(path) = &self.path {
                 ui.label(
@@ -956,23 +1146,23 @@ impl Bench {
             if outline(ui, "Open…", idle).clicked() {
                 self.file(FileAction::Open);
             }
-            if outline(ui, "Save as…", idle && open).clicked() {
+            if outline(ui, "Save as…", idle && open && !self.recording()).clicked() {
                 self.file(FileAction::Save);
             }
             ui.add_space(space::S);
             label(
                 ui,
-                if self.selection.is_some() {
+                if self.state.selection.is_some() {
                     "Export selection"
                 } else {
                     "Export"
                 },
             )
             .on_hover_text("Exports keep whole samples at the selection's edges.");
-            if outline(ui, "CSV…", idle && open).clicked() {
+            if outline(ui, "CSV…", idle && exportable).clicked() {
                 self.file(FileAction::Export(true));
             }
-            if outline(ui, "sigrok…", idle && open).clicked() {
+            if outline(ui, "sigrok…", idle && exportable).clicked() {
                 self.file(FileAction::Export(false));
             }
             ui.add_space(space::S);
@@ -989,6 +1179,13 @@ impl Bench {
         }
         ui.add_space(space::L);
         let name = label(ui, "Kept on disk");
+        // A file the file thread is compacting can't take a second reader: Windows refuses the
+        // rename while one holds it.
+        let idle = self.io.is_none() && self.compactions.is_empty();
+        ui.add_enabled_ui(idle, |ui| self.kept_list(ui, name.id));
+    }
+
+    fn kept_list(&mut self, ui: &mut Ui, name: egui::Id) {
         egui::ComboBox::from_id_salt("bench-retained")
             .width(ui.available_width())
             .selected_text(text(
@@ -1007,7 +1204,7 @@ impl Bench {
                 }
             })
             .response
-            .labelled_by(name.id);
+            .labelled_by(name);
     }
 
     fn dialogs(&mut self, ui: &mut Ui, backend: &mut dyn Backend) {
@@ -1094,44 +1291,44 @@ impl Bench {
     }
 
     fn toolbar(&mut self, ui: &mut Ui) {
+        let rate = self.channels.as_ref().map(|c| c.rate);
         ui.horizontal_wrapped(|ui| {
             for quantity in [Quantity::Current, Quantity::Voltage, Quantity::Power] {
                 if choice(ui, quantity.word(), self.quantity == quantity).clicked()
                     && self.quantity != quantity
                 {
                     self.quantity = quantity;
-                    self.y_fit = true;
+                    self.state.y = Y::Fit;
                 }
-            }
-            ui.add_space(space::M);
-            if choice(ui, "Live", self.follow).clicked() && !self.follow {
-                self.follow = true;
-                self.reset_bounds = true;
-                self.invalidate();
-            }
-            if choice(ui, "Inspect", !self.follow).clicked() && self.follow {
-                self.follow = false;
-                self.interval = self.current();
-                self.invalidate();
             }
             ui.add_space(space::M);
             for seconds in [1, 10, 60] {
-                let span = seconds * 1_000_000_000;
-                if choice(ui, &format!("{seconds}s"), self.follow && self.span == span).clicked() {
-                    self.span = span;
-                    self.reset_bounds = true;
-                    self.interval = self.current().map(|current| {
-                        Interval::new(current.end_ns.saturating_sub(self.span), current.end_ns)
-                    });
-                    self.invalidate();
+                let Some(rate) = rate else { break };
+                let width = (seconds as f64 * rate).round() as i64;
+                let on = span(&self.state.window) == width;
+                if choice(ui, &format!("{seconds}s"), on).clicked() {
+                    self.state.window = match &self.state.window {
+                        Window::Follow { .. } => Window::Follow { span: width },
+                        // A window the user moved keeps its end.
+                        Window::At(at) => Window::At(at.end - width..at.end),
+                    };
                 }
             }
             ui.add_space(space::M);
-            if choice(ui, "Select", self.select_mode).clicked() {
-                self.select_mode = !self.select_mode;
+            if choice(ui, "Select", self.state.select_mode).clicked() {
+                self.state.select_mode = !self.state.select_mode;
             }
-            if choice(ui, "Fit Y", self.y_fit).clicked() {
-                self.y_fit = !self.y_fit;
+            let fitted = matches!(self.state.y, Y::Fit);
+            if choice(ui, "Fit Y", fitted).clicked() {
+                self.state.y = match (fitted, &self.shown) {
+                    // Off the fit where it stands: the range drawn last frame.
+                    (true, Some(shown)) => Y::Fixed {
+                        low: shown.y.0,
+                        high: shown.y.1,
+                    },
+                    (true, None) => Y::Fit,
+                    (false, _) => Y::Fit,
+                };
             }
         });
         ui.add_space(space::S);
@@ -1139,12 +1336,8 @@ impl Bench {
 
     fn graph(&mut self, ui: &mut Ui) {
         let face = style::face(ui.ctx());
-        // The plots stand on the surface, as the measurements page's charts do.
-        ui.visuals_mut().extreme_bg_color = face.surface;
         self.toolbar(ui);
-        let Some(answer) = self.answer.clone() else {
-            // A selection drag under way ends with the plot it was on.
-            self.drag_start = None;
+        let (Some(viewer), Some(channels)) = (self.viewer.clone(), self.channels.as_ref()) else {
             let size = vec2(
                 ui.available_width(),
                 (ui.available_height() - 48.0).max(160.0),
@@ -1180,122 +1373,46 @@ impl Bench {
             self.files(ui);
             return;
         };
-        let visible = answer.visible;
-        let extent = answer.view.extent;
-        let quantity = self.quantity;
-        let selection = self.selection;
-        let follow = self.follow;
-        let target = if follow {
-            Some(visible)
-        } else {
-            self.reset_bounds.then(|| self.interval.unwrap_or(visible))
-        };
-        let fit = self.y_fit;
-        let carry = std::mem::take(&mut self.carry);
-        let mut fitted = None;
-        let mut pointer = None;
-        let plot = Plot::new("energy")
-            .height((ui.available_height() - self.footer).max(160.0))
-            .x_grid_spacer(uniform_grid_spacer(ladder))
-            .y_grid_spacer(uniform_grid_spacer(ladder))
-            .x_axis_formatter(|mark, _| tick(mark, "s"))
-            .y_axis_formatter(move |mark, _| tick(mark, quantity.unit()))
-            .y_axis_min_width(56.0)
-            .grid_color(face.hair)
-            .auto_bounds(false)
-            .allow_double_click_reset(false)
-            // The wheel zooms time; dragging the Y axis zooms Y.
-            .allow_zoom([true, false])
-            // While Y fits, a drag or the wheel moves time only, until it passes the detent.
-            .allow_drag([!self.select_mode, !self.select_mode && !fit])
-            .allow_scroll([true, !fit]);
-        let response = plot.show(ui, |plot| {
-            let x = match target {
-                Some(interval) => {
-                    let x = seconds(interval.start_ns)
-                        ..=seconds(interval.end_ns.max(interval.start_ns + 1));
-                    plot.set_plot_bounds_x(x.clone());
-                    x
-                }
-                None => plot.plot_bounds().range_x(),
-            };
-            if fit {
-                let rows = label_rows(&answer.markers);
-                let height = plot.transform().frame().height();
-                fitted =
-                    y_range(&answer, quantity, &x).map(|range| label_headroom(range, rows, height));
-                if let Some(range) = fitted.clone() {
-                    plot.set_plot_bounds_y(range);
-                }
-            } else if carry != 0.0 {
-                let shift = -f64::from(carry) * plot.transform().dvalue_dpos()[1];
-                plot.translate_bounds(vec2(0.0, shift as f32));
-            }
-            lost_bands(plot, &answer.overview.lost, face);
-            let verge = face.series_verge;
-            draw(plot, &answer.fallback, quantity, verge);
-            match &answer.view.samples {
-                Some(samples) => draw_samples(plot, samples, quantity, verge, &x),
-                None => draw(plot, &answer.view.envelopes, quantity, verge),
-            }
-            if let Some(selection) = selection {
-                plot.span(
-                    Span::new(
-                        "Selection",
-                        seconds(selection.start_ns)..=seconds(selection.end_ns),
-                    )
-                    .fill(face.wash()),
-                );
-            }
-            pointer = plot.pointer_coordinate().map(|p| nanos(p.x));
-        });
+        let palette = palette(face, ui);
+        let trace = channels.trace(self.quantity);
+        let lanes = channels.lanes.clone();
+        let flag = channels.under;
+        let high_range_only = channels.high_range_only;
+        let i = channels.i;
+        let now = self.now();
+        let mut extras = Extras::default();
+        extras.marker_list = Some((self.marker_after, MARKER_PAGE));
+        extras.successor_of = self.marker_selected;
         let top = ui.cursor().top();
-        let bounds = *response.transform.bounds();
-        #[cfg(test)]
-        {
-            self.shown = Some(response.transform);
+        let strip = if trace.is_some() {
+            STRIP + space::S
+        } else {
+            0.0
+        };
+        let height = (ui.available_height() - self.footer - strip).max(160.0);
+        let graph = match trace {
+            Some(trace) => Graph::new(&viewer, &mut self.state, &palette, trace)
+                .flag(flag)
+                .include_zero(true),
+            None => Graph::lanes_only(&viewer, &mut self.state, &palette),
         }
-        self.reset_bounds = false;
-        self.y_gesture(ui, &response.response, fitted, bounds.range_y());
-        let shown = Interval::new(nanos(bounds.min()[0]), nanos(bounds.max()[0]));
-        if self.select_mode {
-            if response.response.drag_started() {
-                self.drag_start = pointer;
-                self.inspect(shown, self.selection);
-            }
-            if response.response.dragged()
-                && let (Some(start), Some(end)) = (self.drag_start, pointer)
-            {
-                self.selection = Some(Interval::new(start.min(end), start.max(end)));
-                self.requery();
-            }
-            if response.response.drag_stopped() {
-                self.drag_start = None;
-            }
+        .lanes(&lanes)
+        .extras(extras)
+        .now(now)
+        .motion(crate::mark::motion(ui.ctx()))
+        .height(height);
+        let response = ui.add(graph);
+        self.shown = Graph::shown(&response);
+        if trace.is_some() {
+            ui.add_space(space::S);
+            ui.add(
+                Strip::new(&viewer, &mut self.state, &palette)
+                    .include_zero(true)
+                    .now(now)
+                    .height(STRIP),
+            );
         }
-        // However the plot's range moved (drag, scroll, wheel or box zoom, in either mode), the
-        // range drawn is the one to query.
-        if self.drag_start.is_none() {
-            let wanted = if follow {
-                visible
-            } else {
-                self.interval.unwrap_or(visible)
-            };
-            if differs(shown, wanted) {
-                self.follow = false;
-                self.interval = Some(shown);
-                self.requery();
-            }
-        }
-        self.draw_markers(ui, &answer.markers, &response.transform);
-        self.digital_lanes(
-            ui,
-            &answer.digital,
-            &answer.digital_fallback,
-            &response.transform,
-        );
-        self.overview(ui, &answer, self.current().unwrap_or(visible), extent);
-        if answer.high_range_only {
+        if high_range_only {
             ui.label(
                 text(
                     Role::Body,
@@ -1304,27 +1421,20 @@ impl Bench {
                 .color(face.ink_2),
             );
         }
-        if answer.view.lost_pairs > 0 {
+        let (lost, dio_losses) = self.losses(&viewer, i, &lanes);
+        if lost > 0 {
             ui.label(
-                text(
-                    Role::Body,
-                    format!("{} pairs lost in this capture", answer.view.lost_pairs),
-                )
-                .color(face.attention_ink),
+                text(Role::Body, format!("{lost} pairs lost in this capture"))
+                    .color(face.attention_ink),
             );
         }
-        if answer.digital.loss_events > 0 {
+        if dio_losses > 0 {
             ui.label(
                 text(
                     Role::Body,
                     format!(
-                        "{} DIO edge-loss {} in this capture",
-                        answer.digital.loss_events,
-                        if answer.digital.loss_events == 1 {
-                            "report"
-                        } else {
-                            "reports"
-                        }
+                        "{dio_losses} DIO edge-loss {} in this capture",
+                        if dio_losses == 1 { "report" } else { "reports" }
                     ),
                 )
                 .color(face.attention_ink),
@@ -1332,303 +1442,24 @@ impl Bench {
         }
         ui.add_space(space::S);
         self.files(ui);
-        // What follows the plot, measured each frame so the plot leaves room for it.
-        let footer = ui.cursor().top() - top + space::S;
+        // What follows the graph, measured each frame so the graph leaves room for it.
+        let footer = ui.cursor().top() - top - height - strip + space::S;
         if (footer - self.footer).abs() > 0.5 {
             self.footer = footer;
             ui.ctx().request_repaint();
         }
     }
 
-    fn draw_markers(
-        &self,
-        ui: &mut Ui,
-        page: &escapement_verge_probe::capture::MarkerPage,
-        transform: &egui_plot::PlotTransform,
-    ) {
-        let face = style::face(ui.ctx());
-        let frame = *transform.frame();
-        let painter = ui.painter().with_clip_rect(frame);
-        let mut occupied = [frame.left() - 1.0; LABEL_ROWS];
-        // Drawn once every line is, so that no marker's line crosses another's label.
-        let mut labels = Vec::new();
-        for entry in &page.entries {
-            let x = transform
-                .position_from_point(&egui_plot::PlotPoint::new(
-                    seconds(entry.marker.time_ns),
-                    0.0,
-                ))
-                .x;
-            if x < frame.left() || x > frame.right() {
-                continue;
-            }
-            let line = [egui::pos2(x, frame.top()), egui::pos2(x, frame.bottom())];
-            painter.line_segment(line, Stroke::new(3.0, face.surface));
-            painter.line_segment(line, Stroke::new(1.0, face.ink));
-            let label = format!(
-                "{} {}",
-                entry.marker.number,
-                escapement_verge_probe::record::marker_label(&entry.marker.label)
-            );
-            let galley =
-                painter.layout_no_wrap(label.clone(), egui::FontId::monospace(11.0), face.ink);
-            let left = (x + 3.0)
-                .min(frame.right() - galley.size().x)
-                .max(frame.left());
-            if let Some((row, right)) = occupied
-                .iter_mut()
-                .enumerate()
-                .find(|(_, right)| **right < left)
-            {
-                let pos = egui::pos2(left, frame.top() + LABEL_TOP + row as f32 * LABEL_ROW);
-                *right = left + galley.size().x + 8.0;
-                labels.push((pos, galley));
-            }
-            ui.interact(
-                egui::Rect::from_min_max(
-                    egui::pos2(x - 3.0, frame.top()),
-                    egui::pos2(x + 3.0, frame.bottom()),
-                ),
-                ui.scope_id().with(("marker", entry.id)),
-                egui::Sense::hover(),
-            )
-            .on_hover_text(format!("{:.6}s · {label}", seconds(entry.marker.time_ns)));
-        }
-        for (pos, galley) in labels {
-            painter.rect_filled(
-                egui::Rect::from_min_size(pos, galley.size()),
-                0,
-                face.surface,
-            );
-            painter.galley(pos, galley, face.ink);
-        }
-        if page.next.is_some() {
-            painter.text(
-                frame.left_bottom() + vec2(6.0, -6.0),
-                egui::Align2::LEFT_BOTTOM,
-                "More markers: zoom in or use the list",
-                egui::FontId::proportional(12.0),
-                face.ink_2,
-            );
-        }
-    }
-
-    fn digital_lanes(
-        &self,
-        ui: &mut Ui,
-        digital: &escapement_verge_probe::capture::DigitalView,
-        fallback: &[escapement_verge_probe::capture::DigitalBin],
-        transform: &egui_plot::PlotTransform,
-    ) {
-        if digital.pins == 0 {
-            return;
-        }
-        let face = style::face(ui.ctx());
-        let count = digital.pins.count_ones() as f32;
-        let (rect, _) = ui.allocate_exact_size(
-            vec2(ui.available_width(), count * 24.0),
-            egui::Sense::hover(),
-        );
-        let frame = *transform.frame();
-        let clip = egui::Rect::from_min_max(
-            egui::pos2(frame.left(), rect.top()),
-            egui::pos2(frame.right(), rect.bottom()),
-        );
-        let painter = ui.painter().with_clip_rect(clip);
-        let x = |time| {
-            transform
-                .position_from_point(&egui_plot::PlotPoint::new(seconds(time), 0.0))
-                .x
+    /// Pairs lost, and DIO edge-loss reports: counted by the worker while the recording is
+    /// written, from the recording once it is finished.
+    fn losses(&self, viewer: &Viewer, i: Option<usize>, lanes: &[usize]) -> (u64, u64) {
+        let lost = i.map_or(0, |i| viewer.recording(|r| r.lost(i)));
+        let dio = match (&self.live, lanes.first()) {
+            (Some(_), _) => self.status.as_ref().map_or(0, |s| s.edge_losses),
+            (None, Some(&lane)) => viewer.recording(|r| r.gaps(lane)) as u64,
+            (None, None) => 0,
         };
-        let mut row = 0;
-        for pin in 0..4 {
-            let bit = 1 << pin;
-            if digital.pins & bit == 0 {
-                continue;
-            }
-            let top = rect.top() + row as f32 * 24.0 + 3.0;
-            row += 1;
-            ui.painter().text(
-                egui::pos2(frame.left() - 8.0, top + 7.0),
-                egui::Align2::RIGHT_CENTER,
-                format!("DIO{pin}"),
-                egui::FontId::monospace(11.0),
-                face.ink_2,
-            );
-            let mut previous: Option<(f32, f32)> = None;
-            for bin in fallback.iter().chain(&digital.bins) {
-                let left = x(bin.interval.start_ns);
-                let right = x(bin.interval.end_ns);
-                if right < clip.left() || left > clip.right() {
-                    previous = None;
-                    continue;
-                }
-                if bin.gap || (bin.high | bin.low) & bit == 0 {
-                    previous = None;
-                    if bin.gap {
-                        painter.rect_filled(
-                            egui::Rect::from_min_max(
-                                egui::pos2(left, top),
-                                egui::pos2(right, top + 14.0),
-                            ),
-                            0,
-                            face.attention_fill.gamma_multiply(0.2),
-                        );
-                    }
-                    continue;
-                }
-                let high = bin.high & bit != 0;
-                let low = bin.low & bit != 0;
-                let y = top + if high { 0.0 } else { 14.0 };
-                if let Some((last_x, last_y)) = previous
-                    && (last_x - left).abs() < 0.5
-                {
-                    painter.line_segment(
-                        [egui::pos2(left, last_y), egui::pos2(left, y)],
-                        Stroke::new(1.0, face.series_verge),
-                    );
-                }
-                if high && low {
-                    painter.rect_filled(
-                        egui::Rect::from_min_max(
-                            egui::pos2(left, top),
-                            egui::pos2(right.max(left + 1.0), top + 14.0),
-                        ),
-                        0,
-                        face.series_verge.gamma_multiply(0.6),
-                    );
-                    previous = None;
-                } else {
-                    painter.line_segment(
-                        [egui::pos2(left, y), egui::pos2(right, y)],
-                        Stroke::new(1.0, face.series_verge),
-                    );
-                    previous = Some((right, y));
-                }
-            }
-        }
-    }
-
-    /// Takes Y off the fit once the user moves it: a drag or the wheel past the detent, a drag on
-    /// the Y axis, or a box zoom. A double click fits it again.
-    fn y_gesture(
-        &mut self,
-        ui: &Ui,
-        response: &egui::Response,
-        fitted: Option<RangeInclusive<f64>>,
-        shown: RangeInclusive<f64>,
-    ) {
-        if response.double_clicked() {
-            self.y_fit = true;
-            return;
-        }
-        if !self.y_fit {
-            self.travel = 0.0;
-            return;
-        }
-        if let Some(fitted) = fitted
-            && (fitted.start() - shown.start()).abs() + (fitted.end() - shown.end()).abs()
-                > (fitted.end() - fitted.start()) * 1e-6
-        {
-            self.y_fit = false;
-            return;
-        }
-        let dragging = response.dragged_by(egui::PointerButton::Primary) && !self.select_mode;
-        let scroll = if response.contains_pointer() {
-            ui.input(|i| i.smooth_scroll_delta)
-        } else {
-            Vec2::ZERO
-        };
-        let delta = scroll
-            + if dragging {
-                response.drag_delta()
-            } else {
-                Vec2::ZERO
-            };
-        if !dragging && scroll == Vec2::ZERO {
-            self.travel = 0.0;
-        } else if delta.y.abs() > delta.x.abs() {
-            self.travel += delta.y;
-            if self.travel.abs() > DETENT {
-                self.y_fit = false;
-                self.carry = std::mem::take(&mut self.travel);
-            }
-        }
-    }
-
-    /// The whole capture, small, with the visible window marked and its edges draggable.
-    fn overview(&mut self, ui: &mut Ui, answer: &Answer, interval: Interval, extent: Interval) {
-        let face = style::face(ui.ctx());
-        ui.add_space(space::S);
-        let mut overview_pointer = None;
-        let overview = Plot::new("energy-overview")
-            .height(64.0)
-            .allow_drag(false)
-            .allow_zoom(false)
-            .allow_scroll(false)
-            .show_axes([true, false])
-            .x_grid_spacer(uniform_grid_spacer(ladder))
-            .x_axis_formatter(|mark, _| tick(mark, "s"))
-            .include_y(0.0)
-            .show_grid(false)
-            .show(ui, |plot| {
-                plot.set_plot_bounds_x(
-                    seconds(extent.start_ns)..=seconds(extent.end_ns.max(extent.start_ns + 1)),
-                );
-                lost_bands(plot, &answer.overview.lost, face);
-                draw(
-                    plot,
-                    &answer.overview.envelopes,
-                    self.quantity,
-                    face.series_verge,
-                );
-                // Unnamed: 64 points leave no room for its label.
-                plot.span(
-                    Span::new("", seconds(interval.start_ns)..=seconds(interval.end_ns))
-                        .fill(face.wash()),
-                );
-                overview_pointer = plot.pointer_coordinate().map(|p| nanos(p.x));
-            });
-        if (overview.response.clicked() || overview.response.dragged())
-            && let Some(center) = overview_pointer
-        {
-            self.follow = false;
-            let width = interval.duration_ns();
-            let start = center.saturating_sub(width / 2).max(extent.start_ns);
-            self.interval = Some(Interval::new(start, start.saturating_add(width)));
-            self.reset_bounds = true;
-            self.requery();
-        }
-        for (is_start, time) in [(true, interval.start_ns), (false, interval.end_ns)] {
-            let x = overview.transform.position_from_point_x(seconds(time));
-            let rect = egui::Rect::from_center_size(
-                egui::pos2(x, overview.response.rect.center().y),
-                vec2(10.0, overview.response.rect.height()),
-            );
-            let handle = ui.interact(
-                rect,
-                ui.scope_id().with(("overview-handle", is_start)),
-                egui::Sense::drag(),
-            );
-            ui.painter().line_segment(
-                [rect.center_top(), rect.center_bottom()],
-                Stroke::new(2.0, face.ink),
-            );
-            if handle.dragged()
-                && let Some(position) = handle.interact_pointer_pos()
-            {
-                let time = nanos(overview.transform.value_from_position(position).x)
-                    .clamp(extent.start_ns, extent.end_ns);
-                self.interval = Some(if is_start {
-                    Interval::new(time.min(interval.end_ns.saturating_sub(1)), interval.end_ns)
-                } else {
-                    Interval::new(interval.start_ns, time.max(interval.start_ns + 1))
-                });
-                self.follow = false;
-                self.reset_bounds = true;
-                self.requery();
-            }
-        }
+        (lost, dio)
     }
 
     fn file(&mut self, action: FileAction) {
@@ -1636,22 +1467,16 @@ impl Bench {
             return;
         }
         let path = self.path.clone();
-        let interval = self.selection;
+        let interval = self.state.selection.clone();
         let (send, receive) = mpsc::channel();
         self.io = Some(receive);
         std::thread::spawn(move || {
             let result = (|| -> anyhow::Result<FileResult> {
                 if matches!(action, FileAction::Open) {
                     let selected = rfd::FileDialog::new()
-                        .add_filter("Verge capture", &["vergecapture"])
+                        .add_filter("tickwave recording", &["tickwave"])
                         .pick_file();
-                    return Ok(match selected {
-                        Some(path) => {
-                            Archive::open(&path)?;
-                            FileResult::Open(path)
-                        }
-                        None => FileResult::Cancelled,
-                    });
+                    return Ok(selected.map_or(FileResult::Cancelled, FileResult::Open));
                 }
                 let path = path.ok_or_else(|| anyhow::anyhow!("no capture is open"))?;
                 if matches!(action, FileAction::Discard) {
@@ -1661,7 +1486,7 @@ impl Bench {
                         .set_buttons(rfd::MessageButtons::OkCancel)
                         .show();
                     if agree == rfd::MessageDialogResult::Ok {
-                        escapement_verge_probe::capture::remove(&path)?;
+                        std::fs::remove_file(&path)?;
                         return Ok(FileResult::Discarded(path));
                     }
                     return Ok(FileResult::Cancelled);
@@ -1669,7 +1494,7 @@ impl Bench {
                 let (extension, title) = match action {
                     FileAction::Export(true) => ("csv", "Export CSV"),
                     FileAction::Export(false) => ("sr", "Export sigrok"),
-                    _ => ("vergecapture", "Save capture"),
+                    _ => ("tickwave", "Save capture"),
                 };
                 let Some(destination) = rfd::FileDialog::new()
                     .set_title(title)
@@ -1678,15 +1503,11 @@ impl Bench {
                 else {
                     return Ok(FileResult::Cancelled);
                 };
-                let archive = Archive::open(&path)?;
                 match action {
-                    FileAction::Save => archive.save(&destination)?,
-                    FileAction::Export(csv) => archive.export(
-                        &destination,
-                        csv,
-                        interval.unwrap_or(archive.extent()?),
-                        &AtomicBool::new(false),
-                    )?,
+                    FileAction::Save => {
+                        std::fs::copy(&path, &destination)?;
+                    }
+                    FileAction::Export(csv) => export(&path, &destination, csv, interval)?,
                     _ => {}
                 }
                 Ok(FileResult::Done(format!("Saved {}", destination.display())))
@@ -1696,44 +1517,89 @@ impl Bench {
         });
     }
 }
-fn seconds(ns: u64) -> f64 {
-    ns as f64 * 1e-9
-}
-fn nanos(seconds: f64) -> u64 {
-    (seconds.max(0.0) * 1e9) as u64
+
+/// A view that follows the recording's end, `span` ticks wide.
+fn following(span: i64) -> ViewState {
+    let mut state = ViewState::default();
+    state.window = Window::Follow { span };
+    state
 }
 
-/// A tick's value in `unit`, with as many decimals as its step needs.
-fn tick(mark: GridMark, unit: &str) -> String {
-    let decimals = (-mark.step_size.log10().floor()).max(0.0) as usize;
-    format!("{:.decimals$} {unit}", mark.value)
+/// The ticks a window spans.
+fn span(window: &Window) -> i64 {
+    match window {
+        Window::Follow { span } => *span,
+        Window::At(at) => at.end - at.start,
+    }
 }
 
-/// Whether two ranges are apart by more than the plot's float conversions move one.
-fn differs(a: Interval, b: Interval) -> bool {
-    let slack = (a.duration_ns().max(b.duration_ns()) / 10_000).max(1);
-    a.start_ns.abs_diff(b.start_ns) > slack || a.end_ns.abs_diff(b.end_ns) > slack
+/// Writes a compacted copy of the recording at `path` beside it while `viewer` reads the
+/// original, then lets the view go of the file for the rename and opens it again.
+fn compact_beside(path: &Path, viewer: Option<&Viewer>) -> anyhow::Result<()> {
+    compact_then(path, viewer, || {})
+}
+
+/// [`compact_beside`], calling `at_rename` just before the rename, as a test checks that nothing
+/// holds the file there.
+fn compact_then(
+    path: &Path,
+    viewer: Option<&Viewer>,
+    at_rename: impl FnOnce(),
+) -> anyhow::Result<()> {
+    let copy = recordings::compacted(path)?;
+    if let Some(viewer) = viewer {
+        viewer.release();
+    }
+    at_rename();
+    let persisted = copy.persist();
+    // The original where the rename failed: the view reads one or the other.
+    if let Some(viewer) = viewer {
+        viewer.reopen()?;
+    }
+    Ok(persisted?)
+}
+
+/// Exports the pairs over `interval`, the whole recording without one, to a CSV or a sigrok
+/// session at `destination`.
+pub(crate) fn export(
+    path: &Path,
+    destination: &Path,
+    csv: bool,
+    interval: Option<Range<i64>>,
+) -> anyhow::Result<()> {
+    let bytes: Arc<dyn escapement_tickwave_egui::view::Bytes> =
+        Arc::new(std::fs::File::open(path)?);
+    let recording = Recording::open(bytes, escapement_tickwave_egui::view::Cache::new(64 << 20))?;
+    let interval = interval.or_else(|| recording.extent()).unwrap_or(0..0);
+    recordings::export(
+        &recording,
+        destination,
+        csv,
+        interval,
+        &AtomicBool::new(false),
+    )?;
+    Ok(())
+}
+
+/// tickwave's palette in the window's face: Verge's trace colour, the face's rules and inks, and
+/// the figures in the window's figures face.
+fn palette(face: &style::Face, ui: &Ui) -> Palette {
+    let mut p = Palette::from_visuals(ui.visuals());
+    p.trace = Some(face.series_verge);
+    p.surface = face.surface;
+    p.hair = face.hair;
+    p.ink = face.ink;
+    p.ink_2 = face.ink_2;
+    p.attention_fill = face.attention_fill;
+    p.attention_ink = face.attention_ink;
+    p.wash = face.wash();
+    p.figures = Role::Figures.font();
+    p.labels = Role::Code.font();
+    p
 }
 
 /// The left panel's width, the Units view's.
 const SIDE: f32 = 300.0;
-
-/// Grid steps of one, two or five times a power of ten: the finest visible, the next, and the one
-/// two further on, which egui_plot labels where its ticks are far enough apart. Its powers of ten
-/// leave a short window or a narrow range with a single labelled tick.
-fn ladder(input: GridInput) -> [f64; 3] {
-    let next = |at_least: f64| {
-        let power = 10f64.powf(at_least.log10().floor());
-        [1.0, 2.0, 5.0, 10.0]
-            .into_iter()
-            .map(|m| m * power)
-            .find(|step| *step >= at_least * (1.0 - 1e-9))
-            .unwrap_or(10.0 * power)
-    };
-    let fine = next(input.base_step_size.abs().max(f64::MIN_POSITIVE));
-    let medium = next(fine * 1.5);
-    [fine, medium, next(next(medium * 1.5) * 1.5)]
-}
 
 /// `value` in `unit`, with the SI prefix that leaves one to three digits before the point.
 fn si(value: f64, unit: &str) -> String {
@@ -1764,255 +1630,104 @@ fn si(value: f64, unit: &str) -> String {
     format!("{scaled:.decimals$} {prefix}{unit}")
 }
 
-type Reading = fn(Interval, &Statistics) -> String;
+/// One column of readings: an interval's statistics, by the channels the readings take.
+struct Reading<'a> {
+    interval: &'a Range<i64>,
+    rate: f64,
+    timebase: escapement_tickwave_egui::view::format::model::Ratio,
+    current: Option<&'a ChannelStatistics>,
+    voltage: Option<&'a ChannelStatistics>,
+    power: Option<&'a ChannelStatistics>,
+}
+impl<'a> Reading<'a> {
+    fn new(statistics: &'a Statistics, channels: &Channels) -> Self {
+        let of = |c: Option<usize>| c.and_then(|c| statistics.channels.get(c)?.as_ref());
+        Self {
+            interval: &statistics.interval,
+            rate: channels.rate,
+            timebase: channels.timebase,
+            current: of(channels.i),
+            voltage: of(channels.v),
+            power: of(channels.p),
+        }
+    }
+}
 
-/// The measurement rows: a name, and the value from an interval and its statistics.
-const READINGS: [(&str, Reading); 9] = [
-    ("duration", |interval, _| {
-        si(seconds(interval.duration_ns()), "s")
+/// A reading's figure, from one column of statistics.
+type Value = fn(&Reading) -> String;
+
+/// The measurement rows: a name, and the value from one column's statistics.
+const READINGS: [(&str, Value); 9] = [
+    ("duration", |r| {
+        si((r.interval.end - r.interval.start) as f64 / r.rate, "s")
     }),
-    ("pairs", |_, s| s.samples.to_string()),
-    ("min", |_, s| {
-        s.min_na
-            .map_or("…".into(), |na| si(f64::from(na) * 1e-9, "A"))
+    ("pairs", |r| {
+        r.current.map_or("…".into(), |c| c.samples.to_string())
     }),
-    ("mean", |_, s| {
-        s.mean_current_a().map_or("…".into(), |a| si(a, "A"))
+    ("min", |r| {
+        r.current
+            .and_then(|c| c.min)
+            .map_or("…".into(), |a| si(a, "A"))
     }),
-    ("peak", |_, s| {
-        s.max_na
-            .map_or("…".into(), |na| si(f64::from(na) * 1e-9, "A"))
+    ("mean", |r| {
+        r.current
+            .and_then(ChannelStatistics::mean)
+            .map_or("…".into(), |a| si(a, "A"))
     }),
-    ("voltage", |_, s| {
-        s.mean_voltage_v().map_or("…".into(), |v| si(v, "V"))
+    ("peak", |r| {
+        r.current
+            .and_then(|c| c.max)
+            .map_or("…".into(), |a| si(a, "A"))
     }),
-    ("power", |_, s| {
-        s.mean_power_w().map_or("…".into(), |w| si(w, "W"))
+    ("voltage", |r| {
+        r.voltage
+            .and_then(ChannelStatistics::mean)
+            .map_or("…".into(), |v| si(v, "V"))
     }),
-    ("charge", |_, s| si(s.charge_c(), "C")),
-    ("energy", |_, s| si(s.energy_j(), "J")),
+    ("power", |r| {
+        r.power
+            .and_then(ChannelStatistics::mean)
+            .map_or("…".into(), |w| si(w, "W"))
+    }),
+    ("charge", |r| {
+        r.current
+            .map_or("…".into(), |c| si(c.integral(r.timebase), "C"))
+    }),
+    ("energy", |r| {
+        r.power
+            .map_or("…".into(), |p| si(p.integral(r.timebase), "J"))
+    }),
 ];
-/// Vertical travel, in points, before a drag or the wheel takes Y off the fit, so a pan along time
-/// that wanders a little leaves Y fitted.
-const DETENT: f32 = 12.0;
 
-/// The opacity of a column some of whose pairs were lost, or of a pair read under range, against a
-/// whole one.
-const PARTLY_MEASURED: f32 = 0.35;
-
-/// The time in `interval` that the capture spans and has no reading for. A window reaching before
-/// the capture's start or past its end has nothing to measure there.
-fn unmeasured_ns(interval: Interval, extent: Interval, statistics: &Statistics) -> u64 {
-    let start = interval.start_ns.max(extent.start_ns);
-    let end = interval.end_ns.min(extent.end_ns);
-    end.saturating_sub(start)
-        .saturating_sub(statistics.measured_ns)
-}
-
-/// Marker labels sit in rows across the top of the plot.
-const LABEL_ROWS: usize = 3;
-const LABEL_TOP: f32 = 4.0;
-const LABEL_ROW: f32 = 16.0;
-
-/// The label rows to keep clear: all of them once the capture has a marker, so the fitted range
-/// does not change as markers scroll in and out of view.
-fn label_rows(page: &escapement_verge_probe::capture::MarkerPage) -> usize {
-    if page.total > 0 { LABEL_ROWS } else { 0 }
-}
-
-/// `range` raised so that its top lies below `rows` of marker labels in a plot `height` px tall.
-fn label_headroom(range: RangeInclusive<f64>, rows: usize, height: f32) -> RangeInclusive<f64> {
-    let band = f64::from(LABEL_TOP + rows as f32 * LABEL_ROW);
-    let height = f64::from(height);
-    if rows == 0 || height <= 2.0 * band {
-        return range;
-    }
-    let share = band / height;
-    let (low, high) = (*range.start(), *range.end());
-    low..=(high - low * share) / (1.0 - share)
-}
-
-/// The Y range that shows every bin in `x` and zero, with a margin.
-fn y_range(
-    answer: &Answer,
-    quantity: Quantity,
-    x: &RangeInclusive<f64>,
-) -> Option<RangeInclusive<f64>> {
-    let (start, end) = (nanos(*x.start()), nanos(*x.end()));
-    let (low, high) = answer
-        .view
-        .envelopes
-        .iter()
-        .chain(&answer.fallback)
-        .filter(|bin| bin.interval.end_ns > start && bin.interval.start_ns < end)
-        .filter_map(|bin| quantity.extrema(&bin.statistics))
-        .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))?;
-    let (low, high) = (low.min(0.0), high.max(0.0));
-    let margin = if high > low { (high - low) * 0.05 } else { 1.0 };
-    Some(low - margin..=high + margin)
-}
-
-/// A line as drawn: every point kept. egui_plot otherwise merges points less than a pixel apart into
-/// a filled band, which turns a step's vertical edge into a wedge reaching the next pixel.
-fn trace<'a>(line: Line<'a>, color: Color32) -> Line<'a> {
-    line.color(color).width(1.2).allow_band(false)
-}
-
-/// Each bin's range, from its least reading to its greatest, filled and edged. A pulse narrower
-/// than a bin still reaches its height in the bin that holds it, where a bin's mean would depend on
-/// how much of the pulse falls inside. A bin not wholly measured is a run of its own, so a gap
-/// narrower than a column still breaks the line. It draws pale if pairs were lost in it, and at
-/// full strength if the capture only paused, as it does while a debugger holds the conversions.
-fn draw(plot: &mut PlotUi<'_>, bins: &[Envelope], quantity: Quantity, color: Color32) {
-    let mut first = 0;
-    for next in 1..=bins.len() {
-        let joined = next < bins.len()
-            && !bins[next - 1].gap
-            && !bins[next].gap
-            && bins[next - 1].interval.end_ns == bins[next].interval.start_ns;
-        if joined {
-            continue;
-        }
-        let color = if bins[first].lost {
-            color.gamma_multiply(PARTLY_MEASURED)
-        } else {
-            color
-        };
-        let mut xs = Vec::new();
-        let mut lows = Vec::new();
-        let mut highs = Vec::new();
-        for bin in &bins[first..next] {
-            let Some((low, high)) = quantity.extrema(&bin.statistics) else {
-                continue;
-            };
-            for time in [bin.interval.start_ns, bin.interval.end_ns] {
-                xs.push(seconds(time));
-                lows.push(low);
-                highs.push(high);
-            }
-        }
-        first = next;
-        if xs.is_empty() {
-            continue;
-        }
-        plot.add(
-            FilledArea::new("Range", &xs, &lows, &highs)
-                .fill_color(color.gamma_multiply(0.45))
-                .allow_hover(false),
-        );
-        for (name, edge) in [("Least", &lows), ("Greatest", &highs)] {
-            let points: Vec<_> = xs.iter().zip(edge.iter()).map(|(&x, &y)| [x, y]).collect();
-            plot.line(trace(Line::new(name, points), color));
-        }
-    }
-}
-
-/// A band over each span of lost pairs, so that a loss reads apart from a pause at any zoom: both
-/// break the trace, and only a loss is marked. Spans less than a pixel apart share one band, so a
-/// capture that lost pairs thousands of times draws no more bands than the plot has pixels.
-fn lost_bands(plot: &mut PlotUi<'_>, lost: &[Interval], face: &style::Face) {
-    let pixel = plot.transform().dvalue_dpos()[0].abs();
-    let shown = plot.plot_bounds().range_x();
-    let mut bands: Vec<(f64, f64)> = Vec::new();
-    for span in lost {
-        let (start, end) = (seconds(span.start_ns), seconds(span.end_ns));
-        if end < *shown.start() || start > *shown.end() {
-            continue;
-        }
-        match bands.last_mut() {
-            Some(band) if start - band.1 < pixel => band.1 = end,
-            _ => bands.push((start, end)),
-        }
-    }
-    for (start, end) in bands {
-        // Unnamed, so egui_plot draws no label over the marker rows.
-        plot.span(Span::new("", start..=end).fill(face.attention_fill.gamma_multiply(0.2)));
-    }
-}
-
-/// Each sample held for the time it covers, with a mark where it starts once the marks are far
-/// enough apart to tell. A sample read under range, too near the high range's floor to trust,
-/// draws pale.
-fn draw_samples(
-    plot: &mut PlotUi<'_>,
-    samples: &[Supported],
-    quantity: Quantity,
-    color: Color32,
-    x: &RangeInclusive<f64>,
-) {
-    let pale = color.gamma_multiply(PARTLY_MEASURED);
-    let mut held = Vec::new();
-    let mut held_under = false;
-    let mut previous_end = None;
-    for sample in samples {
-        let under = sample.sample.under_range;
-        if (previous_end != Some(sample.sample.time_ns) || under != held_under) && !held.is_empty()
-        {
-            plot.line(trace(
-                Line::new("Samples", std::mem::take(&mut held)),
-                if held_under { pale } else { color },
-            ));
-        }
-        held_under = under;
-        let value = quantity.value(sample);
-        held.push([seconds(sample.sample.time_ns), value]);
-        held.push([seconds(sample.end_ns), value]);
-        previous_end = Some(sample.end_ns);
-    }
-    if !held.is_empty() {
-        plot.line(trace(
-            Line::new("Samples", held),
-            if held_under { pale } else { color },
-        ));
-    }
-    let shown = samples
-        .iter()
-        .filter(|s| (x.start()..=x.end()).contains(&&seconds(s.sample.time_ns)))
-        .count();
-    if shown > 0 && f64::from(plot.transform().frame().width()) / shown as f64 >= 6.0 {
-        for (under, color) in [(false, color), (true, pale)] {
-            let marks: Vec<_> = samples
-                .iter()
-                .filter(|s| s.sample.under_range == under)
-                .map(|s| [seconds(s.sample.time_ns), quantity.value(s)])
-                .collect();
-            if !marks.is_empty() {
-                plot.points(Points::new("Samples", marks).color(color).radius(2.5));
-            }
-        }
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui_kittest::{Harness, kittest::Queryable};
-    use escapement_verge_probe::capture::CaptureWriter;
-    use escapement_verge_probe::stream::{End, EndReason, Header, Message, Pair, Pairs};
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+    use escapement_verge_probe::stream::{
+        DioHeader, Edge, Edges, End, EndReason, Header, Marker, Markers, Message, Pair, Pairs,
+    };
+    use escapement_verge_probe::tickwave::{Context, FileWriter};
 
-    /// `count` pairs at `rate`, each pair's current code from `code`; 65535 is 350 mA.
-    fn capture(path: &Path, rate: u32, count: u32, code: impl Fn(u32) -> u16) {
-        capture_with_dio(path, rate, count, code, false);
-    }
-    fn capture_with_dio(path: &Path, rate: u32, count: u32, code: impl Fn(u32) -> u16, dio: bool) {
-        capture_events(path, rate, count, code, dio, &[]);
-    }
-    fn capture_events(
-        path: &Path,
+    /// `count` pairs at `rate`, each pair's current code from `code` (65535 is 350 mA), DIO3 high
+    /// while the code is over 1000 where `dio`, and `markers` after the pairs, the first message
+    /// of them reporting a loss.
+    fn messages(
         rate: u32,
         count: u32,
         code: impl Fn(u32) -> u16,
         dio: bool,
-        markers: &[escapement_verge_probe::stream::Marker],
-    ) {
+        markers: &[Marker],
+    ) -> Vec<Message> {
         let header: Header = serde_json::from_value(serde_json::json!({"clock_hz":rate,"period":1,"setting_ma":350,"full_scale_mv":3300,"first_sequence":0,"previous_low":true,
             "low":[{"code":0,"current_nanoamps":0},{"code":65535,"current_nanoamps":350000000}],"high":[],"dio_mask":if dio {15} else {0},"dio_levels":if code(0)>1000 {8} else {0},"edge_resolution_ns":11})).unwrap();
         let period = 1_000_000_000 / u64::from(rate);
-        let mut writer = CaptureWriter::create(path).unwrap();
-        writer.ingest(Message::Header(header)).unwrap();
-        let mut last_levels = if code(0) > 1000 { 8 } else { 0 };
-        let mut sent_ns = 0;
+        let mut out = vec![Message::Header(header)];
+        let mut levels = if code(0) > 1000 { 8 } else { 0 };
         for first in (0..count).step_by(99) {
-            let pairs = (first..(first + 99).min(count))
+            let range = first..(first + 99).min(count);
+            let pairs = range
+                .clone()
                 .map(|i| Pair {
                     voltage_code: 32768,
                     current_code: code(i),
@@ -2020,1021 +1735,743 @@ mod tests {
                     under_range: false,
                 })
                 .collect();
-            writer
-                .ingest(Message::Pairs(Pairs::new(
-                    0,
-                    first,
-                    u64::from(first) * period,
-                    pairs,
-                )))
-                .unwrap();
+            out.push(Message::Pairs(Pairs::new(
+                0,
+                first,
+                u64::from(first) * period,
+                pairs,
+            )));
             if dio {
                 let mut edges = Vec::new();
-                for i in first..(first + 99).min(count) {
-                    let levels = if code(i) > 1000 { 8 } else { 0 };
-                    if levels != last_levels {
-                        edges.push(escapement_verge_probe::stream::Edge {
+                for i in range {
+                    let now = if code(i) > 1000 { 8 } else { 0 };
+                    if now != levels {
+                        edges.push(Edge {
                             time_ns: u64::from(i) * period,
-                            levels,
+                            levels: now,
                         });
-                        last_levels = levels;
+                        levels = now;
                     }
                 }
                 if !edges.is_empty() {
-                    let newest = edges.last().unwrap().time_ns;
-                    // Edges lost before the message holding pair 20,050: unknown from the last edge
-                    // sent to what would have been this message's first, which the loss stands for.
-                    if first <= 20_050 && first + 99 > 20_050 {
-                        let lost = edges.remove(0);
-                        writer
-                            .ingest(Message::DioLost(escapement_verge_probe::stream::DioLost {
-                                from_ns: sent_ns,
-                                to_ns: lost.time_ns,
-                                levels: lost.levels,
-                            }))
-                            .unwrap();
-                    }
-                    if !edges.is_empty() {
-                        writer
-                            .ingest(Message::Edges(escapement_verge_probe::stream::Edges::new(
-                                0, edges,
-                            )))
-                            .unwrap();
-                    }
-                    sent_ns = newest;
+                    out.push(Message::Edges(Edges::new(0, edges)));
                 }
             }
         }
-        for (index, chunk) in markers.chunks(11).enumerate() {
-            writer
-                .ingest(Message::Markers(
-                    escapement_verge_probe::stream::Markers::new(
-                        if index == 0 {
-                            escapement_verge_probe::stream::Markers::LOST
-                        } else {
-                            0
-                        },
-                        chunk.to_vec(),
-                    ),
-                ))
-                .unwrap();
+        for (k, chunk) in markers.chunks(11).enumerate() {
+            let flags = if k == 0 { Markers::LOST } else { 0 };
+            out.push(Message::Markers(Markers::new(flags, chunk.to_vec())));
         }
-        writer
-            .ingest(Message::End(End {
-                reason: EndReason::Stopped,
-                last_sequence: count - 1,
-                time_ns: None,
-            }))
-            .unwrap();
-        writer.finish().unwrap();
+        out.push(Message::End(End {
+            reason: EndReason::Stopped,
+            last_sequence: count - 1,
+            time_ns: None,
+        }));
+        out
     }
-    /// Like [`capture`], with the pairs in `lost` never arriving.
-    fn capture_lossy(
-        path: &Path,
-        rate: u32,
-        count: u32,
-        code: impl Fn(u32) -> u16,
-        lost: &[std::ops::Range<u32>],
-    ) {
-        capture_gaps(path, rate, count, code, lost, &[], 0);
-    }
-    /// Like [`capture_lossy`], with the conversions also held for `hold_ns` before each pair in
-    /// `held`, as a debugger connecting does: time jumps, and no pair goes missing.
-    fn capture_gaps(
-        path: &Path,
-        rate: u32,
-        count: u32,
-        code: impl Fn(u32) -> u16,
-        lost: &[std::ops::Range<u32>],
-        held: &[u32],
-        hold_ns: u64,
-    ) {
-        let header: Header = serde_json::from_value(serde_json::json!({"clock_hz":rate,"period":1,"setting_ma":350,"full_scale_mv":3300,"first_sequence":0,"previous_low":true,
-            "low":[{"code":0,"current_nanoamps":0},{"code":65535,"current_nanoamps":350000000}],"high":[],"dio_mask":0,"dio_levels":0,"edge_resolution_ns":11})).unwrap();
-        let period = 1_000_000_000 / u64::from(rate);
-        let time = |i: u32| {
-            u64::from(i) * period + held.iter().filter(|&&at| at <= i).count() as u64 * hold_ns
-        };
-        let mut writer = CaptureWriter::create(path).unwrap();
-        writer.ingest(Message::Header(header)).unwrap();
-        let mut first = 0;
-        while first < count {
-            if let Some(gap) = lost.iter().find(|gap| gap.contains(&first)) {
-                first = gap.end;
-                continue;
-            }
-            let next_break = lost
-                .iter()
-                .map(|gap| gap.start)
-                .chain(held.iter().copied())
-                .filter(|&start| start > first)
-                .min()
-                .unwrap_or(count);
-            let end = (first + 99).min(count).min(next_break);
-            let pairs = (first..end)
-                .map(|i| Pair {
-                    voltage_code: 32768,
-                    current_code: code(i),
-                    low: true,
-                    under_range: false,
-                })
-                .collect();
-            let flags = if held.contains(&first) {
-                Pairs::HELD
-            } else {
-                0
-            };
-            writer
-                .ingest(Message::Pairs(Pairs::new(flags, first, time(first), pairs)))
-                .unwrap();
-            first = end;
+    fn write(path: &Path, messages: &[Message]) {
+        let mut writer = FileWriter::create(path, Context::default()).unwrap();
+        for message in messages {
+            writer.ingest(message).unwrap();
         }
-        writer
-            .ingest(Message::End(End {
-                reason: EndReason::Stopped,
-                last_sequence: count - 1,
-                time_ns: None,
-            }))
-            .unwrap();
         writer.finish().unwrap();
     }
     /// 20 s at 1,000 pairs a second, with a 30 ms pulse each second.
-    fn fixture(path: &Path) {
-        capture(
-            path,
-            1000,
-            20_000,
-            |i| if i % 1000 < 30 { 3000 } else { 350 },
-        );
+    fn pulses(i: u32) -> u16 {
+        if i % 1000 < 30 { 3000 } else { 350 }
     }
-    fn state(path: &Path) -> Bench {
-        let mut bench = Bench::new(path.parent().unwrap());
-        bench.open(path.to_owned());
-        bench.selection = Some(Interval::new(12_000_000_000, 14_000_000_000));
-        bench.invalidate();
-        bench
-    }
-    fn harness(bench: Bench, wgpu: bool) -> Harness<'static, Bench> {
-        let mut builder = Harness::builder()
+    fn harness(bench: Bench) -> Harness<'static, Bench> {
+        Harness::builder()
             .with_size(egui::vec2(1080.0, 700.0))
-            // A frame's time, so two clicks a few frames apart make a double click.
             .with_step_dt(1.0 / 60.0)
-            .with_context_setup(crate::style::install);
-        if wgpu {
-            builder = builder.wgpu();
-        }
-        builder.build_ui_state(
-            |ui, b: &mut Bench| b.show(ui, &[], &mut None, &mut crate::worker::Manual::default()),
-            bench,
+            .with_context_setup(crate::style::install)
+            .build_ui_state(
+                |ui, b: &mut Bench| {
+                    b.show(ui, &[], &mut None, &mut crate::worker::Manual::default())
+                },
+                bench,
+            )
+    }
+    /// The panel with a picked simulated Pro, as in use: its statuses stand from frame to frame.
+    type Rig = (Bench, Vec<Unit>, Option<String>, crate::worker::Manual);
+    fn rig(mut bench: Bench) -> (Harness<'static, Rig>, String) {
+        let unit = escapement_verge_probe::detect(
+            &escapement_verge_probe::sim::SimBus::scenario("ours-pro-energy").unwrap(),
         )
+        .unwrap()
+        .remove(0);
+        let instance = unit.device.instance.clone();
+        bench.connection = Some(instance.clone());
+        let h = Harness::builder()
+            .with_size(egui::vec2(1080.0, 700.0))
+            .with_step_dt(1.0 / 60.0)
+            .with_context_setup(crate::style::install)
+            .build_ui_state(
+                |ui, (bench, units, selected, backend): &mut Rig| {
+                    bench.show(ui, units, selected, backend);
+                },
+                (
+                    bench,
+                    vec![unit],
+                    Some(instance.clone()),
+                    crate::worker::Manual::default(),
+                ),
+            );
+        (h, instance)
     }
-    /// The middle of the plot, right of the 300-point panel and under the toolbar.
-    const PLOT: egui::Pos2 = egui::pos2(700.0, 300.0);
-    fn press(h: &mut Harness<'_, Bench>, pos: egui::Pos2, pressed: bool) {
-        button(h, egui::PointerButton::Primary, pos, pressed);
+    /// What a harness holds the panel in.
+    trait Panel {
+        fn bench(&self) -> &Bench;
     }
-    fn button(
-        h: &mut Harness<'_, Bench>,
-        button: egui::PointerButton,
-        pos: egui::Pos2,
-        pressed: bool,
-    ) {
-        h.event(egui::Event::PointerButton {
-            pos,
-            button,
-            pressed,
-            modifiers: Default::default(),
-        });
-        h.step();
-    }
-    /// Drags across the plot by `by`, in `steps` frames, letting queries run between them.
-    fn drag(h: &mut Harness<'_, Bench>, by: Vec2, steps: u32) {
-        drag_with(h, egui::PointerButton::Primary, by, steps, |_| {});
-    }
-    /// As `drag`, with `with`, calling `during` before the button is released.
-    fn drag_with(
-        h: &mut Harness<'_, Bench>,
-        with: egui::PointerButton,
-        by: Vec2,
-        steps: u32,
-        during: impl FnOnce(&mut Harness<'_, Bench>),
-    ) {
-        h.event(egui::Event::PointerMoved(PLOT));
-        h.step();
-        button(h, with, PLOT, true);
-        for step in 1..=steps {
-            h.event(egui::Event::PointerMoved(
-                PLOT + by * step as f32 / steps as f32,
-            ));
-            h.step();
-            std::thread::sleep(Duration::from_millis(5));
+    impl Panel for Bench {
+        fn bench(&self) -> &Bench {
+            self
         }
-        during(h);
-        button(h, with, PLOT + by, false);
     }
-    fn shown(h: &Harness<'_, Bench>) -> egui_plot::PlotTransform {
-        h.state().shown.expect("a plot")
-    }
-    /// Steps until the answer on screen is for `visible`.
-    fn answered(h: &mut Harness<'_, Bench>, visible: Interval) -> Arc<Answer> {
-        for _ in 0..400 {
-            h.step();
-            if let Some(answer) = &h.state().answer
-                && answer.visible == visible
-            {
-                return answer.clone();
-            }
-            std::thread::sleep(Duration::from_millis(2));
+    impl Panel for Rig {
+        fn bench(&self) -> &Bench {
+            &self.0
         }
-        panic!("no answer for {visible:?}");
     }
-    fn wait(h: &mut Harness<'_, Bench>) {
-        for _ in 0..400 {
+    /// Steps until `done`, failing after 2,000 frames.
+    fn until<S: Panel>(h: &mut Harness<'_, S>, what: &str, done: impl Fn(&Bench) -> bool) {
+        for _ in 0..2000 {
             h.step();
-            if h.state().answer.is_some() {
+            if done(h.state().bench()) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(2));
         }
-        panic!("archive query did not complete");
+        let b = h.state().bench();
+        panic!(
+            "{what}: notice {:?}, io {}, compactions {}, answer {}, busy {:?}, failure {:?}",
+            b.notice,
+            b.io.is_some(),
+            b.compactions.len(),
+            b.answer_now().is_some(),
+            b.viewer.as_ref().map(|v| v.busy()),
+            b.viewer.as_ref().and_then(|v| v.failure())
+        );
     }
-    #[test]
-    fn fitted_range_leaves_the_label_rows_above_the_trace() {
-        assert_eq!(label_headroom(0.0..=16.0, 0, 200.0), 0.0..=16.0);
-        assert_eq!(label_headroom(0.0..=16.0, 3, 80.0), 0.0..=16.0);
-        let range = label_headroom(-1.0..=16.0, 3, 208.0);
-        let band = f64::from(LABEL_TOP + 3.0 * LABEL_ROW);
-        let below_top = (range.end() - 16.0) / (range.end() - range.start()) * 208.0;
-        assert!((below_top - band).abs() < 1e-9, "{below_top}");
-    }
-    #[test]
-    fn selection_statistics_stay_fixed_when_graph_changes() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("demo.vergecapture");
-        fixture(&path);
-        let mut h = harness(state(&path), false);
-        wait(&mut h);
-        let expected = h.state().answer.as_ref().unwrap().selection.clone();
-        assert_eq!(expected.as_ref().unwrap().1.samples, 2000);
-        h.state_mut().span = 1_000_000_000;
-        h.state_mut().invalidate();
-        for _ in 0..100 {
-            h.step();
-            std::thread::sleep(Duration::from_millis(2));
-            if !h.state().pending {
-                break;
-            }
-        }
-        assert_eq!(h.state().answer.as_ref().unwrap().selection, expected);
-        h.get_by_label("Clear").click();
-        h.step();
-        assert!(h.state().selection.is_none());
-    }
-    #[test]
-    fn superseded_queries_cannot_replace_a_new_selection() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("demo.vergecapture");
-        fixture(&path);
-        let mut queries = Queries::new();
-        for generation in 1..=20 {
-            queries.send(Query {
-                generation,
-                path: path.clone(),
-                interval: None,
-                live_span: 10_000_000_000,
-                marker_after: None,
-                marker_selected: None,
-                selection: Some(Interval::new(
-                    generation * 1_000_000,
-                    generation * 1_000_000 + 1_000_000,
-                )),
-                pixels: 64,
-                cancel: Arc::new(AtomicBool::new(false)),
-            });
-        }
-        for _ in 0..400 {
-            if let Some((generation, result)) = queries.take() {
-                assert_eq!(generation, 20);
-                assert_eq!(result.unwrap().selection.unwrap().0.start_ns, 20_000_000);
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        panic!("no latest query result");
-    }
-    /// Renders the frame `h` drew to `name` in `dir`, then the next in the day face.
-    fn shoot(h: &mut Harness<'_, Bench>, dir: &Path, name: &str) {
-        let stem = name.trim_end_matches(".png");
-        h.render()
-            .unwrap()
-            .save(dir.join(format!("{stem}-night.png")))
-            .unwrap();
-        h.ctx.set_theme(egui::Theme::Light);
-        h.step();
-        h.render()
-            .unwrap()
-            .save(dir.join(format!("{stem}-day.png")))
-            .unwrap();
-        h.ctx.set_theme(egui::Theme::Dark);
-        h.step();
-    }
-    #[test]
-    #[ignore = "renders Bench screenshots with wgpu"]
-    fn bench_picture() {
-        let dir = PathBuf::from(std::env::var("VERGE_GUI_SHOTS").expect("VERGE_GUI_SHOTS"));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("demo.vergecapture");
-        if path.exists() {
-            std::fs::remove_file(&path).unwrap();
-        }
-        fixture(&path);
-        let mut h = harness(state(&path), true);
-        wait(&mut h);
-        h.step();
-        shoot(&mut h, &dir, "bench.png");
-        let visible = Interval::new(5_000_000_000, 5_040_000_000);
-        h.state_mut().inspect(visible, None);
-        answered(&mut h, visible);
-        h.step();
-        shoot(&mut h, &dir, "bench-samples.png");
-        // 2 ms of every 10 at 10,000 pairs a second, for 20 s.
-        let path = dir.join("dense.vergecapture");
-        if path.exists() {
-            std::fs::remove_file(&path).unwrap();
-        }
-        capture(&path, 10_000, 200_000, |i| {
-            if i % 100 < 20 { 3000 } else { 350 }
+    /// Steps until the view has answered and asks for nothing more.
+    fn settle<S: Panel>(h: &mut Harness<'_, S>) {
+        until(h, "an answer", |b| {
+            b.io.is_none()
+                && b.viewer
+                    .as_ref()
+                    .is_some_and(|v| v.answer().is_some() && !v.busy())
         });
-        let mut bench = Bench::new(&dir);
-        bench.open(path);
-        let mut h = harness(bench, true);
-        wait(&mut h);
         h.step();
-        shoot(&mut h, &dir, "bench-dense.png");
-        for (name, span) in [("1s", 1_000_000_000), ("100ms", 100_000_000)] {
-            let visible = Interval::new(5_000_000_000, 5_000_000_000 + span);
-            h.state_mut().inspect(visible, None);
-            answered(&mut h, visible);
-            h.step();
-            let file = format!("bench-dense-{name}.png");
-            shoot(&mut h, &dir, &file);
-        }
-        // 2 ms of every 10 at 1,000 pairs a second, with noise on both levels.
-        let path = dir.join("marker.vergecapture");
-        if path.exists() {
-            std::fs::remove_file(&path).unwrap();
-        }
-        capture_events(
-            &path,
-            1000,
-            60_000,
-            noisy_marker,
-            true,
-            &[
-                escapement_verge_probe::stream::Marker {
-                    time_ns: 20_050_000_000,
-                    number: 7,
-                    label: b"wake, read sensor".to_vec(),
-                },
-                escapement_verge_probe::stream::Marker {
-                    time_ns: 20_200_000_000,
-                    number: 8,
-                    label: b"transmit".to_vec(),
-                },
-                escapement_verge_probe::stream::Marker {
-                    time_ns: 21_300_000_000,
-                    number: 9,
-                    label: b"sleep".to_vec(),
-                },
-                escapement_verge_probe::stream::Marker {
-                    time_ns: 26_000_000_000,
-                    number: 10,
-                    label: b"label with all thirty-two bytes!!".to_vec(),
-                },
-            ],
-        );
-        let archive = Archive::open(&path).unwrap();
-        for csv in [true, false] {
-            let out = dir.join(if csv { "marker.csv" } else { "marker.sr" });
-            if out.exists() {
-                std::fs::remove_file(&out).unwrap();
-            }
-            archive
-                .export(
-                    &out,
-                    csv,
-                    Interval::new(20_000_000_000, 20_500_000_000),
-                    &AtomicBool::new(false),
-                )
-                .unwrap();
-        }
-        let mut bench = Bench::new(&dir);
-        bench.open(path);
-        let mut h = harness(bench, true);
-        wait(&mut h);
-        for (name, span) in [
-            ("10s", 10_000_000_000),
-            ("2s", 2_000_000_000),
-            ("500ms", 500_000_000),
-        ] {
-            let visible = Interval::new(20_000_000_000, 20_000_000_000 + span);
-            h.state_mut().inspect(visible, None);
-            answered(&mut h, visible);
-            h.step();
-            let file = format!("bench-marker-{name}.png");
-            shoot(&mut h, &dir, &file);
-        }
-        // The same shape with pairs lost: one, three, and 300 in a run.
-        let path = dir.join("lossy.vergecapture");
-        if path.exists() {
-            std::fs::remove_file(&path).unwrap();
-        }
-        capture_lossy(
-            &path,
-            1000,
-            60_000,
-            noisy_marker,
-            &[20_503..20_506, 21_007..21_008, 24_000..24_300],
-        );
-        let mut bench = Bench::new(&dir);
-        bench.open(path);
-        let mut h = harness(bench, true);
-        wait(&mut h);
-        for (name, start, span) in [
-            ("10s", 20_000_000_000, 10_000_000_000),
-            ("2s", 20_000_000_000, 2_000_000_000),
-            ("500ms", 20_300_000_000, 500_000_000),
-            ("end", 53_300_000_000, 7_000_000_000),
-        ] {
-            let visible = Interval::new(start, start + span);
-            h.state_mut().inspect(visible, None);
-            answered(&mut h, visible);
-            h.step();
-            let file = format!("bench-lossy-{name}.png");
-            shoot(&mut h, &dir, &file);
-        }
-        // A pan past what the answer covers, before the next answer lands: high until 10.05 s,
-        // then low.
-        let path = dir.join("step.vergecapture");
-        if path.exists() {
-            std::fs::remove_file(&path).unwrap();
-        }
-        capture(&path, 1000, 20_000, |i| if i < 10_050 { 3000 } else { 350 });
-        let mut bench = Bench::new(&dir);
-        bench.open(path);
-        let mut h = harness(bench, true);
-        wait(&mut h);
-        let visible = Interval::new(9_900_000_000, 10_000_000_000);
-        h.state_mut().inspect(visible, None);
-        answered(&mut h, visible);
-        h.state_mut().interval = Some(Interval::new(10_000_000_000, 10_200_000_000));
-        h.state_mut().reset_bounds = true;
-        h.step();
-        shoot(&mut h, &dir, "bench-pan.png");
-        // A debug session's shape: 10,000 pairs a second, held 4 ms every 0.3 to 0.8 s while a
-        // debugger connects, and pairs lost twice, 0.6 ms from 15.12 s and 150 ms from 22 s.
-        let path = dir.join("held.vergecapture");
-        if path.exists() {
-            std::fs::remove_file(&path).unwrap();
-        }
-        let mut held = Vec::new();
-        let mut at = 2000u32;
-        while at < 300_000 {
-            held.push(at);
-            at += 3000 + (at.wrapping_mul(2_654_435_761) >> 16) % 5000;
-        }
-        capture_gaps(
-            &path,
-            10_000,
-            300_000,
-            |i| noisy_marker(i / 10) + ((i.wrapping_mul(40_503) >> 12) % 8) as u16,
-            &[151_234..151_240, 220_000..221_500],
-            &held,
-            4_000_000,
-        );
-        let pause = held.iter().find(|&&at| at > 160_000).copied().unwrap();
-        let pause_ns = u64::from(pause) * 100_000
-            + held.iter().filter(|&&at| at < pause).count() as u64 * 4_000_000;
-        let lost_ns =
-            151_234 * 100_000 + held.iter().filter(|&&at| at < 151_234).count() as u64 * 4_000_000;
-        let mut bench = Bench::new(&dir);
-        bench.open(path);
-        let mut h = harness(bench, true);
-        wait(&mut h);
-        for (name, start, span) in [
-            ("all", 0, 32_000_000_000),
-            ("2s", 15_000_000_000, 2_000_000_000),
-            ("loss-20ms", lost_ns - 10_000_000, 20_000_000),
-            ("pause-20ms", pause_ns - 12_000_000, 20_000_000),
-        ] {
-            let visible = Interval::new(start, start + span);
-            h.state_mut().inspect(visible, None);
-            answered(&mut h, visible);
-            h.step();
-            let file = format!("bench-held-{name}.png");
-            shoot(&mut h, &dir, &file);
-        }
     }
-    /// 2 ms of every 10, with noise on both levels.
-    fn noisy_marker(i: u32) -> u16 {
-        let noise = (i.wrapping_mul(2_654_435_761) >> 24) as u16;
-        if i % 10 < 2 {
-            2900 + noise / 2
-        } else {
-            340 + noise / 16
-        }
-    }
-    #[test]
-    fn marker_pick_centres_view_and_selects_to_next_across_pages() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("markers.vergecapture");
-        let markers: Vec<_> = (0..30)
-            .map(|number| escapement_verge_probe::stream::Marker {
-                time_ns: u64::from(number + 1) * 1_000_000_000,
-                number,
-                label: format!("step {number}").into_bytes(),
-            })
-            .collect();
-        capture_events(&path, 1000, 40_000, |_| 350, true, &markers);
-        let mut bench = Bench::new(dir.path());
+    fn opened(dir: &Path, messages: &[Message]) -> Harness<'static, Bench> {
+        let path = dir.join("captures").join("demo.tickwave");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write(&path, messages);
+        let mut bench = Bench::new(dir);
         bench.open(path);
-        let mut h = harness(bench, false);
-        wait(&mut h);
-        assert_eq!(
-            h.state().answer.as_ref().unwrap().marker_list.entries.len(),
-            24
-        );
+        let mut h = harness(bench);
+        settle(&mut h);
+        h
+    }
+    fn click(h: &mut Harness<'_, Bench>, label: &str) {
+        h.get_by_label(label).click();
         h.step();
-        h.get_by_label("24.000000s · 23 · step 23").scroll_to_me();
-        for _ in 0..20 {
-            h.step();
-        }
-        h.get_by_label("24.000000s · 23 · step 23").click();
-        h.step();
-        let wanted = h.state().interval.unwrap();
-        assert_eq!(wanted, Interval::new(19_000_000_000, 29_000_000_000));
-        answered(&mut h, wanted);
-        h.get_by_label("Select to next marker").scroll_to_me();
-        h.step();
-        h.get_by_label("Select to next marker").click();
-        h.step();
-        for _ in 0..400 {
-            h.step();
-            if h.state()
-                .answer
-                .as_ref()
-                .unwrap()
-                .selection
-                .as_ref()
-                .is_some_and(|(i, _)| *i == Interval::new(24_000_000_000, 25_000_000_000))
-            {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        let selection = h
-            .state()
-            .answer
-            .as_ref()
-            .unwrap()
-            .selection
-            .as_ref()
-            .unwrap();
-        assert_eq!(selection.0, Interval::new(24_000_000_000, 25_000_000_000));
-        assert_eq!(selection.1.samples, 1000);
-        h.get_by_label("Next").scroll_to_me();
-        h.step();
-        h.get_by_label("Next").click();
-        h.step();
-        for _ in 0..400 {
-            h.step();
-            if h.state()
-                .answer
-                .as_ref()
-                .unwrap()
-                .marker_list
-                .entries
-                .first()
-                .is_some_and(|m| m.marker.number == 24)
-            {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        assert_eq!(
-            h.state().answer.as_ref().unwrap().marker_list.entries.len(),
-            6
-        );
-        assert_eq!(h.state().answer.as_ref().unwrap().marker_list.total, 30);
+    }
+    fn seconds(h: &Harness<'_, Bench>, s: f64) -> i64 {
+        h.state().channels.as_ref().unwrap().ticks(s)
     }
 
     #[test]
-    fn zooming_the_plot_queries_the_range_it_shows() {
+    fn a_capture_opens_on_its_last_ten_seconds_with_their_readings() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("demo.vergecapture");
-        fixture(&path);
-        let mut h = harness(state(&path), false);
-        wait(&mut h);
+        let mut h = opened(dir.path(), &messages(1000, 20_000, pulses, false, &[]));
+        let answer = h.state().answer().unwrap();
+        let ten = seconds(&h, 10.0);
+        let end = answer.extent.as_ref().unwrap().end;
+        assert_eq!(answer.window, end - ten..end);
+        let i = h.state().channels.as_ref().unwrap().i.unwrap();
+        let window = answer.statistics[0].channels[i].as_ref().unwrap();
+        assert_eq!(window.samples, 10_000);
         h.step();
-        let before = h.state().answer.as_ref().unwrap().visible;
-        // In select mode, where only dragging is the selection's, the wheel still zooms.
-        h.state_mut().select_mode = true;
-        h.event(egui::Event::PointerMoved(PLOT));
-        h.step();
-        h.event(egui::Event::Zoom(2.0));
-        h.step();
-        let wanted = h.state().interval.expect("an interval of its own");
-        assert!(!h.state().follow);
+        assert!(h.query_by_label("10000").is_some(), "the pairs reading");
+        // The figures the readings take from: amps, and a charge that is their integral.
+        let mean = window.mean().unwrap();
+        assert!(mean > 0.0018 && mean < 0.0025, "{mean}");
         assert!(
-            wanted.duration_ns() < before.duration_ns() * 3 / 4,
-            "{wanted:?} from {before:?}"
+            h.query_by_label(&si(
+                window.integral(h.state().channels.as_ref().unwrap().timebase),
+                "C"
+            ))
+            .is_some()
         );
-        answered(&mut h, wanted);
     }
+
     #[test]
-    fn moving_the_plot_up_keeps_it_there() {
+    fn a_selection_reads_its_own_statistics_and_clears() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("demo.vergecapture");
-        fixture(&path);
-        let mut h = harness(state(&path), false);
-        wait(&mut h);
-        h.step();
-        let before = shown(&h);
-        assert!(h.state().y_fit);
-        h.event(egui::Event::PointerMoved(PLOT));
-        h.event(egui::Event::MouseWheel {
-            unit: egui::MouseWheelUnit::Point,
-            delta: vec2(0.0, 80.0),
-            phase: egui::TouchPhase::Move,
-            source: egui::MouseWheelSource::Wheel,
-            modifiers: Default::default(),
+        let mut h = opened(dir.path(), &messages(1000, 20_000, pulses, false, &[]));
+        let selection = seconds(&h, 12.0)..seconds(&h, 14.0);
+        h.state_mut().select(selection.clone());
+        until(&mut h, "the selection's answer", |b| {
+            b.selection_statistics().is_some()
         });
-        for _ in 0..60 {
-            h.step();
-        }
-        assert!(!h.state().y_fit);
-        let moved = shown(&h);
-        assert!(
-            moved.bounds().min()[1] > before.bounds().min()[1],
-            "{:?} from {:?}",
-            moved.bounds(),
-            before.bounds()
-        );
-        // A new answer leaves the range where the wheel left it.
-        let earlier = h.state().answer.clone().unwrap();
-        h.state_mut().requery();
-        for _ in 0..400 {
-            h.step();
-            if !Arc::ptr_eq(h.state().answer.as_ref().unwrap(), &earlier) {
-                break;
+        let i = h.state().channels.as_ref().unwrap().i.unwrap();
+        let statistics = h.state().selection_statistics().unwrap();
+        assert_eq!(statistics.channels[i].as_ref().unwrap().samples, 2000);
+        h.step();
+        assert!(h.query_by_label("Selection").is_some());
+        click(&mut h, "Zoom to selection");
+        assert_eq!(h.state().state.window, Window::At(selection));
+        click(&mut h, "Clear");
+        assert_eq!(h.state().state.selection, None);
+    }
+
+    #[test]
+    fn fit_y_goes_off_at_the_range_drawn_and_back_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = opened(dir.path(), &messages(1000, 20_000, pulses, false, &[]));
+        let drawn = h.state().shown.as_ref().unwrap().y;
+        click(&mut h, "Fit Y");
+        assert_eq!(
+            h.state().state.y,
+            Y::Fixed {
+                low: drawn.0,
+                high: drawn.1
             }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        assert!(!Arc::ptr_eq(h.state().answer.as_ref().unwrap(), &earlier));
-        h.step();
-        assert_eq!(shown(&h).bounds().range_y(), moved.bounds().range_y());
-        // A double click fits it again.
-        h.event(egui::Event::PointerMoved(PLOT));
-        for _ in 0..2 {
-            press(&mut h, PLOT, true);
-            press(&mut h, PLOT, false);
-        }
-        h.step();
-        assert!(h.state().y_fit);
-        assert_eq!(shown(&h).bounds().range_y(), before.bounds().range_y());
+        );
+        click(&mut h, "Fit Y");
+        assert_eq!(h.state().state.y, Y::Fit);
     }
+
     #[test]
-    fn a_drag_along_time_leaves_y_fitted_and_a_vertical_one_moves_it_from_its_start() {
+    fn a_span_preset_follows_at_its_width_or_keeps_a_moved_windows_end() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("demo.vergecapture");
-        fixture(&path);
-        let mut h = harness(state(&path), false);
-        wait(&mut h);
-        h.step();
-        let before = shown(&h);
-        drag(&mut h, vec2(-200.0, 6.0), 10);
-        assert!(h.state().y_fit);
-        assert!(!h.state().follow);
-        let panned = shown(&h);
-        assert!(panned.bounds().min()[0] > before.bounds().min()[0]);
-        drag(&mut h, vec2(0.0, 60.0), 6);
-        h.step();
-        assert!(!h.state().y_fit);
-        let moved = shown(&h);
-        // All 60 points, the detent's included.
-        let points = (moved.bounds().min()[1] - panned.bounds().min()[1]) / moved.dvalue_dpos()[1];
-        assert!((points + 60.0).abs() < 1.0, "{points}");
-    }
-    #[test]
-    fn a_box_zoom_leaves_y_alone_until_it_lands() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("demo.vergecapture");
-        fixture(&path);
-        let mut h = harness(state(&path), false);
-        wait(&mut h);
-        h.step();
-        let before = shown(&h);
-        drag_with(
-            &mut h,
-            egui::PointerButton::Secondary,
-            vec2(40.0, 120.0),
-            10,
-            |h| {
-                assert!(h.state().y_fit);
-                assert_eq!(shown(h).bounds().range_y(), before.bounds().range_y());
-            },
-        );
-        h.step();
-        assert!(!h.state().y_fit);
-        assert_ne!(shown(&h).bounds().range_y(), before.bounds().range_y());
-    }
-    #[test]
-    fn a_selection_started_straight_after_a_zoom_keeps_the_zoom() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("demo.vergecapture");
-        fixture(&path);
-        let mut h = harness(state(&path), false);
-        wait(&mut h);
-        h.step();
-        h.state_mut().select_mode = true;
-        h.event(egui::Event::PointerMoved(PLOT));
-        h.step();
-        h.event(egui::Event::Zoom(2.0));
-        h.step();
-        let zoomed = shown(&h).bounds().range_x();
-        drag_with(
-            &mut h,
-            egui::PointerButton::Primary,
-            vec2(60.0, 0.0),
-            3,
-            |_| {},
-        );
-        h.step();
-        // To the nanosecond the selection's interval holds.
-        let after = shown(&h).bounds().range_x();
-        assert!(
-            (after.start() - zoomed.start()).abs() < 1e-6
-                && (after.end() - zoomed.end()).abs() < 1e-6,
-            "{after:?} after zooming to {zoomed:?}"
-        );
-        let selection = h.state().selection.expect("a selection");
-        assert!(
-            selection.start_ns >= nanos(*zoomed.start())
-                && selection.end_ns <= nanos(*zoomed.end())
-        );
-    }
-    #[test]
-    fn answers_arrive_while_the_plot_is_still_moving() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("demo.vergecapture");
-        fixture(&path);
-        let mut h = harness(state(&path), false);
-        wait(&mut h);
-        h.step();
-        h.event(egui::Event::PointerMoved(PLOT));
-        h.step();
-        press(&mut h, PLOT, true);
-        let mut answers = std::collections::HashSet::new();
-        for step in 1..=40 {
-            h.event(egui::Event::PointerMoved(
-                PLOT - vec2(5.0 * step as f32, 0.0),
-            ));
-            h.step();
-            std::thread::sleep(Duration::from_millis(5));
-            let visible = h.state().answer.as_ref().unwrap().visible;
-            answers.insert((visible.start_ns, visible.end_ns));
-        }
-        press(&mut h, PLOT - vec2(200.0, 0.0), false);
-        assert!(
-            answers.len() > 3,
-            "{} answers during the drag",
-            answers.len()
-        );
-    }
-    #[test]
-    fn zoomed_in_the_answer_holds_samples_and_the_overview_fills_around_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("demo.vergecapture");
-        capture_with_dio(
-            &path,
-            1000,
-            20_000,
-            |i| if i % 1000 < 30 { 3000 } else { 350 },
-            true,
-        );
-        let mut h = harness(state(&path), false);
-        wait(&mut h);
-        let whole = h.state().answer.clone().unwrap();
-        assert!(whole.view.samples.is_none());
-        let visible = Interval::new(5_000_000_000, 5_050_000_000);
-        h.state_mut().inspect(visible, None);
-        let answer = answered(&mut h, visible);
-        // 50 ms visible, and 50 ms either side.
-        assert_eq!(answer.view.samples.as_ref().map(Vec::len), Some(150));
-        let covered = answer.view.interval;
-        assert!(
-            answer
-                .fallback
-                .iter()
-                .all(|bin| bin.interval.end_ns <= covered.start_ns
-                    || bin.interval.start_ns >= covered.end_ns)
-        );
-        let extent = answer.view.extent;
+        let mut h = opened(dir.path(), &messages(1000, 20_000, pulses, false, &[]));
+        click(&mut h, "1s");
         assert_eq!(
-            answer.fallback.first().unwrap().interval.start_ns,
-            extent.start_ns
+            h.state().state.window,
+            Window::Follow {
+                span: seconds(&h, 1.0)
+            }
         );
+        let moved = seconds(&h, 5.0)..seconds(&h, 15.0);
+        h.state_mut().state.window = Window::At(moved);
+        h.step();
+        click(&mut h, "1s");
         assert_eq!(
-            answer.fallback.last().unwrap().interval.end_ns,
-            extent.end_ns
+            h.state().state.window,
+            Window::At(seconds(&h, 14.0)..seconds(&h, 15.0))
         );
-        assert!(!answer.digital_fallback.is_empty());
-        assert!(
-            answer
-                .digital_fallback
-                .iter()
-                .all(|bin| bin.interval.end_ns <= covered.start_ns
-                    || bin.interval.start_ns >= covered.end_ns)
-        );
-        assert_eq!(answer.window.samples, 50);
     }
+
     #[test]
-    fn the_overview_beside_the_answer_holds_only_its_own_levels() {
+    fn each_quantity_draws_its_own_channel() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("step.vergecapture");
-        // High until 10.05 s, then low, with DIO3 following. The overview's bins are 156.25 ms, so
-        // the one from 10.0 s holds both levels.
-        capture_with_dio(
-            &path,
-            1000,
-            20_000,
-            |i| if i < 10_050 { 3000 } else { 350 },
-            true,
-        );
-        let mut h = harness(state(&path), false);
-        wait(&mut h);
-        // The answer covers 9.8 s to 10.1 s: the cut bin's part after it is low throughout.
-        let visible = Interval::new(9_900_000_000, 10_000_000_000);
-        h.state_mut().inspect(visible, None);
-        let answer = answered(&mut h, visible);
-        assert_eq!(answer.view.interval.end_ns, 10_100_000_000);
-        let after = |bin_start: &dyn Fn(u64) -> bool| {
-            answer
-                .fallback
-                .iter()
-                .find(|bin| bin_start(bin.interval.start_ns))
-                .unwrap()
-                .clone()
-        };
-        let beside = after(&|start| start == 10_100_000_000);
-        let later = after(&|start| start > 10_100_000_000);
-        assert_eq!(beside.statistics.max_na, later.statistics.max_na);
-        assert!(!beside.gap);
-        let digital = answer
-            .digital_fallback
-            .iter()
-            .find(|bin| bin.interval.start_ns == 10_100_000_000)
-            .unwrap();
-        assert_eq!((digital.high & 8, digital.low & 8), (0, 8));
+        let mut h = opened(dir.path(), &messages(1000, 20_000, pulses, false, &[]));
+        // Up to 16 mA of current, against half of 3.3 V.
+        assert!(h.state().shown.as_ref().unwrap().y.1 < 0.1);
+        h.get_by_role_and_label(egui::Role::Button, "Voltage")
+            .click();
+        h.step();
+        settle(&mut h);
+        let y = h.state().shown.as_ref().unwrap().y;
+        assert!(y.0 <= 1.65 && y.1 >= 1.65, "{y:?}");
     }
+
     #[test]
-    fn a_cut_part_of_the_overview_keeps_its_own_gap() {
+    fn the_markers_list_centres_one_and_selects_to_the_next() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("lossy.vergecapture");
-        // Pairs lost after 10.1 s, inside the overview bin from 10.0 s, and at 15 s; none before.
-        capture_lossy(
-            &path,
-            1000,
-            20_000,
-            |_| 350,
-            &[10_120..10_125, 15_000..15_001],
-        );
-        let mut h = harness(state(&path), false);
-        wait(&mut h);
-        let visible = Interval::new(9_900_000_000, 10_000_000_000);
-        h.state_mut().inspect(visible, None);
-        let answer = answered(&mut h, visible);
-        let part = |start| {
-            answer
-                .fallback
-                .iter()
-                .find(|bin| bin.interval.start_ns == start)
-                .unwrap()
-        };
-        assert!(part(10_100_000_000).gap && part(10_100_000_000).lost);
-        assert!(!part(9_687_500_000).gap);
-    }
-    #[test]
-    fn a_pause_leaves_a_gap_and_only_lost_pairs_are_lost() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("held.vergecapture");
-        // Held for 4 ms before pair 10,120, inside the overview bin the window below cuts, and
-        // before 15,000; pairs lost from 17,000 (17.008 s to 17.011 s, after both holds) and at
-        // 18,000 (18.008 s to 18.009 s).
-        capture_gaps(
-            &path,
-            1000,
-            20_000,
-            |_| 350,
-            &[17_000..17_003, 18_000..18_001],
-            &[10_120, 15_000],
-            4_000_000,
-        );
-        let mut h = harness(state(&path), false);
-        wait(&mut h);
-        let visible = Interval::new(9_900_000_000, 10_000_000_000);
-        h.state_mut().inspect(visible, None);
-        let answer = answered(&mut h, visible);
-        let cut = answer
-            .fallback
-            .iter()
-            .find(|bin| bin.interval.start_ns == 10_100_000_000)
-            .unwrap();
-        assert!(cut.gap && !cut.lost);
-        let at = |time: u64| {
-            answer
-                .overview
-                .envelopes
-                .iter()
-                .find(|bin| bin.interval.start_ns <= time && time < bin.interval.end_ns)
-                .unwrap()
-        };
-        for pause in [10_122_000_000, 15_006_000_000] {
-            assert!(at(pause).gap && !at(pause).lost);
-        }
-        assert!(at(17_009_000_000).lost && at(18_008_500_000).lost);
-        let spans: Vec<_> = answer
-            .overview
-            .lost
-            .iter()
-            .map(|span| (span.start_ns, span.end_ns))
+        let markers: Vec<Marker> = (0..3)
+            .map(|n| Marker {
+                time_ns: 2_000_000_000 * (u64::from(n) + 1),
+                number: 40 + n,
+                label: format!("step {n}").into_bytes(),
+            })
             .collect();
-        assert_eq!(
-            spans,
-            [
-                (17_008_000_000, 17_011_000_000),
-                (18_008_000_000, 18_009_000_000)
-            ]
-        );
-        let lost = [
-            (17_008_000_000, 17_011_000_000),
-            (18_008_000_000, 18_009_000_000),
-        ];
+        let mut h = opened(dir.path(), &messages(1000, 20_000, pulses, false, &markers));
+        h.step();
+        assert!(h.query_by_label("3 received").is_some());
         assert!(
-            answer
-                .overview
-                .envelopes
-                .iter()
-                .filter(|bin| bin.lost)
-                .all(|bin| {
-                    lost.iter().any(|&(start, end)| {
-                        bin.interval.start_ns < end && bin.interval.end_ns > start
-                    })
-                })
+            h.query_by_label("1 marker-loss report. Some markers are missing.")
+                .is_some()
         );
-    }
-    #[test]
-    fn a_window_past_the_capture_counts_only_the_capture_as_unmeasured() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("short.vergecapture");
-        // 2 s of pairs, five of them lost before 1.1 s.
-        capture_lossy(&path, 1000, 2000, |_| 350, &[500..502, 1000..1003]);
-        let mut h = harness(state(&path), false);
-        wait(&mut h);
-        let visible = Interval::new(1_500_000_000, 2_300_000_000);
-        h.state_mut().inspect(visible, None);
-        let answer = answered(&mut h, visible);
-        assert_eq!(
-            unmeasured_ns(visible, answer.view.extent, &answer.window),
-            0
-        );
-        let whole = Interval::new(0, 2_300_000_000);
-        h.state_mut().inspect(whole, None);
-        let answer = answered(&mut h, whole);
-        assert_eq!(
-            unmeasured_ns(whole, answer.view.extent, &answer.window),
-            5_000_000
-        );
-    }
-    #[test]
-    fn a_capture_that_cannot_be_read_is_asked_for_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("empty.vergecapture");
-        std::fs::write(&path, b"").unwrap();
-        let mut h = harness(state(&path), false);
-        for _ in 0..200 {
-            h.step();
-            if h.state().query_failed {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(2));
+        click(&mut h, "2.000000s · 40 · step 0");
+        let at = seconds(&h, 2.0);
+        match &h.state().state.window {
+            Window::At(w) => assert_eq!((w.start + w.end) / 2, at, "{w:?}"),
+            other => panic!("{other:?}"),
         }
-        assert!(h.state().query_failed);
+        until(&mut h, "the successor", |b| {
+            b.answer_now()
+                .is_some_and(|a| a.markers.successor.is_some())
+        });
+        click(&mut h, "Select to next marker");
+        assert_eq!(h.state().state.selection, Some(at..seconds(&h, 4.0)));
+    }
+
+    #[test]
+    fn a_live_recording_is_followed_then_shown_finished_and_compacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("captures").join("live.tickwave");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let all = messages(1000, 20_000, pulses, false, &[]);
+        let (head, tail) = all.split_at(all.len() / 2);
+        let mut writer = FileWriter::create(&path, Context::default()).unwrap();
+        writer.ingest(&head[0]).unwrap();
+        let mut bench = Bench::new(dir.path());
+        bench.connection = Some("unit".into());
+        let mut status = Status {
+            instance: "unit".into(),
+            connected: true,
+            recording: true,
+            path: Some(path.clone()),
+            snapshots: Some(writer.snapshots()),
+            ..Status::default()
+        };
+        bench.receive(status.clone());
+        let mut h = harness(bench);
+        // The panel takes the header's snapshot; the stream's pairs follow, a frame apart.
+        h.step();
+        for message in &head[1..] {
+            writer.ingest(message).unwrap();
+            h.step();
+        }
+        until(&mut h, "the first half", |b| {
+            b.answer_now().is_some_and(|a| a.extent.is_some())
+                && b.now().is_some()
+                && b.viewer.as_ref().is_some_and(|v| !v.busy())
+        });
+        let half = h.state().answer().unwrap().extent.as_ref().unwrap().end;
+        for message in &tail[..tail.len() - 1] {
+            writer.ingest(message).unwrap();
+            h.step();
+        }
+        until(&mut h, "the newer data", |b| {
+            b.answer_now()
+                .and_then(|a| a.extent.clone())
+                .is_some_and(|e| e.end > half)
+        });
+        writer.ingest(tail.last().unwrap()).unwrap();
+        assert!(writer.close().unwrap());
+        status.recording = false;
+        status.snapshots = None;
+        // A unit no one picked is disconnected each frame; this one stands for a picked one.
+        h.state_mut().connection = Some("unit".into());
+        h.state_mut().receive(status);
+        h.step();
+        assert!(h.state().now().is_none(), "no now once finished");
+        until(&mut h, "the compaction", |b| {
+            b.io.is_none() && b.compactions.is_empty()
+        });
+        settle(&mut h);
+        assert!(recordings::finished(&path).unwrap());
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+        // Compacted: compacting it again changes nothing.
+        let again = dir.path().join("again.tickwave");
+        std::fs::copy(&path, &again).unwrap();
+        recordings::compact(&again).unwrap();
+        assert_eq!(
+            std::fs::read(&again).unwrap(),
+            std::fs::read(&path).unwrap()
+        );
+        let i = h.state().channels.as_ref().unwrap().i.unwrap();
+        let answer = h.state().answer().unwrap();
+        assert_eq!(
+            answer.statistics[0].channels[i].as_ref().unwrap().samples,
+            10_000
+        );
+        assert_eq!(h.state().notice, None);
+    }
+
+    #[test]
+    fn a_capture_a_crash_cut_off_is_repaired_then_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("captures").join("cut.tickwave");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write(&path, &messages(1000, 20_000, pulses, false, &[]));
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &bytes[..bytes.len() * 2 / 3]).unwrap();
+        let mut bench = Bench::new(dir.path());
+        bench.open(path.clone());
+        let mut h = harness(bench);
+        h.step();
+        settle(&mut h);
+        assert!(recordings::finished(&path).unwrap());
+        assert_eq!(h.state().notice, None);
+        assert!(h.state().recovered.contains(&path), "listed as kept");
+    }
+
+    #[test]
+    fn a_dio_only_recording_draws_its_lanes_and_offers_no_export() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = 150_000_000u64;
+        let header: DioHeader = serde_json::from_value(serde_json::json!({
+            "clock_hz": clock, "dio_mask": 15, "dio_levels": 0, "edge_resolution_ns": 7
+        }))
+        .unwrap();
+        let mut stream = vec![Message::DioHeader(header)];
+        for k in 1..=40u64 {
+            stream.push(Message::Edges(Edges::new(
+                0,
+                vec![Edge {
+                    time_ns: k * 50_000_000,
+                    levels: if k % 2 == 1 { 8 } else { 0 },
+                }],
+            )));
+        }
+        stream.push(Message::End(End {
+            reason: EndReason::Stopped,
+            last_sequence: 0,
+            time_ns: Some(2_100_000_000),
+        }));
+        let mut h = opened(dir.path(), &stream);
+        let channels = h.state().channels.as_ref().unwrap();
+        assert_eq!((channels.i, channels.lanes.len()), (None, 4));
+        h.step();
+        let csv = h.get_by_label("CSV…");
+        assert!(csv.accesskit_node().is_disabled());
+    }
+    /// A status from the picked unit while it records to `path`, or once it has stopped.
+    fn recording_status(instance: &str, path: &Path, slot: Option<Snapshots>) -> Status {
+        Status {
+            instance: instance.into(),
+            connected: true,
+            target_power: true,
+            energy: true,
+            board: Some(BoardKind::Pro),
+            recording: slot.is_some(),
+            path: Some(path.to_owned()),
+            snapshots: slot,
+            ..Status::default()
+        }
+    }
+    /// Compacting the file again changes nothing.
+    fn assert_compacted(path: &Path) {
+        let again = path.with_extension("again");
+        std::fs::copy(path, &again).unwrap();
+        recordings::compact(&again).unwrap();
+        assert_eq!(
+            std::fs::read(&again).unwrap(),
+            std::fs::read(path).unwrap(),
+            "{path:?}"
+        );
+        std::fs::remove_file(again).unwrap();
+    }
+
+    /// While a recording is written: picking it from the list keeps it live, exports wait,
+    /// the loss counts are the worker's, a stalled stream's republished snapshot doesn't move the
+    /// followed window back, and now runs at most 50 ms past the data. At the stop: the view
+    /// reads the whole finished file before its compaction, and the window counts as busy until
+    /// that is done.
+    #[test]
+    fn the_recording_under_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("captures").join("live.tickwave");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let all = messages(1000, 20_000, pulses, false, &[]);
+        let (head, tail) = all.split_at(all.len() / 2);
+        let mut writer = FileWriter::create(&path, Context::default()).unwrap();
+        writer.ingest(&head[0]).unwrap();
+        let (mut h, instance) = rig(Bench::new(dir.path()));
+        let mut status = recording_status(&instance, &path, Some(writer.snapshots()));
+        status.marker_losses = 2;
+        status.edge_losses = 3;
+        h.state_mut().0.receive(status.clone());
+        h.step();
+        for message in &head[1..] {
+            writer.ingest(message).unwrap();
+            h.step();
+        }
+        until(&mut h, "the first half", |b| {
+            b.now().is_some() && b.answer_now().is_some_and(|a| a.extent.is_some())
+        });
+        assert!(h.state().0.recovered.contains(&path), "listed as kept");
+        h.step();
+        assert!(h.get_by_label("CSV…").accesskit_node().is_disabled());
+        assert!(
+            h.query_by_label("3 DIO edge-loss reports in this capture")
+                .is_some()
+        );
+        until(&mut h, "the marker list", |b| {
+            b.answer_now().is_some_and(|a| a.markers.list.is_some())
+        });
+        assert!(
+            h.query_by_label("2 marker-loss reports. Some markers are missing.")
+                .is_some()
+        );
+
+        // Picked from the list, it stays live; nothing repairs it under the writer.
+        h.state_mut().0.open(path.clone());
+        h.step();
+        assert!(h.state().0.live.is_some() && h.state().0.compactions.is_empty());
+        assert_eq!(h.state().0.path.as_ref(), Some(&path));
+
+        // The writer's clock publishes the same end again: the window doesn't step back.
+        until(&mut h, "an end", |b| {
+            b.live.as_ref().is_some_and(|l| l.end.is_some())
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let before = h.state().0.now().unwrap();
+        writer.flush().unwrap();
+        h.step();
+        assert!(h.state().0.now().unwrap() >= before);
+        // Now runs at most 50 ms past the end it was given.
+        let (end, _) = h.state().0.live.as_ref().unwrap().end.unwrap();
+        h.state_mut().0.live.as_mut().unwrap().end =
+            Some((end, Instant::now() - Duration::from_secs(1)));
+        let cap = (0.05 * h.state().0.channels.as_ref().unwrap().rate).round() as i64;
+        assert_eq!(h.state().0.now(), Some(end + cap));
+
+        // The rest goes in without the panel taking it, then the writer finishes.
+        for message in tail {
+            writer.ingest(message).unwrap();
+        }
+        assert!(writer.close().unwrap());
+        // Hold the file thread, so the view must read the finished file before any compaction.
+        let (hold, held) = mpsc::channel();
+        h.state_mut().0.io = Some(held);
+        h.state_mut()
+            .0
+            .receive(recording_status(&instance, &path, None));
+        assert!(h.state().0.busy(), "busy until compacted");
+        assert!(h.state().0.now().is_none());
+        // Statuses keep naming the stopped recording: it is finished once.
+        h.state_mut()
+            .0
+            .receive(recording_status(&instance, &path, None));
+        assert_eq!(h.state().0.compactions.len(), 1);
+        h.step();
+        let kept = h
+            .get_all_by_label("Kept on disk")
+            .find(|n| n.accesskit_node().role() == egui::accesskit::Role::ComboBox)
+            .expect("the kept list");
+        assert!(
+            kept.accesskit_node().is_disabled(),
+            "kept list off while compacting"
+        );
+        until(&mut h, "the whole file before compacting", |b| {
+            b.answer_now()
+                .and_then(|a| a.extent.clone())
+                .is_some_and(|e| e.end >= 20_000)
+        });
+        hold.send(Ok(FileResult::Cancelled)).unwrap();
+        until(&mut h, "the compaction", |b| !b.busy());
+        settle(&mut h);
+        assert_compacted(&path);
+        assert_eq!(h.state().0.notice, None);
+    }
+
+    #[test]
+    fn a_file_opened_while_recording_stays_and_the_recording_is_still_compacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let captures = dir.path().join("captures");
+        std::fs::create_dir_all(&captures).unwrap();
+        let other = captures.join("other.tickwave");
+        write(&other, &messages(1000, 5_000, pulses, false, &[]));
+        let path = captures.join("live.tickwave");
+        let all = messages(1000, 5_000, pulses, false, &[]);
+        let mut writer = FileWriter::create(&path, Context::default()).unwrap();
+        writer.ingest(&all[0]).unwrap();
+        let (mut h, instance) = rig(Bench::new(dir.path()));
+        let live = recording_status(&instance, &path, Some(writer.snapshots()));
+        h.state_mut().0.receive(live.clone());
+        h.state_mut().0.open(other.clone());
+        settle(&mut h);
+        for message in &all[1..all.len() - 1] {
+            writer.ingest(message).unwrap();
+        }
+        h.state_mut().0.receive(live);
+        h.step();
+        assert_eq!(
+            h.state().0.path.as_ref(),
+            Some(&other),
+            "the next status keeps it open"
+        );
+        // Picked again, the recording shows live; then the other file again.
+        h.state_mut().0.open(path.clone());
+        assert!(h.state().0.live.is_some());
+        assert_eq!(h.state().0.path.as_ref(), Some(&path));
+        h.state_mut().0.open(other.clone());
+        settle(&mut h);
+        writer.ingest(all.last().unwrap()).unwrap();
+        assert!(writer.close().unwrap());
+        h.state_mut()
+            .0
+            .receive(recording_status(&instance, &path, None));
+        assert!(h.state().0.busy());
+        until(&mut h, "the compaction", |b| !b.busy());
+        assert_compacted(&path);
+        assert_eq!(h.state().0.path.as_ref(), Some(&other));
+    }
+
+    #[test]
+    fn a_recording_that_came_and_went_between_statuses_is_listed_compacted_and_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("captures").join("short.tickwave");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut writer = FileWriter::create(&path, Context::default()).unwrap();
+        for message in &messages(1000, 3_000, pulses, false, &[]) {
+            writer.ingest(message).unwrap();
+        }
+        assert!(writer.close().unwrap());
+        // Another, longer file is shown when it comes and goes.
+        let other = dir.path().join("captures").join("other.tickwave");
+        write(&other, &messages(1000, 5_000, pulses, false, &[]));
+        let (mut h, instance) = rig(Bench::new(dir.path()));
+        h.state_mut().0.open(other);
+        settle(&mut h);
+        h.state_mut()
+            .0
+            .receive(recording_status(&instance, &path, None));
+        assert!(h.state().0.recovered.contains(&path));
+        until(&mut h, "the copy, shown", |b| {
+            !b.busy() && b.viewer.is_some()
+        });
+        settle(&mut h);
+        assert_compacted(&path);
+        assert_eq!(h.state().0.path.as_ref(), Some(&path));
+        let end = h.state().0.answer().unwrap().extent.clone().unwrap().end;
+        assert_eq!(end, 3_000, "the graph draws the recording named");
+    }
+
+    /// A recording picked while its compaction is queued opens once the copy is in place, so no
+    /// second reader holds the file at the rename.
+    #[test]
+    fn a_file_opens_only_once_its_compaction_is_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let captures = dir.path().join("captures");
+        std::fs::create_dir_all(&captures).unwrap();
+        let other = captures.join("other.tickwave");
+        write(&other, &messages(1000, 5_000, pulses, false, &[]));
+        let path = captures.join("live.tickwave");
+        let all = messages(1000, 5_000, pulses, false, &[]);
+        let mut writer = FileWriter::create(&path, Context::default()).unwrap();
+        writer.ingest(&all[0]).unwrap();
+        let (mut h, instance) = rig(Bench::new(dir.path()));
+        h.state_mut()
+            .0
+            .receive(recording_status(&instance, &path, Some(writer.snapshots())));
+        h.state_mut().0.open(other);
+        settle(&mut h);
+        for message in &all[1..] {
+            writer.ingest(message).unwrap();
+        }
+        assert!(writer.close().unwrap());
+        let (hold, held) = mpsc::channel();
+        h.state_mut().0.io = Some(held);
+        h.state_mut()
+            .0
+            .receive(recording_status(&instance, &path, None));
+        // Not shown, it is compacted without the view of the file that is.
+        assert!(h.state().0.compactions[0].viewer.is_none());
+        h.state_mut().0.open(path.clone());
         for _ in 0..5 {
             h.step();
         }
-        assert!(!h.state().pending);
+        assert!(
+            h.state().0.viewer.is_none(),
+            "opened under its queued compaction"
+        );
+        hold.send(Ok(FileResult::Cancelled)).unwrap();
+        until(&mut h, "the copy, then the view", |b| {
+            !b.busy() && b.viewer.is_some()
+        });
+        settle(&mut h);
+        assert_compacted(&path);
+        assert_eq!(h.state().0.path.as_ref(), Some(&path));
     }
+
+    #[test]
+    fn a_file_waits_for_the_compaction_running_on_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("captures").join("busy.tickwave");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write(&path, &messages(1000, 3_000, pulses, false, &[]));
+        let mut h = harness(Bench::new(dir.path()));
+        h.step();
+        let (done, running) = mpsc::channel();
+        h.state_mut().io = Some(running);
+        h.state_mut().compacting = Some(path.clone());
+        h.state_mut().open(path.clone());
+        for _ in 0..5 {
+            h.step();
+        }
+        assert!(
+            h.state().viewer.is_none(),
+            "opened under its running compaction"
+        );
+        done.send(Ok(FileResult::Compacted)).unwrap();
+        settle(&mut h);
+        assert_eq!(h.state().path.as_ref(), Some(&path));
+    }
+
+    #[test]
+    fn a_followed_span_keeps_its_seconds_across_files_at_other_rates() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = opened(dir.path(), &messages(1000, 20_000, pulses, false, &[]));
+        click(&mut h, "1s");
+        let faster = dir.path().join("captures").join("faster.tickwave");
+        write(&faster, &messages(2000, 20_000, pulses, false, &[]));
+        h.state_mut().open(faster);
+        settle(&mut h);
+        assert_eq!(h.state().state.window, Window::Follow { span: 2000 });
+    }
+
+    #[test]
+    fn a_recording_whose_header_never_came_leaves_nothing_shown_or_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("captures").join("empty.tickwave");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let writer = FileWriter::create(&path, Context::default()).unwrap();
+        let (mut h, instance) = rig(Bench::new(dir.path()));
+        h.state_mut()
+            .0
+            .receive(recording_status(&instance, &path, Some(writer.snapshots())));
+        h.step();
+        assert!(!writer.close().unwrap());
+        h.state_mut()
+            .0
+            .receive(recording_status(&instance, &path, None));
+        h.step();
+        let b = &h.state().0;
+        assert_eq!(
+            (b.path.as_ref(), b.recovered.contains(&path)),
+            (None, false)
+        );
+        assert!(!b.busy());
+    }
+
+    /// Nothing holds the file when the copy is renamed over it, as Windows needs: counted in
+    /// this process's open files, which the viewer's reader is among.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_compaction_renames_with_the_file_let_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("closed.tickwave");
+        let mut writer = FileWriter::create(&path, Context::default()).unwrap();
+        for message in &messages(1000, 3_000, pulses, false, &[]) {
+            writer.ingest(message).unwrap();
+        }
+        assert!(writer.close().unwrap());
+        let viewer = Viewer::open(&egui::Context::default(), &path).unwrap();
+        let held = || {
+            std::fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(|fd| std::fs::read_link(fd.unwrap().path()).ok())
+                .filter(|target| *target == path)
+                .count()
+        };
+        assert!(held() > 0, "the viewer reads the file");
+        compact_then(&path, Some(&viewer), || {
+            assert_eq!(held(), 0, "held at the rename")
+        })
+        .unwrap();
+        assert_compacted(&path);
+    }
+
     #[test]
     fn a_cancelled_dialog_keeps_the_notice() {
         let dir = tempfile::tempdir().unwrap();
@@ -3047,6 +2484,7 @@ mod tests {
         bench.tick();
         assert_eq!(bench.notice.as_deref(), Some("disk full"));
     }
+
     #[test]
     fn file_activity_blocks_close_and_reports_failure() {
         let dir = tempfile::tempdir().unwrap();
@@ -3065,9 +2503,13 @@ mod tests {
         bench.tick();
         assert!(!bench.busy());
         assert!(bench.take_failure());
+        // A compaction waiting for the file thread blocks closing too.
+        bench.compact(dir.path().join("x.tickwave"), None);
+        assert!(bench.busy());
     }
+
     #[test]
-    fn switching_devices_clears_confirmations_and_keeps_native_capture() {
+    fn switching_devices_clears_confirmations_and_a_failure_finishes_the_recording() {
         let dir = tempfile::tempdir().unwrap();
         let mut bench = Bench::new(dir.path());
         bench.start_confirm = true;
@@ -3081,35 +2523,24 @@ mod tests {
         bench.connect(&unit, &mut crate::worker::Manual::default());
         assert!(!bench.start_confirm);
         assert!(!bench.off_confirm);
-        let path = bench.directory.join("new.vergecapture");
-        bench.receive(Status {
-            instance: unit.device.instance.clone(),
-            connected: true,
-            target_power: true,
-            energy: true,
-            board: Some(BoardKind::Pro),
-            recording: true,
-            path: Some(path.clone()),
-            ..Status::default()
-        });
+        let path = bench.directory.join("new.tickwave");
+        std::fs::create_dir_all(&bench.directory).unwrap();
+        let mut writer = FileWriter::create(&path, Context::default()).unwrap();
+        for message in &messages(1000, 2_000, pulses, false, &[]) {
+            writer.ingest(message).unwrap();
+        }
+        let slot = writer.snapshots();
+        bench.receive(recording_status(&unit.device.instance, &path, Some(slot)));
         assert!(bench.recovered.contains(&path));
         assert_eq!(bench.path.as_ref(), Some(&path));
-        let generation = bench.generation;
-        bench.receive(Status {
-            instance: unit.device.instance,
-            connected: true,
-            target_power: true,
-            energy: true,
-            board: Some(BoardKind::Pro),
-            recording: false,
-            path: Some(path.clone()),
-            ..Status::default()
-        });
-        assert!(bench.generation > generation);
+        assert!(writer.close().unwrap());
+        // The worker failed and closed the recording: the panel finishes it as a stop.
         bench.worker_failed("gone");
         assert!(!bench.recording());
         assert_eq!(bench.path.as_ref(), Some(&path));
+        assert_eq!(bench.compactions.len(), 1);
     }
+
     /// A pin the bench marker holds is not offered, and with all four held the panel says why.
     #[test]
     fn marker_held_pins_are_left_out() {
@@ -3128,10 +2559,10 @@ mod tests {
             crate::worker::Manual::default(),
         );
         let mut h = Harness::builder()
-            .with_size(vec2(1080.0, 700.0))
+            .with_size(egui::vec2(1080.0, 700.0))
             .with_context_setup(style::install)
             .build_ui_state(
-                |ui, (bench, units, selected, backend): &mut (Bench, Vec<Unit>, _, _)| {
+                |ui, (bench, units, selected, backend): &mut Rig| {
                     bench.show(ui, units, selected, backend);
                 },
                 rig,
@@ -3156,6 +2587,143 @@ mod tests {
                 .next()
                 .is_some();
             assert_eq!(told, pins == 0, "pins {pins:#x}");
+        }
+    }
+
+    /// Frame time, data-to-screen latency and memory while a recording is written at 25,000 and at
+    /// 100,000 pairs a second, for 30 s each, the frames paced at 60 a second; `VERGE_FIGURES_RATES`
+    /// (comma-separated) and `VERGE_FIGURES_SECONDS` change them, and memory is sampled every 10 s.
+    /// A measurement, not a check: build for release and hold the process to one core, as verge's
+    /// AGENTS.md asks.
+    ///
+    ///     taskset -c 0 cargo test --release -p escapement-verge-gui live_figures -- --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement: run in release on one core"]
+    fn live_figures() {
+        let rates: Vec<u32> = std::env::var("VERGE_FIGURES_RATES")
+            .map_or(vec![25_000, 100_000], |v| {
+                v.split(',').map(|r| r.trim().parse().unwrap()).collect()
+            });
+        let seconds: u32 =
+            std::env::var("VERGE_FIGURES_SECONDS").map_or(30, |v| v.parse().unwrap());
+        for rate in rates {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("captures").join("live.tickwave");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let all = messages(rate, rate * seconds, pulses, true, &[]);
+            let mut writer = FileWriter::create(&path, Context::default()).unwrap();
+            writer.ingest(&all[0]).unwrap();
+            let slot = writer.snapshots();
+            // Each message as the writer takes it in: when, and the tick its last pair ends at.
+            let (sent, arrived) = mpsc::channel::<(Instant, i64)>();
+            let start = Instant::now();
+            let feeder = std::thread::spawn(move || {
+                let mut end = 0;
+                for message in &all[1..] {
+                    if let Message::Pairs(pairs) = message {
+                        let first = i64::from(pairs.first_sequence);
+                        let due = Duration::from_secs_f64(first as f64 / f64::from(rate));
+                        std::thread::sleep(due.saturating_sub(start.elapsed()));
+                        end = first + pairs.pairs.len() as i64;
+                    }
+                    writer.ingest(message).unwrap();
+                    let _ = sent.send((Instant::now(), end));
+                }
+                writer.close().unwrap();
+            });
+            // A picked unit, so the panel keeps its status as it does in use.
+            let units = escapement_verge_probe::detect(
+                &escapement_verge_probe::sim::SimBus::scenario("ours-pro-energy").unwrap(),
+            )
+            .unwrap();
+            let instance = units[0].device.instance.clone();
+            let mut selected = Some(instance.clone());
+            let mut bench = Bench::new(dir.path());
+            bench.connection = Some(instance.clone());
+            bench.receive(Status {
+                instance,
+                connected: true,
+                recording: true,
+                path: Some(path.clone()),
+                snapshots: Some(slot),
+                ..Status::default()
+            });
+            let mut h = Harness::builder()
+                .with_size(egui::vec2(1080.0, 700.0))
+                .with_context_setup(crate::style::install)
+                .wgpu()
+                .build_ui_state(
+                    move |ui, b: &mut Bench| {
+                        b.show(
+                            ui,
+                            &units,
+                            &mut selected,
+                            &mut crate::worker::Manual::default(),
+                        )
+                    },
+                    bench,
+                );
+            let rss = || {
+                std::fs::read_to_string("/proc/self/status")
+                    .unwrap()
+                    .lines()
+                    .find_map(|l| l.strip_prefix("VmRSS:"))
+                    .and_then(|v| v.trim().trim_end_matches(" kB").parse::<u64>().ok())
+                    .unwrap_or(0)
+            };
+            let rss_start = rss();
+            let mut arrivals: Vec<(Instant, i64)> = Vec::new();
+            let (mut frames, mut latencies) = (Vec::new(), Vec::new());
+            let mut drawn = 0;
+            let mut samples = Vec::new();
+            let frame = Duration::from_secs_f64(1.0 / 60.0);
+            let mut next = Instant::now();
+            while start.elapsed() < Duration::from_secs(u64::from(seconds) - 1) {
+                std::thread::sleep(next.saturating_duration_since(Instant::now()));
+                next += frame;
+                let t = Instant::now();
+                if samples.len() < (start.elapsed().as_secs() / 10) as usize {
+                    samples.push(rss() / 1024);
+                }
+                h.step();
+                h.render().unwrap();
+                let done = Instant::now();
+                frames.push((done - t).as_secs_f64() * 1e3);
+                arrivals.extend(arrived.try_iter());
+                let end = h
+                    .state()
+                    .answer()
+                    .and_then(|a| a.extent.clone())
+                    .map_or(0, |e| e.end);
+                if end > drawn {
+                    drawn = end;
+                    // The message that brought the newest pair drawn.
+                    if let Some((at, _)) = arrivals.iter().find(|(_, e)| *e >= end) {
+                        latencies.push((done - *at).as_secs_f64() * 1e3);
+                    }
+                }
+            }
+            feeder.join().unwrap();
+            let rss_end = rss();
+            let pct = |v: &mut Vec<f64>, p: f64| {
+                v.sort_by(f64::total_cmp);
+                v.get(((v.len() as f64 - 1.0) * p).round() as usize)
+                    .copied()
+                    .unwrap_or(f64::NAN)
+            };
+            eprintln!("{rate} pairs/s: RSS every 10 s {samples:?} MiB");
+            eprintln!(
+                "{rate} pairs/s: frame {:.2} / {:.2} ms (median / p95, {} frames); new data to the \
+                 screen {:.1} / {:.1} ms ({} updates); RSS {} -> {} MiB",
+                pct(&mut frames, 0.5),
+                pct(&mut frames, 0.95),
+                frames.len(),
+                pct(&mut latencies, 0.5),
+                pct(&mut latencies, 0.95),
+                latencies.len(),
+                rss_start / 1024,
+                rss_end / 1024,
+            );
         }
     }
 }

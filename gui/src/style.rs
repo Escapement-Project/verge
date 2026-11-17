@@ -139,7 +139,7 @@ impl Role {
         }
     }
 
-    fn font(self) -> FontId {
+    pub fn font(self) -> FontId {
         let (size, family) = match self {
             Role::Display => (52.0, Family::Display),
             Role::Title => (18.0, Family::Display),

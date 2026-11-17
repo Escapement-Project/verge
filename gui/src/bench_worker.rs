@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use escapement_verge_probe::aux::Aux;
 use escapement_verge_probe::capture::Recorder;
 use escapement_verge_probe::stream::{EndReason, Message};
+use escapement_verge_probe::tickwave::{Context as Recording, Snapshots};
 use escapement_verge_probe::{
     BoardKind, Bus, CommandError, DioState, EnergyCaptureSample, EnergyError, Refused, Unit,
     VergeControl,
@@ -111,6 +112,10 @@ pub struct Status {
     pub dio_reason: Option<DioUnavailable>,
     pub confirm_dio: Option<DioChange>,
     pub edge_losses: u64,
+    /// Marker-loss reports in the recording under way.
+    pub marker_losses: u64,
+    /// The recording under way's latest snapshot, for the view to take.
+    pub snapshots: Option<Snapshots>,
 }
 
 pub struct Session<L: escapement_verge_probe::aux::AuxLink> {
@@ -124,6 +129,8 @@ pub struct Session<L: escapement_verge_probe::aux::AuxLink> {
     poll_at: Instant,
     stream_mask: u8,
     stream_levels: u8,
+    /// The firmware's version, which a recording names.
+    software: Option<String>,
 }
 
 impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
@@ -164,6 +171,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
             poll_at: Instant::now(),
             stream_mask: 0,
             stream_levels: 0,
+            software: unit.verge().map(|ours| ours.firmware.clone()),
         };
         // Opening a standalone unit's Aux has checked DIO already.
         if pro_board {
@@ -283,7 +291,17 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                let recorder = Recorder::create(&path)?;
+                let (recorder, snapshots) = Recorder::tickwave(
+                    &path,
+                    Recording {
+                        instrument: Some("MCU-Link Pro".into()),
+                        software: self.software.clone(),
+                        started_utc: Some(
+                            humantime::format_rfc3339_millis(std::time::SystemTime::now())
+                                .to_string(),
+                        ),
+                    },
+                )?;
                 let mut control = VergeControl::new(&mut self.aux);
                 let mask = if self.status.dio_reason.is_none() {
                     0x0f
@@ -304,7 +322,9 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 if let Err(error) = started {
                     // Nothing was recorded: leave no empty capture among those kept.
                     drop(recorder);
-                    if let Err(removing) = escapement_verge_probe::capture::remove(&path) {
+                    if let Err(removing) = std::fs::remove_file(&path)
+                        && removing.kind() != std::io::ErrorKind::NotFound
+                    {
                         tracing::warn!("removing {}: {removing}", path.display());
                     }
                     return Err(error.into());
@@ -313,10 +333,12 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 self.owned = !self.status.capturing;
                 self.recorder = Some(recorder);
                 self.status.path = Some(path);
+                self.status.snapshots = Some(snapshots);
                 self.status.recording = true;
                 self.synced = false;
                 self.stream_mask = 0;
                 self.status.edge_losses = 0;
+                self.status.marker_losses = 0;
                 self.status.rate = None;
                 self.status.capturing = true;
             }
@@ -403,6 +425,13 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 if !self.synced {
                     continue;
                 }
+                // Counted as the recording takes them in: one before the header isn't in it.
+                if let Message::Markers(markers) = &message
+                    && markers.lost()
+                {
+                    self.status.marker_losses += 1;
+                    changed = true;
+                }
                 let end = if let Message::End(end) = &message {
                     Some(end.reason)
                 } else {
@@ -417,6 +446,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                     self.capture_id = None;
                     self.stopping = None;
                     self.status.recording = false;
+                    self.status.snapshots = None;
                     self.recorder.take().expect("recorder").finish()?;
                     if matches!(reason, EndReason::Failed) {
                         self.status.error =
@@ -473,6 +503,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
         self.owned = false;
         self.stopping = None;
         self.status.recording = false;
+        self.status.snapshots = None;
         // The probe first: a disk that failed may also be slow to let the writer finish.
         let mut control = VergeControl::new(&mut self.aux);
         let cleanup = match self.capture_id.take() {
@@ -560,7 +591,7 @@ mod tests {
     fn recording_a_running_capture_leaves_it_running() {
         let (_bus, mut s) = session("ours-pro-energy");
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("capture.vergecapture");
+        let path = dir.path().join("capture.tickwave");
         assert!(s.command(Command::Start {
             rate: 1000,
             path: path.clone(),
@@ -575,8 +606,8 @@ mod tests {
             s.tick().unwrap();
         }
         assert!(s.status().capturing);
-        let archive = escapement_verge_probe::capture::Archive::open(&path).unwrap();
-        assert!(archive.extent().unwrap().duration_ns() > 0);
+        let extent = read::open(&path).extent().unwrap();
+        assert!(extent.end > extent.start);
     }
     /// The panel's range choice reaches the capture it starts: the archive's header says whether
     /// the capture held the high range, and a held one has no pair read on the low range.
@@ -585,7 +616,7 @@ mod tests {
         for ranges in [EnergyRanges::Auto, EnergyRanges::High] {
             let (_bus, mut s) = session("ours-pro-debugger");
             let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("capture.vergecapture");
+            let path = dir.path().join("capture.tickwave");
             assert!(s.command(Command::Start {
                 rate: 1000,
                 path: path.clone(),
@@ -595,30 +626,27 @@ mod tests {
                 s.tick().unwrap();
             }
             s.close().unwrap();
-            let archive = escapement_verge_probe::capture::Archive::open(&path).unwrap();
             let high = ranges == EnergyRanges::High;
-            assert_eq!(archive.header().unwrap().high_range_only, high);
-            let extent = archive.extent().unwrap();
-            let samples = archive
-                .view(extent, 8192, &std::sync::atomic::AtomicBool::new(false))
-                .unwrap()
-                .samples
-                .unwrap();
-            let low = samples
+            assert_eq!(read::header(&read::open(&path)).high_range_only, high);
+            // The CSV export's range column: low, high or under.
+            let text = std::fs::read_to_string(read::export(&path, true)).unwrap();
+            let rows: Vec<&str> = text
+                .lines()
+                .filter(|l| !l.starts_with([',', 's']))
+                .collect();
+            let low = rows
                 .iter()
-                .filter(|s| {
-                    s.sample.range == Some(escapement_verge_probe::stream::CurrentRange::Low)
-                })
+                .filter(|l| l.split(',').nth(4) == Some("low"))
                 .count();
-            assert!(!samples.is_empty());
-            assert_eq!(low == 0, high, "{ranges:?}: {low} of {} low", samples.len());
+            assert!(!rows.is_empty());
+            assert_eq!(low == 0, high, "{ranges:?}: {low} of {} low", rows.len());
         }
     }
     #[test]
     fn own_capture_stops_and_debugger_does_not_block_aux() {
         let (_bus, mut s) = session("ours-pro-debugger");
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("capture.vergecapture");
+        let path = dir.path().join("capture.tickwave");
         assert!(s.command(Command::Start {
             rate: 100_000,
             path: path.clone(),
@@ -630,8 +658,7 @@ mod tests {
         }
         s.close().unwrap();
         assert!(!s.status().capturing);
-        let archive = escapement_verge_probe::capture::Archive::open(&path).unwrap();
-        assert_eq!(archive.header().unwrap().whole_rate(), 100_000);
+        assert_eq!(read::header(&read::open(&path)).whole_rate(), 100_000);
     }
     #[test]
     fn restart_ends_recording_without_stopping_replacement_capture() {
@@ -639,7 +666,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(s.command(Command::Start {
             rate: 1000,
-            path: dir.path().join("capture.vergecapture"),
+            path: dir.path().join("capture.tickwave"),
             ranges: Default::default(),
         }));
         for _ in 0..2 {
@@ -709,11 +736,12 @@ mod tests {
                 poll_at: Instant::now(),
                 stream_mask: 0,
                 stream_levels: 0,
+                software: None,
             };
             let dir = tempfile::tempdir().unwrap();
             assert!(s.command(Command::Start {
                 rate: 1000,
-                path: dir.path().join("capture.vergecapture"),
+                path: dir.path().join("capture.tickwave"),
                 ranges: Default::default(),
             }));
             assert!(s.capture_id.is_none());
@@ -736,7 +764,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(s.command(Command::Start {
             rate: 1000,
-            path: dir.path().join("capture.vergecapture"),
+            path: dir.path().join("capture.tickwave"),
             ranges: Default::default(),
         }));
         assert!(s.capture_id.is_none());
@@ -764,7 +792,7 @@ mod tests {
     fn a_refused_start_leaves_no_capture_behind() {
         let (_bus, mut s) = session("ours-pro");
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("capture.vergecapture");
+        let path = dir.path().join("capture.tickwave");
         assert!(s.command(Command::Start {
             rate: 0,
             path: path.clone(),
@@ -793,7 +821,6 @@ mod hardware {
     use crate::worker::{Backend, Event, Request, Worker};
     use egui_kittest::Harness;
     use escapement_verge_probe::{
-        capture::{Archive, Interval},
         detect::detect_named,
         release::{GitHub, Repo, Ureq},
         usb::UsbBus,
@@ -863,7 +890,7 @@ mod hardware {
             );
             assert!(session.status().supply, "target supply must already be on");
             assert_eq!(session.status().dio.as_ref().unwrap().outputs & 8, 0);
-            let path = directory.join(format!("markers-{rate}.vergecapture"));
+            let path = directory.join(format!("markers-{rate}.tickwave"));
             assert!(session.command(Command::Start {
                 rate,
                 path: path.clone(),
@@ -888,30 +915,21 @@ mod hardware {
                 }
             }
             session.close().unwrap();
-            let archive = Archive::open(&path).unwrap();
-            let cancel = AtomicBool::new(false);
-            let extent = archive.extent().unwrap();
-            let markers = archive.markers(extent, None, 20, &cancel).unwrap();
-            assert_eq!((sent, markers.total, markers.loss_events), (6, 6, 0));
-            assert_eq!(
-                markers
-                    .entries
-                    .iter()
-                    .map(|entry| entry.marker.number)
-                    .collect::<Vec<_>>(),
-                (40..46).collect::<Vec<_>>()
-            );
-            let view = archive.view(extent, 800, &cancel).unwrap();
-            assert!(view.statistics.samples >= 2 * u64::from(rate));
-            assert_eq!(view.lost_pairs, 0);
-            assert_eq!(
-                archive.digital(extent, 800, &cancel).unwrap().loss_events,
-                0
-            );
+            let recording = read::open(&path);
+            let numbers = read::marker_numbers(&recording);
+            let losses = &recording.sources()[0].extra["marker_losses"];
+            assert_eq!((sent, numbers.len(), losses.as_str()), (6, 6, "0"));
+            assert_eq!(numbers, (40..46).collect::<Vec<_>>());
+            let i = recording.channel("I").unwrap();
+            let pairs = read::whole(&recording).channels[i]
+                .as_ref()
+                .unwrap()
+                .samples;
+            assert!(pairs >= 2 * u64::from(rate));
+            assert_eq!(read::lost(&recording), 0);
+            assert_eq!(read::dio_losses(&recording), 0);
             for csv in [true, false] {
-                let output =
-                    directory.join(format!("markers-{rate}.{}", if csv { "csv" } else { "sr" }));
-                archive.export(&output, csv, extent, &cancel).unwrap();
+                let output = read::export(&path, csv);
                 if csv {
                     let text = std::fs::read_to_string(output).unwrap();
                     for n in 0..6 {
@@ -920,8 +938,9 @@ mod hardware {
                 }
             }
             eprintln!(
-                "markers at {rate} pairs/s: {} pairs, {} lost; {} markers, {} loss reports",
-                view.statistics.samples, view.lost_pairs, markers.total, markers.loss_events
+                "markers at {rate} pairs/s: {pairs} pairs, {} lost; {} markers, {losses} loss reports",
+                read::lost(&recording),
+                numbers.len()
             );
         }
     }
@@ -1028,7 +1047,7 @@ mod hardware {
         }
         assert!(polled_high && polled_low, "DIO3 must toggle when polled");
         for (rate, seconds) in [(1000, 3), (100_000, 12)] {
-            let path = directory.join(format!("gui-{rate}.vergecapture"));
+            let path = directory.join(format!("gui-{rate}.tickwave"));
             h.state_mut().worker.send(Request::Bench(Command::Start {
                 rate,
                 path: path.clone(),
@@ -1056,6 +1075,7 @@ mod hardware {
             let until_time = Instant::now() + Duration::from_secs(seconds);
             let mut frames = 0;
             let mut old_selection = None;
+            let mut seen = None;
             let mut selection_verified = false;
             while Instant::now() < until_time {
                 h.step();
@@ -1064,22 +1084,23 @@ mod hardware {
                 if rate == 100_000
                     && old_selection.is_none()
                     && until_time.saturating_duration_since(Instant::now()) < Duration::from_secs(6)
+                    && let Some(extent) = h.state().bench.answer().and_then(|a| a.extent.clone())
                 {
-                    let archive = Archive::open(&path).unwrap();
-                    let extent = archive.extent().unwrap();
-                    let selected = Interval::new(extent.start_ns, extent.start_ns + 1_000_000_000);
-                    let expected = archive
-                        .statistics(selected, &AtomicBool::new(false))
-                        .unwrap();
-                    h.state_mut().bench.inspect(selected, Some(selected));
-                    old_selection = Some((selected, expected));
+                    let second = h.state().bench.ticks_per_second().unwrap().round() as i64;
+                    let selected = extent.start..extent.start + second;
+                    h.state_mut().bench.select(selected.clone());
+                    old_selection = Some(selected);
                 }
                 assert!(h.state().bench.recording(), "{:?}", h.state().bench.status);
-                if let Some((interval, expected)) = &old_selection
-                    && let Some((shown, actual)) = h.state().bench.selection_statistics()
-                    && shown == *interval
+                // A selection behind the recording's end keeps its readings while it grows.
+                if let Some(selected) = &old_selection
+                    && let Some(actual) = h.state().bench.selection_statistics()
+                    && actual.interval == *selected
                 {
-                    assert_eq!(actual, expected);
+                    match &seen {
+                        Some(first) => assert_eq!(&actual, first),
+                        None => seen = Some(actual),
+                    }
                     selection_verified = true;
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -1097,28 +1118,27 @@ mod hardware {
                 "{:?}",
                 h.state().bench.status
             );
-            let archive = Archive::open(&path).unwrap();
-            let extent = archive.extent().unwrap();
-            let view = archive.view(extent, 800, &AtomicBool::new(false)).unwrap();
-            assert!(view.ended);
-            assert_eq!(view.lost_pairs, 0, "{rate} pairs/s lost samples");
-            assert!(view.statistics.samples > u64::from(rate));
-            assert!(view.statistics.mean_voltage_v().unwrap_or_default() > 1.0);
-            assert!(view.statistics.mean_current_a().unwrap_or_default() > 0.0);
-            assert_eq!(archive.header().unwrap().dio_mask, 15);
-            let digital = archive
-                .digital(extent, 800, &AtomicBool::new(false))
-                .unwrap();
-            assert_eq!(digital.loss_events, 0);
-            assert!(digital.bins.iter().any(|bin| bin.high & 8 != 0));
-            assert!(digital.bins.iter().any(|bin| bin.low & 8 != 0));
-            let csv_path = directory.join(format!("gui-{rate}.csv"));
-            archive
-                .export(&csv_path, true, extent, &AtomicBool::new(false))
-                .unwrap();
+            assert!(escapement_verge_probe::tickwave::finished(&path).unwrap());
+            let recording = read::open(&path);
+            let extent = recording.extent().unwrap();
+            let whole = read::whole(&recording);
+            let channel = |name: &str| {
+                whole.channels[recording.channel(name).unwrap()]
+                    .as_ref()
+                    .unwrap()
+            };
+            let (current, voltage) = (channel("I"), channel("V"));
+            assert_eq!(read::lost(&recording), 0, "{rate} pairs/s lost samples");
+            assert!(current.samples > u64::from(rate));
+            assert!(voltage.mean().unwrap_or_default() > 1.0);
+            assert!(current.mean().unwrap_or_default() > 0.0);
+            let header = read::header(&recording);
+            assert_eq!(header.dio_mask, 15);
+            assert_eq!(read::dio_losses(&recording), 0);
+            let csv_path = read::export(&path, true);
             let edges = {
                 use std::io::BufRead;
-                let mut levels = archive.header().unwrap().dio_levels & 8 != 0;
+                let mut levels = header.dio_levels & 8 != 0;
                 let mut edges = Vec::new();
                 for line in std::io::BufReader::new(std::fs::File::open(csv_path).unwrap()).lines()
                 {
@@ -1136,51 +1156,40 @@ mod hardware {
                 }
                 edges
             };
-            assert!(edges.len() as f64 > extent.duration_ns() as f64 / 1e9 * 50.0);
+            let seconds =
+                (extent.end - extent.start) as f64 / h.state().bench.ticks_per_second().unwrap();
+            assert!(edges.len() as f64 > seconds * 50.0);
             assert!(
                 edges.windows(2).all(|w| w[1] - w[0] < 20_000_000),
                 "a missing DIO3 transition"
             );
             eprintln!(
-                "DIO: {} transitions at {rate} pairs/s, {} loss reports; first intervals {:?} ns",
+                "DIO: {} transitions at {rate} pairs/s; first intervals {:?} ns",
                 edges.len(),
-                digital.loss_events,
                 edges
                     .windows(2)
                     .take(4)
                     .map(|w| w[1] - w[0])
                     .collect::<Vec<_>>()
             );
-            if let Some((selected, expected)) = old_selection {
+            if let (Some(selected), Some(seen)) = (old_selection, &seen) {
                 assert_eq!(
-                    archive
+                    &recording
                         .statistics(selected, &AtomicBool::new(false))
                         .unwrap(),
-                    expected
+                    seen
                 );
             }
-            let selected = Interval::new(extent.start_ns, extent.start_ns + 1_000_000_000);
-            let stats = archive
-                .statistics(selected, &AtomicBool::new(false))
-                .unwrap();
-            assert!(stats.samples > 0);
-            archive
-                .export(
-                    &directory.join(format!("gui-{rate}.sr")),
-                    false,
-                    extent,
-                    &AtomicBool::new(false),
-                )
-                .unwrap();
+            read::export(&path, false);
+            let power = channel("P");
             eprintln!(
-                "rate {rate}: {} pairs, {} lost, {} rendered frames, mean {:.6} V / {:.6} A, {:.9} J; old selection {} pairs",
-                view.statistics.samples,
-                view.lost_pairs,
+                "rate {rate}: {} pairs, {} lost, {} rendered frames, mean {:.6} V / {:.6} A, {:.9} J",
+                current.samples,
+                read::lost(&recording),
                 frames,
-                view.statistics.mean_voltage_v().unwrap_or_default(),
-                view.statistics.mean_current_a().unwrap_or_default(),
-                view.statistics.energy_j(),
-                stats.samples
+                voltage.mean().unwrap_or_default(),
+                current.mean().unwrap_or_default(),
+                power.integral(recording.timebase()),
             );
             h.render()
                 .unwrap()
@@ -1193,9 +1202,7 @@ mod hardware {
 #[cfg(test)]
 mod dio_tests {
     use super::*;
-    use escapement_verge_probe::capture::{Archive, Interval};
     use escapement_verge_probe::sim::SimBus;
-    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn debugger_markers_survive_gui_recording_and_both_exports() {
@@ -1204,7 +1211,7 @@ mod dio_tests {
         let unit = escapement_verge_probe::detect(&bus).unwrap().remove(0);
         let mut session = Session::open(&bus, &unit).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("markers.vergecapture");
+        let path = dir.path().join("markers.tickwave");
         assert!(session.command(Command::Start {
             rate: 1000,
             path: path.clone(),
@@ -1224,22 +1231,9 @@ mod dio_tests {
             session.tick().unwrap();
         }
         session.close().unwrap();
-        let archive = Archive::open(&path).unwrap();
-        let cancel = AtomicBool::new(false);
-        let extent = archive.extent().unwrap();
-        let page = archive.markers(extent, None, 10, &cancel).unwrap();
-        assert_eq!(
-            page.entries
-                .iter()
-                .map(|entry| entry.marker.number)
-                .collect::<Vec<_>>(),
-            [42, 43]
-        );
+        assert_eq!(read::marker_numbers(&read::open(&path)), [42, 43]);
         for csv in [true, false] {
-            let out = dir
-                .path()
-                .join(if csv { "markers.csv" } else { "markers.sr" });
-            archive.export(&out, csv, extent, &cancel).unwrap();
+            let out = read::export(&path, csv);
             if csv {
                 assert!(std::fs::read_to_string(out).unwrap().contains("debug step"));
             } else {
@@ -1310,7 +1304,7 @@ mod dio_tests {
                 confirmed: false,
             });
             let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("dio.vergecapture");
+            let path = dir.path().join("dio.tickwave");
             assert!(session.command(Command::Start {
                 rate: 1000,
                 path: path.clone(),
@@ -1330,29 +1324,73 @@ mod dio_tests {
                 "levels must come from edges between polls"
             );
             session.close().unwrap();
-            let archive = Archive::open(&path).unwrap();
-            assert_eq!(archive.header().unwrap().dio_mask, 15);
-            let view = archive
-                .digital(archive.extent().unwrap(), 500, &AtomicBool::new(false))
-                .unwrap();
-            assert!(view.bins.iter().any(|bin| bin.high & 8 != 0));
-            assert!(view.bins.iter().any(|bin| bin.low & 8 != 0));
+            let recording = read::open(&path);
+            assert_eq!(read::header(&recording).dio_mask, 15);
+            // DIO3, the CSV export's ninth column, is high and low in turn.
+            let text = std::fs::read_to_string(read::export(&path, true)).unwrap();
+            let dio3: Vec<&str> = text
+                .lines()
+                .skip(1)
+                .filter_map(|l| l.split(',').nth(8))
+                .collect();
+            assert!(dio3.contains(&"1") && dio3.contains(&"0"));
             assert_eq!(
-                view.loss_events,
-                u64::from(scenario == "ours-pro-edge-loss")
+                read::dio_losses(&recording),
+                usize::from(scenario == "ours-pro-edge-loss")
             );
-            let selected = Interval::new(
-                archive.extent().unwrap().start_ns,
-                archive.extent().unwrap().end_ns,
-            );
-            archive
-                .export(
-                    &dir.path().join("dio.sr"),
-                    false,
-                    selected,
-                    &AtomicBool::new(false),
-                )
-                .unwrap();
+            read::export(&path, false);
         }
+    }
+}
+
+/// What tests read back from a recording the worker wrote, through tickwave's view.
+#[cfg(test)]
+pub(crate) mod read {
+    use escapement_tickwave_egui::view::{Cache, Recording, Statistics};
+    use escapement_verge_probe::stream::Header;
+    use std::path::Path;
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    pub fn open(path: &Path) -> Recording {
+        Recording::open(
+            Arc::new(std::fs::File::open(path).unwrap()),
+            Cache::new(64 << 20),
+        )
+        .unwrap()
+    }
+    pub fn header(r: &Recording) -> Header {
+        escapement_verge_probe::tickwave::header_from(&r.sources()[0].extra).unwrap()
+    }
+    /// Each channel's statistics over the whole recording.
+    pub fn whole(r: &Recording) -> Statistics {
+        r.statistics(r.extent().unwrap(), &AtomicBool::new(false))
+            .unwrap()
+    }
+    /// The markers' numbers, in order.
+    pub fn marker_numbers(r: &Recording) -> Vec<u32> {
+        r.try_markers(r.extent().unwrap(), None, 100)
+            .unwrap()
+            .entries
+            .iter()
+            .map(|m| {
+                m.annotation.values.as_ref().unwrap()["number"]
+                    .parse()
+                    .unwrap()
+            })
+            .collect()
+    }
+    /// Pairs lost, by the current's channel.
+    pub fn lost(r: &Recording) -> u64 {
+        r.lost(r.channel("I").unwrap())
+    }
+    /// DIO edge-loss reports: the gaps each one leaves in every DIO channel.
+    pub fn dio_losses(r: &Recording) -> usize {
+        r.gaps(r.channel("DIO3").unwrap())
+    }
+    /// Writes the export of the whole recording beside it, and gives the CSV's text.
+    pub fn export(path: &Path, csv: bool) -> std::path::PathBuf {
+        let out = path.with_extension(if csv { "csv" } else { "sr" });
+        crate::bench::export(path, &out, csv, None).unwrap();
+        out
     }
 }
