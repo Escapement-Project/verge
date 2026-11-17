@@ -609,7 +609,7 @@ mod tests {
         let extent = read::open(&path).extent().unwrap();
         assert!(extent.end > extent.start);
     }
-    /// The panel's range choice reaches the capture it starts: the archive's header says whether
+    /// The panel's range choice reaches the capture it starts: the recording's header says whether
     /// the capture held the high range, and a held one has no pair read on the low range.
     #[test]
     fn a_start_uses_the_range_asked_for() {
