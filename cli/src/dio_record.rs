@@ -58,7 +58,7 @@ pub fn record<B: Bus>(
         "records its DIO pins on their own",
         "`verge dio record` needs a standalone MCU-Link, or a Pro without its energy circuit, running Verge.",
     )?;
-    let name = unit.serial().unwrap_or("the unit");
+    let name = unit.serial().unwrap_or("the probe");
     let mut reader = Reader::new(pro::open_aux(bus, &unit, Feature::Dio)?);
     let info = reader
         .control()
@@ -130,7 +130,7 @@ pub fn record<B: Bus>(
     if recorded.losses > 0 {
         say(&format!(
             "The probe lost edges {}: the recording marks those spans unknown.",
-            count(recorded.losses, "time")
+            crate::times(usize::try_from(recorded.losses).unwrap_or(usize::MAX))
         ));
     }
     if recorded.reason != EndReason::Asked {

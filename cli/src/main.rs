@@ -52,23 +52,23 @@ use crate::question::{
 
 const EXAMPLES: &str = "\
 Examples:
-  verge list               what is attached, and how each unit can be updated
-  verge update             install the latest Verge release on the only unit
+  verge list               what is attached, and how each probe can be updated
+  verge update             install the latest Verge release on the only probe
   verge --serial CJ3E7A91C2 update --release v0.3.0
   verge update --stock     put NXP's firmware back, from your LinkServer install
   verge isp flash --file build/mculink_cjtag.elf
-                           flash a unit you put into ISP mode with the jumper";
+                           flash a probe you put into ISP mode with the jumper";
 
 /// Control the Verge firmware, or update it.
 ///
 /// verge updates NXP's firmware as well as Verge. It finds every attached MCU-Link, says what it
-/// runs, and picks the best way to update it. A unit running Verge, NXP's firmware V3.122 or
+/// runs, and picks the best way to update it. A probe running Verge, NXP's firmware V3.122 or
 /// later, or daplink-rs restarts into its bootloader when asked, so it needs no jumper. Anything
 /// else needs the ISP jumper, fitted before it is plugged in.
 ///
 /// Exit status: 0 when it worked; 1 when it failed or the answer was no; 2 for a command line it
-/// could not read; 3 when the unit came back in ISP mode after a flash or a reset, so it does not
-/// run an image yet; 130 when Ctrl-C stopped an update or a question. Ctrl-C that ends a recording,
+/// could not read; 3 when the probe came back in ISP mode after a flash or a reset, so it does
+/// not run an image yet; 130 when Ctrl-C stopped an update or a question. Ctrl-C that ends a recording,
 /// a watch or a batch the usual way leaves the status that run gives.
 #[derive(Parser)]
 #[command(name = "verge", version, after_help = EXAMPLES)]
@@ -80,7 +80,7 @@ struct Cli {
     #[arg(short, long, action = ArgAction::Count, global = true)]
     verbose: u8,
 
-    /// The unit to act on, by serial number. Needed only when more than one attached unit could
+    /// The probe to act on, by serial number. Needed only when more than one attached probe could
     /// be meant and there is no terminal to ask at.
     #[arg(long, global = true)]
     serial: Option<String>,
@@ -146,22 +146,22 @@ impl Cli {
 enum Command {
     /// Say what every attached MCU-Link runs, and how each can be updated. The default.
     List,
-    /// Install a firmware on a unit, the best way its state allows.
+    /// Install a firmware on a probe, the best way its state allows.
     ///
-    /// The image is the latest Verge release unless you pick another. A unit already in ISP
+    /// The image is the latest Verge release unless you pick another. A probe already in ISP
     /// mode is flashed as it is.
     Update(UpdateArgs),
-    /// Update every unit of a chosen kind as it is plugged in, one at a time, until stopped.
+    /// Update every probe of a chosen kind as it is plugged in, one at a time, until stopped.
     ///
-    /// Choose the image and the units it takes once, answer one question, then plug units in one
-    /// after another or several on a hub. Each finished unit blinks so you can tell which to
-    /// unplug. Ctrl-C stops taking new units; the one under way finishes. Every unit gets a line
+    /// Choose the image and the probes it takes once, answer one question, then plug probes in
+    /// one after another or several on a hub. Each finished probe blinks so you can tell which to
+    /// unplug. Ctrl-C stops taking new probes; the one under way finishes. Every probe gets a line
     /// in the record file.
     Batch(BatchArgs),
-    /// Work with a unit's ROM bootloader, ISP mode: enter it, flash, reset out of it, ask it.
+    /// Work with a probe's ROM bootloader, ISP mode: enter it, flash, reset out of it, ask it.
     #[command(subcommand)]
     Isp(IspCommand),
-    /// Show a Verge release and how each attached unit compares to it.
+    /// Show a Verge release and how each attached probe compares to it.
     Release {
         /// A release tag. The latest release when left out.
         tag: Option<String>,
@@ -169,25 +169,25 @@ enum Command {
     /// Read target memory through a probe over SWD, JTAG or cJTAG, as probe-rs's read does.
     ///
     /// Prints probe-rs's hex table on stdout and nothing else: each line is its address and eight
-    /// values, four for b64. cJTAG works on a unit running Verge.
+    /// values, four for b64. cJTAG works on a probe running Verge.
     Read(read::ReadArgs),
     /// Read an image file and say what it puts into flash. Touches no USB device.
     Inspect {
         /// An ELF or S-record file.
         file: PathBuf,
     },
-    /// Drive and read the four DIO pins of a unit running Verge: on an MCU-Link Pro's J19 header,
-    /// or on a standalone MCU-Link's J8 pads.
+    /// Drive and read the four DIO pins of a probe running Verge: on an MCU-Link Pro's J19
+    /// header, or on a standalone MCU-Link's J8 pads.
     ///
     /// With no options it reads them. --high and --low make pins outputs at that level, and
     /// --input makes them inputs again. On a Pro, DIO0, DIO1 and DIO2 change direction together,
     /// and DIO3 on its own, so a change has to turn a whole group round; there LED6 (SIO) is lit
     /// while any of them is driven. On a standalone MCU-Link each pin changes on its own, and J8
-    /// is wired straight to the probe's MCU: 3.3 V only, with no ground pin of its own. The pins
-    /// keep their state between debug sessions and go back to inputs when the unit restarts.
+    /// is wired straight to the probe's MCU: 3.3 V only, with no ground pin of its own. The pins
+    /// keep their state between debug sessions and go back to inputs when the probe restarts.
     #[command(args_conflicts_with_subcommands = true)]
     Dio(DioCommand),
-    /// Restart a unit running Verge, as unplugging it would, and wait for it to come back.
+    /// Restart a probe running Verge, as unplugging it would, and wait for it to come back.
     ///
     /// The request goes to the probe's USB core rather than through CMSIS-DAP, so it works while a
     /// debugger holds the probe and when a CMSIS-DAP command never finishes. Everything the probe
@@ -196,7 +196,7 @@ enum Command {
     Restart,
     /// Read or switch the target supply of an MCU-Link Pro running Verge.
     ///
-    /// The supply feeds the target through J6, at 3.3 V or, with J5 fitted, 1.8 V, up to 400 mA.
+    /// The supply feeds the target through J6, at 3.3 V or, with J5 fitted, 1.8 V, up to 400 mA.
     /// It is off whenever the Pro starts. The state shown is the one the firmware set, not a
     /// measured voltage.
     Power(energy::PowerArgs),
@@ -224,14 +224,17 @@ enum DioAction {
     /// Record a standalone MCU-Link's DIO pins to a tickwave recording, which tickwave opens.
     ///
     /// Each pin is a digital channel. The probe stamps an edge as its interrupt takes it, a little
-    /// after the edge, to 7 ns. There are no energy readings. A Pro without its energy measurement
+    /// after the edge, to 7 ns. There are no energy readings. A Pro without its energy measurement
     /// circuit records the same way. Any other Pro records its pins beside its energy capture, with
-    /// `verge energy record --dio`. The recording goes through Verge Aux, so a debugger can hold
-    /// the probe meanwhile, and `verge dio` can drive the pins through CMSIS-DAP while it records.
-    /// Where the probe lost edges, the recording marks the pins unknown. A crash loses about the
-    /// last second. The probe reports its time while the pins are quiet, so the recording a crash
-    /// leaves covers quiet stretches too, even before the first edge. Once recording ends, verge
-    /// rewrites the file with full-size blocks.
+    /// `verge energy record --dio`.
+    ///
+    /// The recording goes through Verge Aux, so a debugger can hold the probe meanwhile, and
+    /// `verge dio` can drive the pins through CMSIS-DAP while it records. Where the probe lost
+    /// edges, the recording marks the pins unknown.
+    ///
+    /// A crash loses about the last second. The probe reports its time while the pins are quiet,
+    /// so the recording a crash leaves covers quiet stretches too, even before the first edge.
+    /// Once recording ends, verge rewrites the file with full-size blocks.
     Record(dio_record::RecordArgs),
 }
 
@@ -250,27 +253,27 @@ struct DioArgs {
 
 #[derive(Subcommand)]
 enum IspCommand {
-    /// Restart a unit into its ROM bootloader without the jumper, and leave it there.
+    /// Restart a probe into its ROM bootloader without the jumper, and leave it there.
     ///
-    /// In ISP mode a unit cannot say which board it is, so `verge isp flash` cannot check that a
-    /// Verge image is built for it. A unit known to be another board than the standalone MCU-Link
+    /// In ISP mode a probe cannot say which board it is, so `verge isp flash` cannot check that a
+    /// Verge image is built for it. A probe known to be a board other than the standalone MCU-Link
     /// is restarted only with --stock.
     Enter {
         /// You mean to flash NXP's firmware next, which goes on any board.
         #[arg(long)]
         stock: bool,
     },
-    /// Flash the unit that is in ISP mode, as after fitting the jumper.
+    /// Flash the probe that is in ISP mode, as after fitting the jumper.
     ///
-    /// With the jumper still fitted, the unit comes back in ISP mode. Then take the jumper off and
+    /// With the jumper still fitted, the probe comes back in ISP mode. Then take the jumper off and
     /// run `verge isp reset`.
     Flash(FlashArgs),
-    /// Reset a unit out of ISP mode without flashing it, so it starts the image it holds.
+    /// Reset a probe out of ISP mode without flashing it, so it starts the image it holds.
     Reset {
         #[command(flatten)]
         port: PortArg,
     },
-    /// Ask the bootloader of a unit in ISP mode what it is. Changes nothing.
+    /// Ask the bootloader of a probe in ISP mode what it is. Changes nothing.
     Info {
         #[command(flatten)]
         port: PortArg,
@@ -279,7 +282,7 @@ enum IspCommand {
 
 #[derive(Args)]
 struct PortArg {
-    /// The unit in ISP mode at this USB port, as `verge list` names it, when several are. Only
+    /// The probe in ISP mode at this USB port, as `verge list` names it, when several are. Only
     /// where the system ties a bootloader to its port, as Linux does.
     #[arg(long)]
     port: Option<String>,
@@ -307,19 +310,19 @@ struct UpdateArgs {
     /// Flash without asking first.
     #[arg(short, long)]
     yes: bool,
-    /// Install a release even when the unit runs the same or a newer build.
+    /// Install a release even when the probe runs the same or a newer build.
     #[arg(long)]
     force: bool,
 }
 
-/// Kinds of unit a batch takes.
+/// Kinds of probe a batch takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum Take {
-    /// Units running NXP's firmware.
+    /// Probes running NXP's firmware.
     Stock,
-    /// Units running Verge.
+    /// Probes running Verge.
     Verge,
-    /// Units that arrive in ISP mode, as after fitting the jumper.
+    /// Probes that arrive in ISP mode, as after fitting the jumper.
     Isp,
 }
 
@@ -335,7 +338,7 @@ enum BoardArg {
 struct BatchArgs {
     #[command(flatten)]
     source: Source,
-    /// Which units to take, as `stock,verge`.
+    /// Which probes to take, as `stock,verge`.
     #[arg(
         long,
         value_enum,
@@ -352,16 +355,16 @@ struct BatchArgs {
     /// version, are taken. Implies --take verge.
     #[arg(long)]
     verge_any: bool,
-    /// Take units attached already, not only those plugged in from now on.
+    /// Take probes attached already, not only those plugged in from now on.
     #[arg(long)]
     include_attached: bool,
     /// The board to take.
     #[arg(long, value_enum, ignore_case = true, default_value_t = BoardArg::McuLink)]
     board: BoardArg,
-    /// Stop once this many units are updated.
+    /// Stop once this many probes are updated.
     #[arg(long, value_name = "N", value_parser = parse_count)]
     count: Option<NonZeroUsize>,
-    /// The record file: one JSON line per unit. Defaults to verge-batch-<time>.jsonl here.
+    /// The record file: one JSON line per probe. Defaults to verge-batch-<time>.jsonl here.
     #[arg(long, value_name = "FILE")]
     record: Option<PathBuf>,
     /// Arm without asking first.
@@ -373,7 +376,7 @@ fn parse_count(text: &str) -> std::result::Result<NonZeroUsize, String> {
     match text.parse::<usize>() {
         Ok(n) => NonZeroUsize::new(n).ok_or_else(|| "--count has to be at least 1".to_owned()),
         Err(_) => Err(format!(
-            "--count takes a number of units, such as 20, not {text:?}"
+            "--count takes a number of probes, such as 20, not {text:?}"
         )),
     }
 }
@@ -507,7 +510,7 @@ fn main() -> ExitCode {
             } else if batch && !stop.is_cancelled() {
                 stop.cancel();
                 tracing::warn!(
-                    "taking no new units; the one under way finishes. Ctrl-C again stops it at the next safe point"
+                    "taking no new probes; the one under way finishes. Ctrl-C again stops it at the next safe point"
                 );
             } else if !cancel.is_cancelled() {
                 cancel.cancel();
@@ -617,12 +620,12 @@ fn run<B: Bus + Sync, H: Http>(
     if let Some(serial) = serial {
         let why = match &cli.command {
             Some(Command::Batch(_)) => {
-                Some("`batch` takes every unit of a kind, one after another")
+                Some("`batch` takes every probe of a kind, one after another")
             }
-            Some(Command::Inspect { .. }) => Some("`inspect` reads a file and opens no unit"),
+            Some(Command::Inspect { .. }) => Some("`inspect` reads a file and opens no probe"),
             Some(Command::Isp(
                 IspCommand::Flash(_) | IspCommand::Reset { .. } | IspCommand::Info { .. },
-            )) => Some("a unit in ISP mode reports no serial, so --port picks it instead"),
+            )) => Some("a probe in ISP mode reports no serial, so --port picks it instead"),
             _ => None,
         };
         if let Some(why) = why {
@@ -686,7 +689,7 @@ fn pick_unit<'a>(
         Err(PickError::Several(several)) if interactive() => choose(&listed(&several)),
         Err(PickError::Several(several)) => bail!("{}", self::several(&listed(&several))),
         Err(PickError::NoneFits(units)) => bail!(
-            "no attached unit {}: {}. {}",
+            "no attached probe {}: {}. {}",
             wants.does,
             clause_list(&units.iter().map(described).collect::<Vec<_>>()),
             wants.needs
@@ -702,12 +705,12 @@ fn several(units: &[&Unit]) -> String {
     // A unit in ISP mode has no serial; `update` says how to flash one.
     if units.iter().any(|unit| unit.serial().is_some()) {
         format!(
-            "{} attached units could be meant: {list}. Pick one with --serial",
+            "{} attached probes could be meant: {list}. Pick one with --serial",
             units.len()
         )
     } else {
         format!(
-            "{} attached units could be meant, and none reports a serial: {list}",
+            "{} attached probes could be meant, and none reports a serial: {list}",
             units.len()
         )
     }
@@ -718,12 +721,12 @@ fn unit_name(unit: &Unit) -> String {
     let port = unit.device.location.as_deref();
     match (unit.serial(), &unit.state, port) {
         (Some(serial), _, _) => serial.to_owned(),
-        (None, State::Bootloader, Some(port)) => format!("the unit in ISP mode at {port}"),
+        (None, State::Bootloader, Some(port)) => format!("the probe in ISP mode at {port}"),
         (None, State::MiniBootloader, Some(port)) => {
             format!("the MCU-Link mini in ISP mode at {port}")
         }
-        (None, _, Some(port)) => format!("the unit at {port}"),
-        (None, _, None) => "a unit that reports no port".to_owned(),
+        (None, _, Some(port)) => format!("the probe at {port}"),
+        (None, _, None) => "a probe that reports no port".to_owned(),
     }
 }
 
@@ -732,14 +735,16 @@ fn unit_name(unit: &Unit) -> String {
 fn described(unit: &Unit) -> String {
     let port = unit.device.location.as_deref().unwrap_or("?");
     match (&unit.state, unit.serial()) {
-        (State::Bootloader, _) => format!("the unit at {port} is in ISP mode"),
-        (State::MiniBootloader, _) => format!("the unit at {port} is an MCU-Link mini in ISP mode"),
+        (State::Bootloader, _) => format!("the probe at {port} is in ISP mode"),
+        (State::MiniBootloader, _) => {
+            format!("the probe at {port} is an MCU-Link mini in ISP mode")
+        }
         (State::Unreadable { .. }, serial) => format!(
             "the tool could not ask {} what it runs",
-            serial.map_or_else(|| format!("the unit at {port}"), str::to_owned)
+            serial.map_or_else(|| format!("the probe at {port}"), str::to_owned)
         ),
         (state, serial) => {
-            let name = serial.map_or_else(|| format!("the unit at {port}"), str::to_owned);
+            let name = serial.map_or_else(|| format!("the probe at {port}"), str::to_owned);
             match unit.hardware() {
                 Hardware::Unknown => format!("{name} runs {state}"),
                 board => format!("{name} is {board} running {state}"),
@@ -988,17 +993,17 @@ fn report(outcome: &Outcome, before: Option<&str>) -> Result<()> {
                 ),
                 _ => outputln!(
                     "Done: {} at {at} now runs {}.",
-                    after.or(before).unwrap_or("the unit"),
+                    after.or(before).unwrap_or("the probe"),
                     unit.state
                 ),
             }
             return Ok(());
         }
         Outcome::JumperStillFitted => outputln!(
-            "Flashed. The unit came back in ISP mode, so its ISP pin is still held low: by the ISP jumper, or by a probe on its debug connector. Take the jumper off or unplug the probe, then run `verge isp reset`."
+            "Flashed. The probe came back in ISP mode, so its ISP pin is still held low: by the ISP jumper, or by another probe on its debug connector. Take the jumper off or unplug the other probe, then run `verge isp reset`."
         ),
         Outcome::NotRestarted { maybe_jumper } => outputln!(
-            "Flashed and verified, but the unit is still in ISP mode: {}. Then it starts the new image.",
+            "Flashed and verified, but the probe is still in ISP mode: {}. Then it starts the new image.",
             update::not_restarted(*maybe_jumper)
         ),
     }
@@ -1061,14 +1066,14 @@ fn update_unit<B: Bus, H: Http>(
     if path == Path::Jumper {
         // Loaded first, so that a known board is refused here as on the jumper-free path, and the
         // advice names an image checked for it. A no still says how to use the jumper.
-        let lead = "This unit cannot be updated without the jumper now. verge downloads the release first, to check that it is built for this unit.";
+        let lead = "This probe cannot be updated without the jumper now. verge downloads the release first, to check that it is built for this probe.";
         let notes = offer.notes.join(" ");
         let loaded = load(&args.source, github, Some(unit), args.force, |what| {
             confirm(&[lead.to_owned()], &format!("Download {what}?"), args.yes).map_err(|no| {
                 match no.downcast_ref::<Ended>() {
                     Some(ended) if ended.code == 1 => Ended::new(
                         format!(
-                            "Nothing was downloaded. {notes} To use the jumper: unplug the unit, fit the ISP jumper, plug it back in, and run `verge isp flash` with {}.",
+                            "Nothing was downloaded. {notes} To use the jumper: unplug the probe, fit the ISP jumper, plug it back in, and run `verge isp flash` with {}.",
                             image_for(unit)
                         ),
                         1,
@@ -1080,7 +1085,7 @@ fn update_unit<B: Bus, H: Http>(
         })?;
         let again = again(&args.source, &loaded.version, github);
         bail!(
-            "this unit cannot be updated without the jumper now. {notes} To use the jumper: unplug the unit, fit the ISP jumper, plug it back in, and run `{again}`. {}",
+            "this probe cannot be updated without the jumper now. {notes} To use the jumper: unplug the probe, fit the ISP jumper, plug it back in, and run `{again}`. {}",
             in_isp_mode(unit)
         );
     }
@@ -1089,13 +1094,13 @@ fn update_unit<B: Bus, H: Http>(
     if let Some(unknown) = unknown {
         if args.yes {
             bail!(
-                "{unknown} The tool asks before putting Verge on such a unit, and --yes does not answer that: run it without --yes, at a terminal"
+                "{unknown} The tool asks before putting Verge on such a probe, and --yes does not answer that: run it without --yes, at a terminal"
             );
         }
         // Before anything is downloaded for a question nobody could answer.
         if !std::io::stdin().is_terminal() {
             bail!(
-                "{unknown} Only an answer at a terminal says yes to putting Verge on such a unit; --yes does not"
+                "{unknown} Only an answer at a terminal says yes to putting Verge on such a probe; --yes does not"
             );
         }
     }
@@ -1111,8 +1116,13 @@ fn update_unit<B: Bus, H: Http>(
     }
     let (image, name) = (&loaded.image, &loaded.name);
     log_image(image);
-    let target = unit.serial().unwrap_or("the unit in ISP mode");
-    let question = format!("Flash {name} onto {target}, {path}?");
+    let question = match path {
+        Path::FlashNow => format!("Flash {name} onto the probe in ISP mode?"),
+        _ => format!(
+            "Flash {name} onto {} without the jumper?",
+            unit.serial().unwrap_or("the probe")
+        ),
+    };
     let mut lead = Vec::new();
     if path == Path::FlashNow {
         lead.push(ISP_IDENTITY_WARNING.to_owned());
@@ -1159,7 +1169,7 @@ fn isp_flash_hint<H: Http>(units: &[Unit], source: &Source, github: &GitHub<H>) 
         .collect();
     if units.iter().any(|unit| unit.state == State::MiniBootloader) {
         return (!isp.is_empty()).then(|| {
-            "An MCU-Link mini is in ISP mode too, and the tool works with a bootloader only while no other is attached: unplug the mini first".to_owned()
+            "An MCU-Link mini is in ISP mode too, and a flash needs one bootloader alone on the bus: unplug the mini first".to_owned()
         });
     }
     let command = again(source, &ImageVersion::Unknown, github);
@@ -1167,9 +1177,9 @@ fn isp_flash_hint<H: Http>(units: &[Unit], source: &Source, github: &GitHub<H>) 
         [] => None,
         [unit] => Some(match unit.device.location.as_deref() {
             Some(port) => format!(
-                "The unit in ISP mode, at {port}, has no serial: flash it with `{command} --port {port}`"
+                "The probe in ISP mode, at {port}, has no serial: flash it with `{command} --port {port}`"
             ),
-            None => format!("The unit in ISP mode has no serial: flash it with `{command}`"),
+            None => format!("The probe in ISP mode has no serial: flash it with `{command}`"),
         }),
         several => {
             let ports: Vec<String> = several
@@ -1178,11 +1188,11 @@ fn isp_flash_hint<H: Http>(units: &[Unit], source: &Source, github: &GitHub<H>) 
                 .collect();
             match ports.first() {
                 Some(first) => Some(format!(
-                    "The units in ISP mode, at {}, have no serial: `{command} --port {first}` flashes one",
+                    "The probes in ISP mode, at {}, have no serial: `{command} --port {first}` flashes one",
                     sentence_list(&ports)
                 )),
                 None => Some(format!(
-                    "The units in ISP mode have no serial: flash one with `{command} --port PORT`, with the port `verge list` names"
+                    "The probes in ISP mode have no serial: flash one with `{command} --port PORT`, with the port `verge list` names"
                 )),
             }
         }
@@ -1193,10 +1203,10 @@ fn isp_flash_hint<H: Http>(units: &[Unit], source: &Source, github: &GitHub<H>) 
 fn in_isp_mode(unit: &Unit) -> String {
     match unit.hardware() {
         Hardware::Board(board) => format!(
-            "In ISP mode the tool cannot tell which board a unit is: that image is the one checked for this unit, {}.",
+            "In ISP mode the tool cannot tell which board a probe is: that image is the one checked for this probe, {}.",
             board.a()
         ),
-        _ => "In ISP mode the tool cannot tell which board a unit is, and this unit's firmware did not say either: check that the image is built for it.".to_owned(),
+        _ => "In ISP mode the tool cannot tell which board a probe is, and this probe's firmware did not say either: check that the image is built for it.".to_owned(),
     }
 }
 
@@ -1223,11 +1233,11 @@ fn isp_refusal<B: Bus>(bus: &B, error: UpdateError) -> anyhow::Error {
     match enters.as_slice() {
         [] => error.into(),
         [unit] => anyhow::anyhow!(
-            "no unit is in ISP mode. `verge isp enter` puts {} there without the jumper",
-            unit.serial().unwrap_or("the unit")
+            "no probe is in ISP mode. `verge isp enter` puts {} there without the jumper",
+            unit.serial().unwrap_or("the probe")
         ),
         several => anyhow::anyhow!(
-            "no unit is in ISP mode. `verge --serial SERIAL isp enter` puts one there without the jumper: {}",
+            "no probe is in ISP mode. `verge --serial SERIAL isp enter` puts one there without the jumper: {}",
             sentence_list(
                 &several
                     .iter()
@@ -1267,7 +1277,7 @@ fn flash<B: Bus, H: Http>(
     }
     confirm(
         &lead,
-        &format!("Flash {name} onto the unit in ISP mode at {location}?"),
+        &format!("Flash {name} onto the probe in ISP mode at {location}?"),
         args.yes,
     )?;
     let mut bars = Bars::new("isp flash");
@@ -1338,9 +1348,9 @@ impl Observer for BatchOutput {
             .map(|(n, what)| format!("{n} {what}"))
             .collect();
         let text = if said.is_empty() {
-            "waiting for units".to_owned()
+            "waiting for probes".to_owned()
         } else {
-            format!("waiting for units: {}", said.join(", "))
+            format!("waiting for probes: {}", said.join(", "))
         };
         match &self.idle {
             Some(spinner) => spinner.set(&text),
@@ -1358,13 +1368,13 @@ impl Observer for BatchOutput {
             self.stop.cancel();
         }
         let serial = match (&record.serial_before, &record.serial_after) {
-            (Some(before), Some(after)) if before != after => format!("{before} -> {after}"),
+            (Some(before), Some(after)) if before != after => format!("{before} → {after}"),
             (Some(before), _) => before.clone(),
             (None, Some(after)) => after.clone(),
             (None, None) => "-".to_owned(),
         };
         let firmware = match &record.firmware_after {
-            Some(after) => format!("{} -> {after}", record.firmware_before),
+            Some(after) => format!("{} → {after}", record.firmware_before),
             None => record.firmware_before.clone(),
         };
         let reason = record
@@ -1440,7 +1450,7 @@ fn batch<B: Bus + Sync, H: Http>(
     if filter.bootloaders {
         lead.push(ISP_IDENTITY_WARNING.to_owned());
     }
-    lead.push("The batch flashes each unit it takes without asking again.".to_owned());
+    lead.push("The batch flashes each probe it takes without asking again.".to_owned());
     let question = |what: &str| format!("{what} onto {}?", filter.describe());
     let mut asked = false;
     let loaded = load(&args.source, github, None, true, |what| {
@@ -1466,7 +1476,7 @@ fn batch<B: Bus + Sync, H: Http>(
         PathBuf::from(format!("verge-batch-{stamp}.jsonl"))
     });
     if filter.bootloaders && args.yes {
-        tracing::warn!("{ISP_IDENTITY_WARNING} Taking units in ISP mode, as --yes says.");
+        tracing::warn!("{ISP_IDENTITY_WARNING} Taking probes in ISP mode, as --yes says.");
     }
     if !asked {
         confirm(&lead, &question(&format!("Flash {name}")), args.yes)?;
@@ -1482,7 +1492,7 @@ fn batch<B: Bus + Sync, H: Http>(
         stop: stop.clone(),
     };
     outputln!(
-        "Armed: {name}, for {}. Recording to {}. Plug units in; Ctrl-C stops taking new ones.",
+        "Armed: {name}, for {}. Recording to {}. Plug probes in; Ctrl-C stops taking new ones.",
         filter.describe(),
         path.display()
     );
@@ -1511,7 +1521,7 @@ fn batch<B: Bus + Sync, H: Http>(
     if tally.failed > 0 {
         bail!(
             "{} failed; the record file {} says why",
-            count(tally.failed, "unit"),
+            count(tally.failed, "probe"),
             path.display()
         );
     }
@@ -1521,16 +1531,25 @@ fn batch<B: Bus + Sync, H: Http>(
     }
 }
 
-/// "1 unit", "2 units".
+/// "1 probe", "2 probes".
 fn count(n: usize, what: &str) -> String {
     format!("{n} {what}{}", if n == 1 { "" } else { "s" })
+}
+
+/// How often, as "once" or "3 times".
+fn times(n: usize) -> String {
+    if n == 1 {
+        "once".to_owned()
+    } else {
+        format!("{n} times")
+    }
 }
 
 /// Why a batch did not arm, with the flags that change it.
 fn arm_refusal(error: &ArmError) -> anyhow::Error {
     match error {
         ArmError::OursUndated => anyhow::anyhow!(
-            "{error}. Pass --verge-any to take every unit running Verge, or leave Verge out, as with --take stock"
+            "{error}. Pass --verge-any to take every probe running Verge, or leave Verge out, as with --take stock"
         ),
         ArmError::NotForBoard { .. } => anyhow::anyhow!(
             "{error}. Pick a Verge image built for it, or NXP's firmware with --stock"
@@ -1562,7 +1581,7 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
         let after = match pro.change_dio(&change) {
             Ok(after) => after,
             Err(DioError::Off) => bail!(
-                "{serial} started with its USB-SIO jumper, J15, fitted, which turns the DIO pins off. Remove the jumper and replug the unit"
+                "{serial} started with its USB-SIO jumper, J15, fitted, which turns the DIO pins off. Take J15 off, then unplug the probe and plug it back in"
             ),
             Err(DioError::Held(held)) => bail!(
                 "a bench tool has given {serial}'s {} to its command marker. Run `verge restart` to give {} back",
@@ -1614,7 +1633,7 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
         let held = if pro_board { 0 } else { dio::ALL & !after.pins };
         if held != 0 {
             outputln!(
-                "A bench tool's command marker holds {} until the unit restarts.",
+                "A bench tool's command marker holds {} until the probe restarts.",
                 dio::names(held)
             );
         }
@@ -1635,14 +1654,14 @@ fn restart<B: Bus>(bus: &B, serial: Option<&str>) -> Result<()> {
     let wants = Wants {
         fits: Unit::takes_restart,
         does: "runs Verge",
-        needs: "`verge restart` restarts only a unit running Verge.",
+        needs: "`verge restart` restarts only a probe running Verge.",
     };
     let unit = pick_unit(&units, serial, &wants)?;
-    let name = unit.serial().unwrap_or("the unit");
+    let name = unit.serial().unwrap_or("the probe");
     if !unit.takes_restart() {
         match &unit.state {
             State::Unreadable { reason, .. } if reason == detect::HELD => bail!(
-                "the tool could not ask {name} what it runs ({reason}), so it sends no restart request. Close that program, or unplug the unit"
+                "the tool could not ask {name} what it runs ({reason}), so it sends no restart request. Close that program, or unplug the probe"
             ),
             State::Unreadable { reason, .. } => bail!(
                 "the tool could not ask {name} what it runs ({reason}), so it sends no restart request: only Verge takes one"
@@ -1709,15 +1728,15 @@ fn already_in_isp<B: Bus>(bus: &B, units: &[&Unit]) -> anyhow::Error {
         .collect();
     match ports.as_slice() {
         [port] => anyhow::anyhow!(
-            "the unit at {port} is in ISP mode already. `verge isp flash` flashes it; `verge isp reset` starts the image it holds"
+            "the probe at {port} is in ISP mode already. `verge isp flash` flashes it; `verge isp reset` starts the image it holds"
         ),
         [first, ..] if bus.tells_bootloaders_apart() => anyhow::anyhow!(
-            "{} units are in ISP mode already, at {}, and report no serial. `verge isp flash --port {first}` flashes one; `verge isp reset --port {first}` starts the image it holds",
+            "{} probes are in ISP mode already, at {}, and report no serial. `verge isp flash --port {first}` flashes one; `verge isp reset --port {first}` starts the image it holds",
             ports.len(),
             sentence_list(&ports)
         ),
         _ => anyhow::anyhow!(
-            "{} units are in ISP mode already, at {}. Unplug all but one, then `verge isp flash` flashes it",
+            "{} probes are in ISP mode already, at {}. Unplug all but one, then `verge isp flash` flashes it",
             ports.len(),
             sentence_list(&ports)
         ),
@@ -1734,7 +1753,7 @@ fn bootloader<B: Bus>(bus: &B, serial: Option<&str>, stock: bool, cancel: &Cance
     let wants = Wants {
         fits: running,
         does: "runs a firmware",
-        needs: "`verge isp enter` sends a unit running a firmware into ISP mode.",
+        needs: "`verge isp enter` sends a probe running a firmware into ISP mode.",
     };
     let unit = pick_unit(&units, serial, &wants)?;
     if unit.state == State::MiniBootloader {
@@ -1745,7 +1764,7 @@ fn bootloader<B: Bus>(bus: &B, serial: Option<&str>, stock: bool, cancel: &Cance
     }
     if let Err(refused) = update::check_entry(unit, stock) {
         bail!(
-            "{refused}. To put NXP's firmware on it, run `verge isp enter --stock`, then `verge isp flash --stock`. To put a Verge image built for it on it, run `verge update --file IMAGE` instead, which checks that the image declares this board before anything is flashed"
+            "{refused}. To put NXP's firmware on it, run `verge isp enter --stock`, then `verge isp flash --stock`. For a Verge image built for this board, run `verge update --file IMAGE` instead, which checks that the image declares the board before anything is flashed"
         );
     }
     let mut bars = Bars::new("isp enter");
@@ -1768,19 +1787,19 @@ fn bootloader<B: Bus>(bus: &B, serial: Option<&str>, stock: bool, cancel: &Cance
     };
     match unit.hardware() {
         Hardware::Board(board) if stock => outputln!(
-            "The unit, {}, is in ISP mode at {at}. Flash it with `{flash} --stock`.",
+            "The probe, {}, is in ISP mode at {at}. Flash it with `{flash} --stock`.",
             board.a()
         ),
         Hardware::Board(board) => outputln!(
-            "The unit, {}, is in ISP mode at {at}, where the tool cannot tell its board. Flash it with `{flash}` and an image built for {}: the question names the boards the image is for.",
+            "The probe, {}, is in ISP mode at {at}, where the tool cannot tell its board. Flash it with `{flash}` and an image built for {}. Before it flashes, `{flash}` names the boards the image is built for.",
             board.a(),
             board.a()
         ),
         _ if stock => {
-            outputln!("The unit is in ISP mode at {at}. Flash it with `{flash} --stock`.")
+            outputln!("The probe is in ISP mode at {at}. Flash it with `{flash} --stock`.")
         }
         _ => outputln!(
-            "The unit is in ISP mode at {at}. Its firmware did not say which board it is, so check that an image is built for it before you flash it with `{flash}`."
+            "The probe is in ISP mode at {at}. Its firmware did not say which board it is, so check that an image is built for it before you flash it with `{flash}`."
         ),
     }
     Ok(())
@@ -1792,7 +1811,7 @@ fn reset<B: Bus>(bus: &B, port: Option<&str>, cancel: &Cancel) -> Result<()> {
     drop(bars);
     let outcome = outcome.map_err(|error| match error {
         UpdateError::NoneInIsp => {
-            anyhow::anyhow!("no unit is in ISP mode, so there is nothing to reset")
+            anyhow::anyhow!("no probe is in ISP mode, so there is nothing to reset")
         }
         error => explain(error, None, None),
     })?;
@@ -1800,17 +1819,17 @@ fn reset<B: Bus>(bus: &B, port: Option<&str>, cancel: &Cancel) -> Result<()> {
         Outcome::Running(unit) => {
             outputln!(
                 "Done: {} at {} runs {}.",
-                unit.serial().unwrap_or("the unit"),
+                unit.serial().unwrap_or("the probe"),
                 unit.device.location.as_deref().unwrap_or("?"),
                 unit.state
             );
             return Ok(());
         }
         Outcome::JumperStillFitted => outputln!(
-            "The unit came back in ISP mode. Either its ISP pin is still held low, by the ISP jumper or by a probe on its debug connector, or its flash holds no image the ROM starts. Take the jumper off or unplug the probe and reset it again, or flash an image with `verge isp flash`."
+            "The probe came back in ISP mode. Either its ISP pin is still held low, by the ISP jumper or by another probe on its debug connector, or its flash holds no image the ROM starts. Take the jumper off or unplug the other probe and reset it again, or flash an image with `verge isp flash`."
         ),
         Outcome::NotRestarted { maybe_jumper } => outputln!(
-            "The unit is still in ISP mode: {}.",
+            "The probe is still in ISP mode: {}.",
             update::not_restarted(maybe_jumper)
         ),
     }
@@ -1980,11 +1999,11 @@ fn explain(error: UpdateError, again: Option<&str>, unit: Option<&Unit>) -> anyh
         (UpdateError::RomSilent { .. }, _) => Some(update::ROM_SILENT_ADVICE.to_owned()),
         (UpdateError::Isp(_), Some(again)) => Some(match board {
             Some(board) => format!(
-                "The unit, {}, may be in ISP mode with a partial image. There the tool cannot tell its board, so flash it again with the same image, which is built for it: `{again}`.",
+                "The probe may be in ISP mode with a partial image. It said it was {} before, and in ISP mode the tool cannot ask it, so flash it again with the same image, which is built for it: `{again}`.",
                 board.a()
             ),
             None => format!(
-                "The unit may be in ISP mode with a partial image. `{again}` flashes it again."
+                "The probe may be in ISP mode with a partial image. `{again}` flashes it again."
             ),
         }),
         (UpdateError::NoReturn(_) | UpdateError::Ambiguous { .. }, _) => {
@@ -2005,6 +2024,13 @@ fn explain(error: UpdateError, again: Option<&str>, unit: Option<&Unit>) -> anyh
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_count_of_times_says_once_for_one() {
+        assert_eq!(times(1), "once");
+        assert_eq!(times(2), "2 times");
+        assert_eq!(times(0), "0 times");
+    }
 
     /// A release the lookup found and the tool then refused is not a failed lookup.
     #[test]

@@ -382,7 +382,7 @@ impl Bench {
                 self.failed = true;
                 tracing::error!("bench: {error}");
             }
-            self.notice = Some(error.clone());
+            self.notice = Some(sentence(error));
         }
         self.status = Some(status);
     }
@@ -693,7 +693,7 @@ impl Bench {
                 .as_ref()
                 .is_some_and(|s| s.confirm_dio.is_some());
         let recording = self.recording();
-        let name = label(ui, "Unit");
+        let name = label(ui, "Probe");
         let chosen = units
             .iter()
             .find(|u| Some(&u.device.instance) == selected.as_ref());
@@ -702,7 +702,7 @@ impl Bench {
                 .width(ui.available_width())
                 .selected_text(text(
                     Role::Code,
-                    chosen.map_or_else(|| "Select a unit".to_owned(), who),
+                    chosen.map_or_else(|| "Select a probe".to_owned(), who),
                 ))
                 .show_ui(ui, |ui| {
                     for unit in units {
@@ -759,7 +759,7 @@ impl Bench {
             } else {
                 let free = !recording && !asking && self.restarting.is_none();
                 let response = outline(ui, "Restart", free)
-                    .on_hover_text("Restarts the unit, as unplugging it would.");
+                    .on_hover_text("Restarts the probe, as unplugging it would.");
                 if response.clicked() {
                     self.asking = Some(Question::Restart);
                 }
@@ -852,7 +852,7 @@ impl Bench {
 
     /// The way to an update, for a unit Bench refuses for what it runs.
     fn update_offer(&mut self, ui: &mut Ui) {
-        if outline(ui, "Update under Units", true).clicked() {
+        if outline(ui, "Update under Probes", true).clicked() {
             self.to_units = true;
         }
     }
@@ -881,7 +881,7 @@ impl Bench {
         }
         let pins = status.dio.as_ref().map_or(0, |dio| dio.pins);
         let why = if !status.dio_stream {
-            Some("This build of Verge predates DIO recording: update it under Units.")
+            Some("This build of Verge predates DIO recording: update it under Probes.")
         } else if status.dio_reason.is_some() || pins == 0 {
             Some("No DIO pins to record: the DIO section says why.")
         } else {
@@ -923,7 +923,7 @@ impl Bench {
                     text(
                         Role::Body,
                         "A bench tool has given the DIO pins to its command marker. Restart the \
-                         unit to give them back.",
+                         probe to give them back.",
                     )
                     .color(face.ink_2),
                 )
@@ -940,7 +940,7 @@ impl Bench {
                     text(
                         Role::Body,
                         format!(
-                            "{} {} held by a bench tool's command marker. Restart the unit to \
+                            "{} {} held by a bench tool's command marker. Restart the probe to \
                              give them back.",
                             pin_list(held),
                             if held.count_ones() == 1 { "is" } else { "are" }
@@ -1123,7 +1123,7 @@ impl Bench {
                     let a = &marker.annotation;
                     let number = a.values.as_ref().and_then(|v| v.get("number"));
                     let words = [
-                        Some(format!("{:.6}s", channels.seconds(marker.cursor.tick))),
+                        Some(marker_time(channels.seconds(marker.cursor.tick))),
                         number.cloned(),
                         a.label.clone(),
                     ]
@@ -1270,11 +1270,11 @@ impl Bench {
         );
         let total = match status.total {
             Some(EnergyTotal::Total(total)) => Some(format!(
-                "total {} over {} pairs since the start",
+                "total {} over {} samples since the start",
                 si(total.energy_nanojoules as f64 * 1e-9, "J"),
                 total.integrated_pairs
             )),
-            Some(EnergyTotal::NoSample) => Some("total: no calibrated pair yet".to_owned()),
+            Some(EnergyTotal::NoSample) => Some("total: no calibrated sample yet".to_owned()),
             _ => None,
         };
         if let Some(total) = total {
@@ -1301,7 +1301,7 @@ impl Bench {
             ui.label(
                 match status.rate {
                     None => text(Role::Body, "Waiting for the stream"),
-                    Some(rate) => text(Role::Figures, format!("{rate} pairs/s · recording")),
+                    Some(rate) => text(Role::Figures, format!("{rate} samples/s · recording")),
                 }
                 .color(face.ink),
             );
@@ -1316,7 +1316,7 @@ impl Bench {
                     text(
                         Role::Body,
                         format!(
-                            "The last capture failed after {} over {} pairs: the ADC overran, its \
+                            "The last capture failed after {} over {} samples: the ADC overran, its \
                              DMA failed or the probe fell behind reading it. Starting a capture \
                              clears it.",
                             si(total.energy_nanojoules as f64 * 1e-9, "J"),
@@ -1338,9 +1338,9 @@ impl Bench {
                             Role::Body,
                             match status.running_rate {
                                 Some(rate) => {
-                                    format!("Running at {rate} pairs/s, started elsewhere")
+                                    format!("Started elsewhere, at {rate} samples/s")
                                 }
-                                None => "Running at its own rate, started elsewhere".to_owned(),
+                                None => "Started elsewhere, at its own rate".to_owned(),
                             },
                         )
                         .color(face.ink),
@@ -1351,7 +1351,7 @@ impl Bench {
                 ui.add(
                     egui::DragValue::new(&mut self.rate)
                         .range(1..=100_000)
-                        .suffix(" pairs/s"),
+                        .suffix(" samples/s"),
                 );
                 ui.horizontal_wrapped(|ui| {
                     for rate in [1_000, 25_000, 65_000, 100_000] {
@@ -1644,10 +1644,10 @@ impl Bench {
                         "Export"
                     },
                 )
-                .on_hover_text("Exports keep whole pairs at the selection's ends.");
+                .on_hover_text("Exports keep whole samples at the selection's ends.");
                 let why = if open && !pairs {
                     "This recording holds DIO edges only. CSV and sigrok exports need voltage and \
-                     current pairs."
+                     current samples."
                 } else if self.recording() {
                     "Export once the recording stops."
                 } else {
@@ -1728,10 +1728,17 @@ impl Bench {
 
     fn toolbar(&mut self, ui: &mut Ui) {
         let rate = self.channels.as_ref().map(|c| c.rate);
-        // A recording of DIO edges alone has no trace to choose.
-        let pairs = self.channels.as_ref().is_none_or(|c| c.i.is_some());
+        // A recording of DIO edges alone has no trace to choose. With no recording open, only a
+        // probe that captures energy can give the graph one.
+        let trace = match &self.channels {
+            Some(channels) => channels.i.is_some(),
+            None => self
+                .status
+                .as_ref()
+                .is_some_and(|s| s.connected && s.energy),
+        };
         ui.horizontal_wrapped(|ui| {
-            if pairs {
+            if trace {
                 for quantity in [Quantity::Current, Quantity::Voltage, Quantity::Power] {
                     if choice(ui, quantity.word(), self.quantity == quantity).clicked()
                         && self.quantity != quantity
@@ -1754,12 +1761,14 @@ impl Bench {
                     };
                 }
             }
-            ui.add_space(space::M);
+            if trace || rate.is_some() {
+                ui.add_space(space::M);
+            }
             if choice(ui, "Select", self.state.select_mode).clicked() {
                 self.state.select_mode = !self.state.select_mode;
             }
             let fitted = matches!(self.state.y, Y::Fit);
-            if choice(ui, "Fit Y", fitted).clicked() {
+            if (trace || self.channels.is_some()) && choice(ui, "Fit Y", fitted).clicked() {
                 self.state.y = match (fitted, &self.shown) {
                     // Off the fit where it stands: the range drawn last frame.
                     (true, Some(shown)) => Y::Fixed {
@@ -1867,7 +1876,7 @@ impl Bench {
         let (lost, dio_losses) = self.losses(&viewer, i, &lanes);
         if lost > 0 {
             ui.label(
-                text(Role::Body, format!("{lost} pairs lost in this recording"))
+                text(Role::Body, format!("{lost} samples lost in this recording"))
                     .color(face.attention_ink),
             );
         }
@@ -2027,7 +2036,7 @@ fn who(unit: &Unit) -> String {
         (State::Bootloader, _) => format!("LPC55S69 bootloader at {at}"),
         (State::MiniBootloader, _) => format!("MCU-Link mini bootloader at {at}"),
         (_, Some(serial)) => serial.to_owned(),
-        (_, None) => format!("the unit at {at}"),
+        (_, None) => format!("the probe at {at}"),
     }
 }
 
@@ -2055,7 +2064,7 @@ fn refusal(unit: &Unit) -> Option<(String, bool)> {
     let name = sentence_case(&who(unit));
     Some(match &unit.state {
         State::Bootloader => (
-            format!("{name} is a unit in ISP mode. Bench needs it running Verge."),
+            format!("{name} is a probe in ISP mode. Bench needs it running Verge."),
             true,
         ),
         State::MiniBootloader => (
@@ -2066,8 +2075,8 @@ fn refusal(unit: &Unit) -> Option<(String, bool)> {
             firmware: Jumpered::Ours,
         } => (
             format!(
-                "{name} runs Verge with its SWD jumper fitted. Bench reaches a unit only without \
-                 it: unplug the unit, take the jumper off and plug it back in."
+                "{name} runs Verge with its SWD jumper fitted. Bench reaches a probe only without \
+                 it: unplug the probe, take the jumper off and plug it back in."
             ),
             false,
         ),
@@ -2178,6 +2187,12 @@ fn palette(face: &style::Face, ui: &Ui) -> Palette {
 /// The left panel's width, the Units view's.
 const SIDE: f32 = 300.0;
 
+/// A marker's time in seconds, to the microsecond, without trailing zeros: "1.4 s".
+fn marker_time(seconds: f64) -> String {
+    let digits = format!("{seconds:.6}");
+    format!("{} s", digits.trim_end_matches('0').trim_end_matches('.'))
+}
+
 /// `value` in `unit`, with the SI prefix that leaves one to three digits before the point.
 fn si(value: f64, unit: &str) -> String {
     const PREFIXES: [(f64, &str); 6] = [
@@ -2238,7 +2253,7 @@ const READINGS: [(&str, Value); 9] = [
     ("duration", |r| {
         si((r.interval.end - r.interval.start) as f64 / r.rate, "s")
     }),
-    ("pairs", |r| {
+    ("samples", |r| {
         r.current.map_or("…".into(), |c| c.samples.to_string())
     }),
     ("min", |r| {
@@ -2509,7 +2524,7 @@ mod tests {
         let window = answer.statistics[0].channels[i].as_ref().unwrap();
         assert_eq!(window.samples, 10_000);
         h.step();
-        assert!(h.query_by_label("10000").is_some(), "the pairs reading");
+        assert!(h.query_by_label("10000").is_some(), "the samples reading");
         // The figures the readings take from: amps, and a charge that is their integral.
         let mean = window.mean().unwrap();
         assert!(mean > 0.0018 && mean < 0.0025, "{mean}");
@@ -2535,7 +2550,7 @@ mod tests {
                 .is_some_and(|a| a.statistics.first().is_some_and(|s| s.interval == window))
         });
         h.step();
-        assert!(h.query_by_label("3000").is_some(), "the pairs reading");
+        assert!(h.query_by_label("3000").is_some(), "the samples reading");
         assert!(h.query_by_label("10.00 s").is_some(), "the duration");
         assert!(h.query_by_label("7.000 s").is_some(), "the time unmeasured");
     }
@@ -2629,7 +2644,7 @@ mod tests {
             h.query_by_label("1 marker-loss report. Some markers are missing.")
                 .is_some()
         );
-        click(&mut h, "2.000000s · 40 · step 0");
+        click(&mut h, "2 s · 40 · step 0");
         let at = seconds(&h, 2.0);
         match &h.state().state.window {
             Window::At(w) => assert_eq!((w.start + w.end) / 2, at, "{w:?}"),
@@ -2739,6 +2754,14 @@ mod tests {
     }
 
     #[test]
+    fn a_marker_time_keeps_its_microseconds_without_trailing_zeros() {
+        assert_eq!(marker_time(2.0), "2 s");
+        assert_eq!(marker_time(10.0), "10 s");
+        assert_eq!(marker_time(1.4), "1.4 s");
+        assert_eq!(marker_time(1.400123), "1.400123 s");
+    }
+
+    #[test]
     fn a_dio_only_recording_draws_its_lanes_and_offers_no_export() {
         let dir = tempfile::tempdir().unwrap();
         let mut h = opened(dir.path(), &dio_edges());
@@ -2751,7 +2774,14 @@ mod tests {
         let answer = h.state().answer().unwrap();
         assert_eq!(Some(answer.window.clone()), answer.extent);
         // No pairs: no trace to choose, and no readings of them. Each pin's edges instead.
-        for absent in ["Current", "Voltage", "Power", "Pairs", "Mean", "Unmeasured"] {
+        for absent in [
+            "Current",
+            "Voltage",
+            "Power",
+            "Samples",
+            "Mean",
+            "Unmeasured",
+        ] {
             assert!(h.query_by_label(absent).is_none(), "{absent}");
         }
         until(&mut h, "the edges", |b| !b.edges.is_empty());
@@ -2809,7 +2839,7 @@ mod tests {
         let mut h = opened(dir.path(), &messages(1000, 20_000, pulses, false, &markers));
         h.step();
         let note = h.get_by_label("Markers lost here").rect();
-        let marker = h.get_by_label("2.000000s · 40 · step 0").rect();
+        let marker = h.get_by_label("2 s · 40 · step 0").rect();
         assert!(note.bottom() <= marker.top(), "{note:?} {marker:?}");
     }
     /// A status from the picked unit while it records to `path`, or once it has stopped.

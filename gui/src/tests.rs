@@ -238,7 +238,7 @@ fn confirming_a_unit_already_in_isp_mode_says_it_may_not_be_an_mculink() {
     until(&mut h, "Install v0.3.0");
     press(&mut h, "Install v0.3.0");
     h.get_by_label_contains(&format!(
-        "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode. A release says which boards it is built for only once it is downloaded. {DOWNLOAD}"
+        "In ISP mode an MCU-Link looks like any other LPC55S69 board. A release says which boards it is built for only once it is downloaded. {DOWNLOAD}"
     ));
     // A jumper-free update restarts a unit it knows, so its confirmation does not say so.
     let mut h = harness(sim_app(SimBus::scenario("ours").unwrap(), vec![]));
@@ -246,7 +246,7 @@ fn confirming_a_unit_already_in_isp_mode_says_it_may_not_be_an_mculink() {
     press(&mut h, "Update to v0.3.0");
     h.get_by_label_contains("and flash it onto CJ3E7A91C2");
     assert!(
-        h.query_by_label_contains("cannot tell an MCU-Link")
+        h.query_by_label_contains("looks like any other LPC55S69 board")
             .is_none()
     );
 }
@@ -279,7 +279,7 @@ fn two_units_in_isp_mode_leave_nothing_to_press() {
             .accesskit_node()
             .is_disabled()
     );
-    h.get_by_label_contains("2 units are in ISP mode");
+    h.get_by_label_contains("2 probes are in ISP mode");
 }
 
 #[test]
@@ -318,7 +318,7 @@ fn a_unit_on_the_release_needs_install_anyway() {
     bus.add_ours("v0.3.0");
     let mut h = harness(sim_app(bus, vec![]));
     until(&mut h, "Nothing to update");
-    h.get_by_label_contains("The unit already runs v0.3.0.");
+    h.get_by_label_contains("The probe already runs v0.3.0.");
     h.get_by_role(Role::CheckBox).click();
     h.step();
     h.step();
@@ -641,7 +641,7 @@ fn pictures() {
             message: "the bootloader: unexpected status code: 10203 (0x27DB) MemoryCumulativeWrite"
                 .into(),
             advice: Some(
-                "The unit may be in ISP mode with a partial image. Flashing it again recovers it."
+                "The probe may be in ISP mode with a partial image. Flashing it again recovers it."
                     .into(),
             ),
             left_in_isp: true,
@@ -732,7 +732,7 @@ fn pictures() {
     backend.lock().unwrap().queued.push_back(Event::Batch(BatchEvent::State(crate::worker::BatchState {
         tally: escapement_verge_probe::batch::Tally { updated: 1, current: 1, skipped: 1, failed: 1, waiting: 1 },
         waiting: vec![("1-5".into(), Some("CJ3E7AE717".into()))],
-        paused: Some(format!("The unit at 1-2, {}, failed and is in ISP mode, maybe with a partial image. The batch waits until it is unplugged. To flash it again with the batch's image, stop the batch, then pick the unit in ISP mode under Units and flash it with release v0.3.0.", Board::McuLink.a())),
+        paused: Some(format!("The probe at 1-2, {}, failed and is in ISP mode, maybe with a partial image. The batch waits until it is unplugged. To flash it again with the batch's image, stop the batch, then pick the probe in ISP mode under Probes and flash it with release v0.3.0.", Board::McuLink.a())),
     })));
     shoot(&mut h, "15-batch-paused");
 
@@ -1084,7 +1084,7 @@ fn pictures_of_the_fix_round(
     );
     log.push(
         tracing::Level::WARN,
-        "paused. An MCU-Link mini is in ISP mode at 1-2. The batch waits until it is unplugged."
+        "Paused. An MCU-Link mini is in ISP mode at 1-2. The batch waits until it is unplugged."
             .into(),
     );
     log.push(
@@ -1222,7 +1222,7 @@ fn pictures_of_the_fix_round(
         .push_back(Event::WorkerFailed(crate::worker::JobError {
             message: "the USB worker stopped: no message".into(),
             advice: Some(
-                "Quit and start Verge again. If a flash was under way, flash the unit again."
+                "Quit and start Verge again. If a flash was under way, flash the probe again."
                     .into(),
             ),
             left_in_isp: true,
@@ -1317,7 +1317,7 @@ fn pictures_of_the_fix_round(
     shoot(&mut h, "47d-bench-dio-unavailable");
     let mut h = bench("ours-pro-energy-failed", "The last capture failed");
     shoot(&mut h, "47e-bench-capture-failed");
-    let mut h = bench("ours-pro-energy", "Running at");
+    let mut h = bench("ours-pro-energy", "Started elsewhere");
     if h.query_by_label("Turn on").is_some() {
         press(&mut h, "Turn on");
         until(&mut h, "Turn off");
@@ -1508,7 +1508,7 @@ fn a_batch_updates_units_as_they_arrive_and_records_each() {
         " KiB), and flash it onto every standalone MCU-Link running NXP's firmware or Verge older than the image, attached from now on?",
     );
     assert!(
-        h.query_by_label_contains("cannot tell an MCU-Link")
+        h.query_by_label_contains("looks like any other LPC55S69 board")
             .is_none()
     );
     press(&mut h, "Confirm");
@@ -1572,7 +1572,7 @@ fn closing_during_a_batch_stops_it_taking_units_and_waits_for_it() {
     assert!(root_commands(&h).contains(&ViewportCommand::CancelClose));
     assert!(stop.is_cancelled(), "the batch was not told to stop");
     h.step();
-    h.get_by_label_contains("The window closes when the batch's unit under way finishes.");
+    h.get_by_label_contains("The window closes when the batch's probe under way finishes.");
     backend
         .lock()
         .unwrap()
@@ -1613,11 +1613,11 @@ fn a_batch_that_takes_units_in_isp_mode_says_it_may_not_be_flashing_an_mculink()
     press(&mut h, "Batch");
     press(
         &mut h,
-        "Units that arrive in ISP mode, as after fitting the jumper",
+        "Probes that arrive in ISP mode, as after fitting the jumper",
     );
     press(&mut h, "Arm batch");
     h.get_by_label_contains(&format!(
-        "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode. {DOWNLOAD}"
+        "In ISP mode an MCU-Link looks like any other LPC55S69 board. {DOWNLOAD}"
     ));
     h.get_by_label_contains(
         "and flash it onto every standalone MCU-Link running NXP's firmware or Verge older than the image or in ISP mode",
@@ -1638,7 +1638,7 @@ fn a_batch_needs_something_to_take() {
     h.get_by_label("Cannot arm");
     // Under the field it is about, and at the foot.
     assert_eq!(
-        h.query_all_by_label_contains("Tick at least one kind of unit")
+        h.query_all_by_label_contains("Tick at least one kind of probe")
             .count(),
         2
     );
@@ -1778,7 +1778,7 @@ fn an_install_preserves_the_previous_batch_result() {
         .queued
         .push_back(Event::Batch(BatchEvent::Ended(Ok(Default::default()))));
     until(&mut h, "Ended");
-    press(&mut h, "Units");
+    press(&mut h, "Probes");
     press(&mut h, "Update to v0.3.0");
     press(&mut h, "Confirm");
     backend
@@ -1954,9 +1954,11 @@ fn ours_goes_on_a_pro_only_where_its_image_declares_it() {
     press(&mut h, "Confirm");
     until(&mut h, "Failed");
     h.get_by_label_contains(
-        "the unit is an MCU-Link Pro, and the image declares no boards, so verge takes it as a Verge image for the standalone MCU-Link only",
+        "the probe is an MCU-Link Pro, and the image declares no boards, so verge takes it as a Verge image for the standalone MCU-Link only",
     );
-    h.get_by_label_contains("Pick NXP's firmware instead");
+    h.get_by_label_contains(
+        "Pick NXP's firmware under Image, or a Verge file built for this board.",
+    );
     assert!(!bus.log().iter().any(|l| l.contains("DAP 8101")));
     press(&mut h, "Back");
 
@@ -1974,7 +1976,7 @@ fn ours_goes_on_a_pro_only_where_its_image_declares_it() {
     .unwrap();
     drop_file(&mut h, &plain);
     until(&mut h, "Not for this board");
-    h.get_by_label_contains("The unit is an MCU-Link Pro");
+    h.get_by_label_contains("The probe is an MCU-Link Pro");
     drop_file(&mut h, &pro);
     until(&mut h, "Flash pro.s19");
     std::fs::remove_dir_all(&dir).unwrap();
@@ -1988,7 +1990,7 @@ fn a_unit_that_names_no_board_is_asked_about() {
     until(&mut h, "Install v0.3.0");
     press(&mut h, "Install v0.3.0");
     h.get_by_label_contains(&format!(
-        "This unit's firmware does not say which board it is, so the tool cannot check that the image is built for it. A release says which boards it is built for only once it is downloaded. {DOWNLOAD}"
+        "This probe's firmware does not say which board it is, so nothing can check that the image is built for it. A release says which boards it is built for only once it is downloaded. {DOWNLOAD}"
     ));
 }
 
@@ -2070,7 +2072,7 @@ fn cancel_ends_an_update_still_loading_its_image() {
     // A cancel, not a failure: the headline says nothing was changed.
     until(&mut h, "Stopped");
     h.get_by_label("Nothing was changed");
-    h.get_by_label_contains("stopped before anything was sent to the unit, so nothing was changed");
+    h.get_by_label_contains("stopped before anything was sent to the probe, so nothing changed");
     assert!(h.query_by_label("Failed").is_none());
     assert!(!h.state().busy());
 }
@@ -2192,7 +2194,7 @@ fn the_jumper_advice_names_the_board_and_the_image() {
     let mut h = harness(sim_app(SimBus::scenario("pro-old").unwrap(), vec![]));
     until(&mut h, "Needs the jumper");
     h.get_by_label_contains(
-        "This unit is an MCU-Link Pro. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it with NXP's firmware, or with a file built for an MCU-Link Pro.",
+        "This probe is an MCU-Link Pro. In ISP mode the app cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it with NXP's firmware, or with a file built for an MCU-Link Pro.",
     );
     let dir = record_dir("jumper-files");
     let ours = SimFirmware::Ours {
@@ -2211,7 +2213,7 @@ fn the_jumper_advice_names_the_board_and_the_image() {
     drop_file(&mut h, &pro);
     until(&mut h, "Needs the jumper");
     h.get_by_label_contains(
-        "This unit is an MCU-Link Pro. In ISP mode the tool cannot tell its board, so flash it then with pro.s19, which is built for it.",
+        "This probe is an MCU-Link Pro. In ISP mode the app cannot tell its board, so flash it with pro.s19, which is built for it.",
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -2238,7 +2240,7 @@ fn the_question_names_the_boards_a_file_is_built_for() {
     until(&mut h, "Flash pro.s19");
     press(&mut h, "Flash pro.s19");
     h.get_by_label_contains(
-        "board in ISP mode. The image is built for the MCU-Link Pro only. Flash pro.s19",
+        "LPC55S69 board. The image is built for the MCU-Link Pro only. Flash pro.s19",
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -2340,7 +2342,7 @@ fn the_jumper_advice_does_not_vouch_for_a_release() {
     let mut h = harness(sim_app(SimBus::scenario("stock-old").unwrap(), vec![]));
     until(&mut h, "Needs the jumper");
     h.get_by_label_contains(
-        "This unit is a standalone MCU-Link. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it then with release v0.3.0 only if it is built for a standalone MCU-Link.",
+        "This probe is a standalone MCU-Link. In ISP mode the app cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it with release v0.3.0 only if it is built for a standalone MCU-Link.",
     );
     assert!(h.query_by_label_contains("which is built for it").is_none());
 }
@@ -2787,7 +2789,7 @@ fn bench_supply_controls_use_aux_and_confirm_during_capture() {
 fn bench_dio_explains_each_unavailable_state() {
     for (scenario, reason) in [
         ("ours-pro-old-aux", "predates DIO on Verge Aux"),
-        ("ours-pro-j15", "remove J15"),
+        ("ours-pro-j15", "take J15 off"),
         (
             "ours-pro-aux-taken",
             "Close the program holding it and reconnect.",
@@ -2855,6 +2857,26 @@ fn bench_drives_a_standalone_units_dio_pins() {
     );
 }
 
+/// With no recording open, the graph offers a trace to choose, and Fit Y, only where the probe
+/// captures energy: a standalone MCU-Link has none to draw.
+#[test]
+fn bench_offers_a_trace_only_where_the_probe_captures_energy() {
+    let mut h = harness(sim_app(SimBus::scenario("ours-plain").unwrap(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until(&mut h, "DIO3 output");
+    for absent in ["Current", "Voltage", "Power", "Fit Y"] {
+        assert!(h.query_by_label(absent).is_none(), "{absent}");
+    }
+    let mut h = harness(sim_app(SimBus::scenario("ours-pro").unwrap(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until(&mut h, "Fit Y");
+    for present in ["Current", "Voltage", "Power"] {
+        assert!(h.query_all_by_label(present).count() > 0, "{present}");
+    }
+}
+
 /// A Pro without its energy circuit and with J15 fitted still switches its target supply, and its
 /// DIO panel says why it has no pins.
 #[test]
@@ -2864,7 +2886,11 @@ fn bench_switches_the_supply_of_a_pro_without_its_energy_circuit_or_dio() {
     until(&mut h, "Update to v0.3.0");
     press(&mut h, "Bench");
     until(&mut h, "Turn on");
-    until_contains(&mut h, "remove J15");
+    until_contains(&mut h, "take J15 off");
+    // The reason reads as a sentence, as the panel's other text does.
+    h.get_by_label(
+        "CJ3E7A91C2 has DIO disabled: take J15 off, then unplug the probe and plug it back in.",
+    );
     assert!(h.query_by_label_contains("output").is_none());
     press(&mut h, "Turn on");
     until(&mut h, "Turn off");
@@ -3024,7 +3050,7 @@ fn a_worker_failure_during_recording_unlocks_the_window() {
         }));
     h.step();
     assert!(!h.state().busy());
-    press(&mut h, "Units");
+    press(&mut h, "Probes");
     h.step();
 }
 
@@ -3111,7 +3137,7 @@ fn a_recording_failure_keeps_a_pending_close_open() {
     h.step();
     assert!(!root_commands(&h).contains(&ViewportCommand::Close));
     assert!(!h.state().busy());
-    h.get_by_label("disk full");
+    h.get_by_label("Disk full.");
 }
 
 #[test]
@@ -3207,7 +3233,7 @@ fn nothing_attached_points_at_the_udev_rules() {
 fn a_unit_the_user_may_not_open_points_at_the_udev_rules() {
     let mut h = harness(sim_app(SimBus::scenario("denied").unwrap(), vec![]));
     until_contains(&mut h, "Your user may not open it");
-    h.get_by_label_contains("The system does not let your user open this unit.");
+    h.get_by_label_contains("The system does not let your user open this probe.");
     h.get_by_label_contains("Your user needs the udev rules");
     h.get_by_label("Getting started: USB permissions on Linux");
     assert!(
@@ -3267,7 +3293,7 @@ fn a_question_takes_the_focus_and_escape_answers_back() {
     assert!(h.query_by_label("Confirm").is_none());
     h.get_by_label("Arm batch");
 
-    press(&mut h, "Units");
+    press(&mut h, "Probes");
     press(&mut h, "Update to v0.3.0");
     h.step();
     assert!(h.get_by_label("Confirm").is_focused());
@@ -3314,6 +3340,67 @@ fn a_running_batch_keeps_stop_above_its_records() {
     assert!(stop.bottom() < 700.0, "in sight: {stop:?}");
 }
 
+/// A batch record's reason reads as a sentence on its own line, and its serial and firmware changes
+/// read with arrows.
+#[test]
+fn a_batch_record_says_its_reason_as_a_sentence() {
+    let (app, backend) = manual_app("ours", true);
+    let mut h = harness(app);
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Batch");
+    press(&mut h, "Arm batch");
+    press(&mut h, "Confirm");
+    {
+        let mut m = backend.lock().unwrap();
+        m.queued.push_back(Event::Batch(BatchEvent::Armed {
+            name: "release v0.3.0 (mculink-verge-v0.3.0.s19)".into(),
+            filter: "every probe".into(),
+        }));
+        for (port, before, after, result, reason) in [
+            (
+                "1-1",
+                "QK7RM2VTX8D41",
+                Some("CJ3E7A91C2"),
+                escapement_verge_probe::batch::Settled::Updated,
+                None,
+            ),
+            (
+                "1-4",
+                "QK7RM2VTX8D45",
+                None,
+                escapement_verge_probe::batch::Settled::Skipped,
+                Some("needs the ISP jumper. NXP's firmware V3.108 has no jumper-free update"),
+            ),
+        ] {
+            m.queued.push_back(Event::Batch(BatchEvent::Record(Box::new(
+                escapement_verge_probe::batch::Record {
+                    time: "2026-10-20T14:26:08Z".into(),
+                    port: port.into(),
+                    serial_before: Some(before.into()),
+                    firmware_before: "NXP's firmware V3.172".into(),
+                    serial_after: after.map(Into::into),
+                    firmware_after: after.map(|_| "Verge, build v0.3.0".into()),
+                    result,
+                    reason: reason.map(Into::into),
+                    seconds: None,
+                },
+            ))));
+        }
+    }
+    h.run_steps(3);
+    h.get_by_label("Needs the ISP jumper. NXP's firmware V3.108 has no jumper-free update.");
+    h.get_by_label("QK7RM2VTX8D41 → CJ3E7A91C2");
+    h.get_by_label("NXP's firmware V3.172 → Verge, build v0.3.0");
+}
+
+/// The log's bar counts its warnings and errors in words, each in the plural it takes.
+#[test]
+fn the_log_bar_counts_warnings_and_errors_in_words() {
+    let mut h = harness(sim_app(SimBus::scenario("bench").unwrap(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    h.get_by_label("0 warnings · 0 errors");
+}
+
 /// When the USB worker stops, the strip says so once on every view, and Bench does not wait for a
 /// connection that cannot come.
 #[test]
@@ -3328,15 +3415,15 @@ fn a_stopped_worker_is_reported_once_on_every_view() {
         .push_back(Event::WorkerFailed(crate::worker::JobError {
             message: "the USB worker stopped: boom".into(),
             advice: Some(
-                "Quit and start Verge again. If a flash was under way, flash the unit again."
+                "Quit and start Verge again. If a flash was under way, flash the probe again."
                     .into(),
             ),
             left_in_isp: true,
             stopped: None,
         }));
     h.step();
-    let notice = "The USB worker stopped: boom. Quit and start Verge again. If a flash was under way, flash the unit again.";
-    for view in ["Units", "Batch", "Bench"] {
+    let notice = "The USB worker stopped: boom. Quit and start Verge again. If a flash was under way, flash the probe again.";
+    for view in ["Probes", "Batch", "Bench"] {
         press(&mut h, view);
         h.run_steps(3);
         assert_eq!(h.query_all_by_label(notice).count(), 1, "{view}");
@@ -3422,7 +3509,7 @@ fn a_batch_paused_on_a_failed_unit_says_how_the_window_flashes_it() {
                 stop.cancel();
                 assert!(
                     paused.contains(
-                        "stop the batch, then pick the unit in ISP mode under Units and flash it with release v0.3.0."
+                        "stop the batch, then pick the probe in ISP mode under Probes and flash it with release v0.3.0."
                     ),
                     "{paused}"
                 );
@@ -3445,7 +3532,7 @@ fn bench_restarts_a_unit_after_asking() {
     let mut h = harness(sim_app(bus.clone(), vec![]));
     until(&mut h, "Update to v0.3.0");
     press(&mut h, "Bench");
-    until_contains(&mut h, "Restart the unit to give them back.");
+    until_contains(&mut h, "Restart the probe to give them back.");
     press(&mut h, "Restart");
     h.get_by_label_contains("Restart CJ3E7A91C2? Its DIO pins go back to inputs");
     assert!(!bus.log().iter().any(|l| l.contains("control 0x40 0x03")));
@@ -3529,7 +3616,7 @@ fn bench_shows_the_energy_total_and_a_failed_capture() {
     until(&mut h, "Update to v0.3.0");
     press(&mut h, "Bench");
     until_contains(&mut h, "total ");
-    h.get_by_label_contains(" pairs since");
+    h.get_by_label_contains(" samples since");
 
     let mut h = harness(sim_app(
         SimBus::scenario("ours-pro-energy-failed").unwrap(),
@@ -3613,9 +3700,9 @@ fn a_failure_marks_its_step_and_says_what_it_left() {
             Step::Reset,
             Step::WaitForFirmware,
         ],
-        "the unit did not come back within 10 s",
+        "the probe did not come back within 10 s",
     );
-    h.get_by_label("The unit did not come back");
+    h.get_by_label("The probe did not come back");
     h.get_by_label("Wait for the firmware: failed");
     // The steps before it are done.
     assert!(h.query_by_label("Write: failed").is_none());
@@ -3656,8 +3743,8 @@ fn bench_shows_the_rate_of_a_capture_started_elsewhere() {
     until(&mut h, "Update to v0.3.0");
     press(&mut h, "Bench");
     until(&mut h, "Record running capture");
-    until_contains(&mut h, "Running at ");
-    h.get_by_label_contains(" pairs/s, started elsewhere");
+    until_contains(&mut h, "Started elsewhere, at ");
+    h.get_by_label("Started elsewhere, at 1000 samples/s");
     for absent in ["25k", "Auto range"] {
         assert!(h.query_by_label(absent).is_none(), "{absent}");
     }
@@ -3674,7 +3761,7 @@ fn bench_refuses_a_unit_not_running_verge_once() {
     assert_eq!(h.query_all_by_label(&refusal).count(), 1);
     assert!(h.query_by_label_contains("energy measurement").is_none());
     assert!(h.query_by_label_contains("DIO pins").is_none());
-    press(&mut h, "Update under Units");
+    press(&mut h, "Update under Probes");
     until(&mut h, "Install v0.3.0");
 
     let mut h = harness(sim_app(SimBus::scenario("isp").unwrap(), vec![]));
@@ -3682,7 +3769,7 @@ fn bench_refuses_a_unit_not_running_verge_once() {
     press(&mut h, "Bench");
     h.step();
     h.get_by_label(
-        "LPC55S69 bootloader at 1-1 is a unit in ISP mode. Bench needs it running Verge.",
+        "LPC55S69 bootloader at 1-1 is a probe in ISP mode. Bench needs it running Verge.",
     );
 }
 
@@ -3693,7 +3780,7 @@ fn bench_offers_an_update_not_a_reconnect_for_a_build_without_aux() {
     let mut h = harness(sim_app(SimBus::scenario("ours").unwrap(), vec![]));
     until(&mut h, "Update to v0.3.0");
     press(&mut h, "Bench");
-    until(&mut h, "Update under Units");
+    until(&mut h, "Update under Probes");
     assert!(h.query_by_label("Reconnect").is_none());
     assert_eq!(h.query_all_by_label_contains("has no Verge Aux").count(), 1);
 }
@@ -3754,15 +3841,15 @@ fn stopping_between_units_offers_no_cancel() {
         }));
     h.step();
     press(&mut h, "Stop");
-    h.get_by_label("Stopping: no unit under way.");
-    assert!(h.query_by_label("Cancel the unit under way").is_none());
+    h.get_by_label("Stopping: no probe under way.");
+    assert!(h.query_by_label("Cancel the probe under way").is_none());
     backend
         .lock()
         .unwrap()
         .queued
         .push_back(Event::Batch(BatchEvent::Starting("1-1".into())));
     h.step();
-    h.get_by_label("Cancel the unit under way");
+    h.get_by_label("Cancel the probe under way");
 }
 
 /// Bench offers what the selected unit allows: no recording to start where it cannot record,
@@ -3792,10 +3879,7 @@ fn bench_placeholders_offer_what_the_unit_allows() {
 #[test]
 fn nxps_firmware_too_old_to_ask_is_named() {
     let mut h = harness(sim_app(SimBus::scenario("stock-hid").unwrap(), vec![]));
-    until_contains(
-        &mut h,
-        "Too old to ask: NXP's firmware V2.x speaks HID only",
-    );
+    until_contains(&mut h, "Too old to ask what it runs");
     h.get_by_role_and_label(Role::Label, STOCK);
     h.get_by_label("V2.245");
     assert!(h.query_by_label("Unknown").is_none());
@@ -3966,7 +4050,7 @@ fn tab_goes_through_the_window_in_order() {
             .position(|l| l == label)
             .unwrap_or_else(|| panic!("{label} in {order:?}"))
     };
-    assert_eq!(&order[..5], ["Units", "Batch", "Bench", "Rescan", "About"]);
+    assert_eq!(&order[..5], ["Probes", "Batch", "Bench", "Rescan", "About"]);
     assert!(at("Update to v0.3.0") < at("Show"), "{order:?}");
     assert_eq!(order.last().map(String::as_str), Some("Show"), "{order:?}");
     assert!(!order.iter().any(|l| l == "Resize panel"), "{order:?}");
@@ -3990,7 +4074,7 @@ fn a_recording_without_dio_says_so() {
     let mut h = harness(sim_app(SimBus::scenario("ours-pro-j15").unwrap(), vec![]));
     until(&mut h, "Update to v0.3.0");
     press(&mut h, "Bench");
-    until_contains(&mut h, "remove J15");
+    until_contains(&mut h, "take J15 off");
     h.get_by_label("DIO is unavailable, so a recording holds no DIO pins.");
 }
 
@@ -4051,7 +4135,7 @@ fn a_unit_enters_isp_mode_after_asking() {
     h.step();
     until(&mut h, "In ISP mode");
     h.get_by_label_contains(&format!(
-        "In ISP mode the tool cannot tell the unit's board: flash it with an image built for {}.",
+        "In ISP mode the app cannot tell the probe's board: flash it with an image built for {}.",
         Board::McuLink.a()
     ));
     press(&mut h, "Back");
@@ -4166,12 +4250,12 @@ fn bench_shows_the_calibration_points() {
 fn the_window_builds_the_notes_of_a_unit_it_could_not_ask() {
     let mut h = harness(sim_app(SimBus::scenario("busy").unwrap(), vec![]));
     until_contains(&mut h, "then press Rescan");
-    h.get_by_label("The tool could not ask this unit what it runs: another program has it open.");
+    h.get_by_label("The app could not ask this probe what it runs: another program has it open.");
     h.get_by_label(
         "Close whatever has it open, then press Rescan to look for the jumper-free path again.",
     );
     let mut h = harness(sim_app(SimBus::scenario("stock-hid").unwrap(), vec![]));
-    until_contains(&mut h, "The tool could not ask this unit what it runs");
+    until_contains(&mut h, "The app could not ask this probe what it runs");
     assert!(h.query_by_label_contains("press Rescan").is_none());
 }
 
@@ -4202,7 +4286,7 @@ fn the_question_says_what_a_file_is_for_as_the_command_line_does() {
     drop_file(&mut h, &nxp);
     until(&mut h, "Flash MCU-LINK_CMSIS-DAP_V3_172.s19");
     press(&mut h, "Flash MCU-LINK_CMSIS-DAP_V3_172.s19");
-    h.get_by_label_contains("in ISP mode. Flash MCU-LINK_CMSIS-DAP_V3_172.s19 onto");
+    h.get_by_label_contains("LPC55S69 board. Flash MCU-LINK_CMSIS-DAP_V3_172.s19 onto");
     assert!(h.query_by_label_contains("The image").is_none());
     press(&mut h, "Back");
     drop_file(&mut h, &plain);
@@ -4306,7 +4390,7 @@ fn a_cancel_is_headlined_by_what_it_left() {
         h.get_by_label(words);
         for wrong in [
             "Failed",
-            "The unit did not come back",
+            "The probe did not come back",
             "The update did not finish",
         ] {
             assert!(h.query_by_label(wrong).is_none(), "{stopped:?}: {wrong}");

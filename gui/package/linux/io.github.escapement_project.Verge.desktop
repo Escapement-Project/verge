@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Verge
-Comment=Update MCU-Link probes, and power and measure a target from an MCU-Link Pro
+Comment=Update MCU-Link probes, drive their DIO pins, and power and measure a target from an MCU-Link Pro
 Exec=verge-gui
 Icon=io.github.escapement_project.Verge
 Terminal=false

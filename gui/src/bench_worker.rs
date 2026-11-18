@@ -99,7 +99,7 @@ pub enum DioUnavailable {
 impl std::fmt::Display for DioUnavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Feature(reason) => f.write_str(reason),
+            Self::Feature(reason) => f.write_str(&crate::app::sentence(reason)),
             Self::Aux => {
                 f.write_str("Verge Aux is unavailable. Close the program holding it and reconnect.")
             }
@@ -198,7 +198,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
         } else {
             (pro::open_aux(bus, unit, pro::Feature::Dio)?, false)
         };
-        let name = unit.serial().unwrap_or("the unit");
+        let name = unit.serial().unwrap_or("the probe");
         let target_power =
             pro::check_offered(name, &mut VergeControl::new(&mut aux), pro::Feature::Supply)
                 .is_ok();
@@ -394,7 +394,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                     bail!("the last recording's file is still being written");
                 }
                 if !self.status.dio_stream {
-                    bail!("this unit records its DIO pins beside its energy capture");
+                    bail!("this probe records its DIO pins beside its energy capture");
                 }
                 self.record_to(path, |reader| reader.start_dio(0x0f))?;
             }

@@ -197,7 +197,7 @@ pub(crate) fn starting(name: &str, out: &Path, rate: u32, limit: Option<Duration
         None => ". Ctrl-C ends it".to_owned(),
     };
     format!(
-        "Recording {name} to {} at {rate} pairs a second{ends}.",
+        "Recording {name} to {} at {rate} samples a second{ends}.",
         shown(out)
     )
 }
@@ -232,7 +232,7 @@ fn stream<B: Bus, L: AuxLink>(
                 if let Some(spinner) = &spinner {
                     let total = messages.reader().counts().total;
                     spinner.set(&format!(
-                        "recording  {} pairs  {}",
+                        "recording  {} samples  {}",
                         total.pairs,
                         super::si(total.nanojoules() as f64 * 1e-9, "J")
                     ));

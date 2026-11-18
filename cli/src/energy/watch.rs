@@ -211,7 +211,7 @@ impl Model {
                 range,
                 sequence,
             }) => format!(
-                "{}  {}  ({})  pair {sequence}",
+                "{}  {}  ({})  sample {sequence}",
                 si(f64::from(millivolts) * 1e-3, "V"),
                 si(f64::from(nanoamps) * 1e-9, "A"),
                 range_name(range),
@@ -221,9 +221,9 @@ impl Model {
                 current_code,
                 sequence,
             }) => format!(
-                "voltage code {voltage_code}  current code {current_code}  pair {sequence}, not calibrated"
+                "voltage code {voltage_code}  current code {current_code}  sample {sequence}, not calibrated"
             ),
-            None => "no complete pair yet".to_owned(),
+            None => "no complete sample yet".to_owned(),
         }
     }
 
@@ -231,12 +231,12 @@ impl Model {
         let Some((nanojoules, pairs)) = self.last.and_then(|reading| reading.total) else {
             return "no total yet".to_owned() + &self.under_range_text();
         };
-        let mut text = format!("{} over {pairs} pairs", si(nanojoules as f64 * 1e-9, "J"));
+        let mut text = format!("{} over {pairs} samples", si(nanojoules as f64 * 1e-9, "J"));
         if let Some(watts) = self.mean_power() {
             text += &format!(", mean {}", si(watts, "W"));
         }
         if let Some(rate) = self.rate {
-            text += &format!(", {rate:.0} pairs a second");
+            text += &format!(", {rate:.0} samples/s");
         }
         text + &self.under_range_text()
     }
@@ -245,7 +245,7 @@ impl Model {
     fn under_range_text(&self) -> String {
         match self.under_range {
             0 => String::new(),
-            under => format!("; {under} pairs under range since the watch began"),
+            under => format!("; {under} samples under range since the watch began"),
         }
     }
 
@@ -305,14 +305,14 @@ pub(crate) fn render(frame: &mut Frame, model: &Model) {
     let width = model.slice_width();
     let current_graph = if model.envelope.is_empty() {
         graph(
-            " Current: the newest pair at each read ",
+            " Current: the newest sample at each read ",
             model.current.iter().copied().collect(),
             "A",
             Color::Cyan,
         )
     } else {
         graph(
-            " Current: every pair, the lowest and highest in each column ",
+            " Current: every sample, the lowest and highest in each column ",
             model
                 .envelope
                 .iter()
@@ -326,7 +326,7 @@ pub(crate) fn render(frame: &mut Frame, model: &Model) {
         )
     };
     let power_graph = graph(
-        " Power: each interval's mean, counting every pair ",
+        " Power: each interval's mean, counting every sample ",
         model.power.iter().copied().collect(),
         "W",
         Color::Yellow,
@@ -404,10 +404,10 @@ pub fn watch<B: Bus>(
     cancel: &Cancel,
 ) -> Result<Ended> {
     if options.every.is_zero() {
-        bail!("--every has to be longer than nothing");
+        bail!("--every has to be more than zero");
     }
     if options.window.is_zero() {
-        bail!("--window has to be longer than nothing");
+        bail!("--window has to be more than zero");
     }
     let totals = pro
         .info()
@@ -524,7 +524,7 @@ pub fn watch<B: Bus>(
 fn read(pro: &mut Pro<'_>, at: f64, totals: bool) -> Result<Reading> {
     let newest = match pro
         .latest_energy_sample()
-        .context("reading the newest pair")?
+        .context("reading the newest sample")?
     {
         EnergyCaptureSample::Sample(sample) => Some(match sample.calibrated {
             Some(calibrated) => Newest::Calibrated {
@@ -858,7 +858,7 @@ mod tests {
         });
         assert_eq!(
             model.pair_text(),
-            "voltage code 1234  current code 567  pair 9, not calibrated"
+            "voltage code 1234  current code 567  sample 9, not calibrated"
         );
         assert!(model.current.is_empty());
     }
@@ -905,7 +905,7 @@ mod tests {
         assert_eq!((lowest, highest), (20e-6, 5e-3));
         let screen = screen(&model);
         assert!(
-            screen.contains("Current: every pair, the lowest and highest in each column"),
+            screen.contains("Current: every sample, the lowest and highest in each column"),
             "{screen}"
         );
         assert!(screen.contains("5.50 mA"), "{screen}");
@@ -1085,7 +1085,7 @@ mod tests {
             "{screen}"
         );
         assert!(
-            screen.contains("3 pairs under range since the watch began"),
+            screen.contains("3 samples under range since the watch began"),
             "{screen}"
         );
     }
@@ -1187,11 +1187,11 @@ mod tests {
         let screen = screen(&model);
         assert!(screen.contains("CJ3E7A91C2 energy"), "{screen}");
         assert!(
-            screen.contains("3.30 V  20.0 µA  (low range, 350 mA setting)  pair 1900"),
+            screen.contains("3.30 V  20.0 µA  (low range, 350 mA setting)  sample 1900"),
             "{screen}"
         );
         assert!(
-            screen.contains("3.25 mJ over 1900 pairs, mean 1.71 mW, 1000 pairs a second"),
+            screen.contains("3.25 mJ over 1900 samples, mean 1.71 mW, 1000 samples/s"),
             "{screen}"
         );
         assert!(
@@ -1199,7 +1199,7 @@ mod tests {
             "{screen}"
         );
         assert!(
-            screen.contains("Current: the newest pair at each read"),
+            screen.contains("Current: the newest sample at each read"),
             "{screen}"
         );
         assert!(screen.contains("Power: each interval's mean"), "{screen}");

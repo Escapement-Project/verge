@@ -35,7 +35,7 @@ pub struct PowerArgs {
 /// `--rate`: pairs a second, as 25000 or 25k.
 fn parse_rate(text: &str) -> Result<u32, String> {
     let refused =
-        || format!("--rate takes 1 to 100,000 pairs a second, as 25000 or 25k, not {text:?}");
+        || format!("--rate takes 1 to 100,000 samples a second, as 25000 or 25k, not {text:?}");
     let (digits, scale) = match text.strip_suffix(['k', 'K']) {
         Some(digits) => (digits, 1000),
         None => (text, 1),
@@ -91,8 +91,8 @@ pub struct RangeArg {
     /// Which current ranges a capture this starts uses. auto, the default, switches between the
     /// low and high ranges as the current moves: it reads currents down to tens of nA, but each
     /// switch disturbs the reading for about a millisecond. high holds the high range, so the
-    /// reading follows the target undisturbed, but currents under about 0.65 mA in the 350 mA
-    /// setting read unreliably. Either way, a high-range pair under that is marked under range.
+    /// reading follows the target undisturbed, but currents under about 0.65 mA in the 350 mA
+    /// setting read unreliably. Either way, a high-range sample under that is marked under range.
     #[arg(long, value_enum, ignore_case = true)]
     pub range: Option<Ranges>,
 }
@@ -103,15 +103,15 @@ pub enum EnergyCommand {
     /// debugger can use the probe meanwhile.
     ///
     /// A start clears the total. It can calibrate first, which disconnects J9 from the target for
-    /// about 0.2 s: a target powered through J9 loses its supply for that time.
+    /// about 0.2 s: a target powered through J9 loses its supply for that time.
     Start {
-        /// Voltage and current pairs a second, 1 to 100,000, as 25000 or 25k.
+        /// Voltage and current samples a second, 1 to 100,000, as 25000 or 25k.
         #[arg(long, default_value_t = DEFAULT_RATE, value_parser = parse_rate)]
         rate: u32,
         #[command(flatten)]
         range: RangeArg,
     },
-    /// Show the newest voltage and current pair.
+    /// Show the newest voltage and current sample.
     Latest,
     /// Show the energy since the last start. A stopped capture keeps its total until the next
     /// start or a restart.
@@ -120,16 +120,18 @@ pub enum EnergyCommand {
     Stop,
     /// Show the points each current range was calibrated at.
     Calibration,
-    /// Show the capture live: the newest pair, the total, and graphs of current and power.
+    /// Show the capture live: the newest sample, the total, and graphs of current and power.
     ///
     /// Starts a capture if none runs, and stops only one it started. Over a capture a fault
     /// stopped, it shows that capture's total and starts a new one. Q, Esc or Ctrl-C leaves.
-    /// Where the output is not a terminal it prints a line a read instead. Through Verge Aux the
-    /// current graph shows every pair, as the lowest and highest in each column; without it, the
-    /// newest pair at each read, so it can miss short peaks. The power graph plots each
-    /// interval's mean from the total, which counts every pair.
+    /// Where the output is not a terminal it prints a line for each read instead.
+    ///
+    /// Through Verge Aux the current graph shows every sample, as the lowest and highest in each
+    /// column. Without it, the graph shows the newest sample at each read, so it can miss short
+    /// peaks. The power graph plots each interval's mean from the total, which counts every
+    /// sample.
     Watch {
-        /// Voltage and current pairs a second, for a capture this starts, as 25000 or 25k.
+        /// Voltage and current samples a second, for a capture this starts, as 25000 or 25k.
         #[arg(long, default_value_t = DEFAULT_RATE, value_parser = parse_rate)]
         rate: u32,
         /// How often to read the probe, as 100ms or 1s.
@@ -144,45 +146,52 @@ pub enum EnergyCommand {
         #[command(flatten)]
         range: RangeArg,
     },
-    /// Record every pair of a capture to a file: a tickwave recording, a sigrok session or CSV.
+    /// Record every sample of a capture to a file: a tickwave recording, a sigrok session or CSV.
     ///
     /// The file's name picks the format: .tickwave for a tickwave recording, which tickwave opens;
     /// .sr for a sigrok session, which PulseView opens; .csv for CSV. A name that says none of
-    /// these writes a tickwave recording, or what --csv or --tickwave says. Starts a capture if
-    /// none runs, and stops only one it started. Needs Verge Aux, so a debugger can hold the probe
-    /// meanwhile. Each pair's current is as the probe's total counts it. In a sigrok session, where
-    /// the probe measured nothing, for a moment as it reads the supply or times a debugger's
-    /// reads, the last pair repeats and the logic channel GAP is high. Each DIO pin --dio names is
-    /// recorded too. Ctrl-C ends the recording.
+    /// these writes a tickwave recording, or what --csv or --tickwave says.
+    ///
+    /// Starts a capture if none runs, and stops only one it started. Needs Verge Aux, so a
+    /// debugger can hold the probe meanwhile.
+    ///
+    /// Each sample's current is as the probe's total counts it. In a sigrok session, the last
+    /// sample repeats, and the logic channel GAP is high, wherever the probe measured nothing: for
+    /// a moment as it reads the supply, or as it times a debugger's reads.
+    ///
+    /// Each DIO pin --dio names is recorded too. Ctrl-C ends the recording.
     Record {
         /// The file to write. `-` writes CSV to stdout.
         #[arg(long, value_name = "FILE")]
         out: std::path::PathBuf,
-        /// Voltage and current pairs a second, for a capture this starts, as 25000 or 25k.
+        /// Voltage and current samples a second, for a capture this starts, as 25000 or 25k.
         #[arg(long, default_value_t = DEFAULT_RATE, value_parser = parse_rate)]
         rate: u32,
         /// Stop after this long.
         #[arg(long = "for", value_name = "DURATION", value_parser = humantime::parse_duration)]
         limit: Option<Duration>,
-        /// Write CSV, as a .csv name does: one line per pair, its sequence number, its time in ns
-        /// since the capture started, millivolts, nanoamps and the current range it was read on
-        /// (low, high, or under for a pair marked under range), then the level of each DIO pin
-        /// recorded. Each edge of those pins is a line of its own, in time order, with only its
-        /// time and the levels after it. Markers, if any arrive, are merged in as rows of their
-        /// own when recording ends, with marker number and label columns; not into a pipe or
-        /// terminal. Voltage and current are read together at the pair's time.
+        /// Write CSV, as a .csv name does: one line per sample, with its sequence number, its time
+        /// in ns since the capture started, millivolts, nanoamps and the current range it was read
+        /// on (low, high, or under for a sample marked under range), then the level of each DIO
+        /// pin recorded. Voltage and current are read together at the sample's time.
+        ///
+        /// Each edge of those pins is a line of its own, in time order, with only its time and the
+        /// levels after it.
+        ///
+        /// Markers, if any arrive, are merged in as rows of their own when recording ends, with
+        /// marker number and label columns; not into a pipe or terminal.
         #[arg(long)]
         csv: bool,
         /// Write a tickwave recording, as a .tickwave name does: voltage, current and power, the
-        /// range each pair was read on and its under-range mark, each DIO pin recorded, and
+        /// range each sample was read on and its under-range mark, each DIO pin recorded, and
         /// markers. It closes a block at least every second, so a crash loses at most that, and
         /// rewrites the file with full-size blocks once recording ends.
         #[arg(long, conflicts_with = "csv")]
         tickwave: bool,
         /// Record the edges of these DIO pins too: 0 to 3, as `--dio 0,3`, or `dio0` to `dio3`,
         /// or `all`. A tickwave recording gives each a digital channel with its edges' times; a
-        /// sigrok session shows each as a logic channel at the pair rate, a pulse shorter than a
-        /// pair stretched to one; CSV gives each edge's time.
+        /// sigrok session shows each as a logic channel at the sample rate, stretching a pulse
+        /// shorter than a sample to one sample; CSV gives each edge's time.
         #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = dio::parse_pin)]
         dio: Vec<u8>,
         #[command(flatten)]
@@ -228,7 +237,7 @@ pub(crate) fn find_pro_where<B: Bus>(
         Ok(unit) => return Ok(unit),
         Err(FindError::Several { units, .. }) => units,
         Err(FindError::NoneFits { units, .. }) => bail!(
-            "no attached unit {does}: {}. {needs}",
+            "no attached probe {does}: {}. {needs}",
             crate::clause_list(&units.iter().map(crate::described).collect::<Vec<_>>())
         ),
         Err(error) => return Err(error.into()),
@@ -381,7 +390,7 @@ pub fn energy<B: Bus>(
                 format!(" (asked for {rate})")
             };
             outputln!(
-                "{name} captures {actual} pairs a second{asked}, {}.",
+                "{name} captures {actual} samples a second{asked}, {}.",
                 range.holding()
             );
             if let Some(total) = replaced {
@@ -400,26 +409,26 @@ pub fn energy<B: Bus>(
                     );
                     return Ok(());
                 }
-                latest => latest.with_context(|| format!("reading {name}'s newest pair"))?,
+                latest => latest.with_context(|| format!("reading {name}'s newest sample"))?,
             };
             match latest {
                 EnergyCaptureSample::Sample(sample) => match sample.calibrated {
                     Some(calibrated) => outputln!(
-                        "{name}: {}, {} ({}), pair {}.",
+                        "{name}: {}, {} ({}), sample {}.",
                         si(f64::from(calibrated.voltage_millivolts) * 1e-3, "V"),
                         si(f64::from(calibrated.current_nanoamps) * 1e-9, "A"),
                         range_name(calibrated.range_id),
                         sample.raw.sequence
                     ),
                     None => outputln!(
-                        "{name}: voltage code {}, current code {}, pair {}, not calibrated.",
+                        "{name}: voltage code {}, current code {}, sample {}, not calibrated.",
                         sample.raw.voltage_code,
                         sample.raw.current_code,
                         sample.raw.sequence
                     ),
                 },
                 EnergyCaptureSample::NoSample => {
-                    outputln!("{name}'s capture has no complete pair yet.");
+                    outputln!("{name}'s capture has no complete sample yet.");
                 }
                 EnergyCaptureSample::Stopped => {
                     outputln!("{name} is not capturing: start a capture first.");
@@ -547,7 +556,7 @@ fn record<B: Bus>(
     cancel: &Cancel,
 ) -> Result<()> {
     let unit = find_pro(bus, serial, Feature::Energy)?;
-    let name = unit.serial().unwrap_or("the unit");
+    let name = unit.serial().unwrap_or("the probe");
     if !unit.device.aux {
         bail!(
             "{name} runs a Verge build from before Verge Aux, which a recording needs: update it first"
@@ -581,7 +590,7 @@ fn record<B: Bus>(
         EndReason::Other(_) => "the stream ended for a reason this tool does not know",
     };
     say(&format!(
-        "{name}: {} pairs to {file}{format}, {energy}; {why}.",
+        "{name}: {} samples to {file}{format}, {energy}; {why}.",
         recorded.total.pairs
     ));
     if recorded.high_range_only {
@@ -589,13 +598,13 @@ fn record<B: Bus>(
     }
     if recorded.under_range > 0 {
         say(&format!(
-            "{} pairs were read under range, too near the high range's floor to trust: the file marks them.",
+            "{} samples were read under range, too near the high range's floor to trust: the file marks them.",
             recorded.under_range
         ));
     }
     if recorded.lost > 0 {
         say(&format!(
-            "{} pairs were lost: the probe dropped messages this side did not read in time.",
+            "{} samples were lost: the probe dropped messages this side did not read in time.",
             recorded.lost
         ));
     }
@@ -613,7 +622,7 @@ fn record<B: Bus>(
         say(&format!(
             "Edges were lost {}: the pins changed faster than the probe takes them, SPI had \
              them, or this side did not read in time. The levels during each loss are not known.",
-            crate::count(recorded.edges_lost as usize, "time")
+            crate::times(recorded.edges_lost as usize)
         ));
     }
     Ok(())
@@ -645,11 +654,11 @@ fn edge_counts(pins: u8, edges: [u64; 4]) -> String {
     sentences.join(" ")
 }
 
-/// The total as a clause, as "1.71 mJ over 1000 pairs since the start".
+/// The total as a clause, as "1.71 mJ over 1000 samples since the start".
 fn describe_total(name: &str, total: EnergyTotal) -> Result<String> {
     let energy = |total: EnergyAccumulator| {
         format!(
-            "{} over {} pairs",
+            "{} over {} samples",
             si(total.energy_nanojoules as f64 * 1e-9, "J"),
             total.integrated_pairs
         )
@@ -660,7 +669,7 @@ fn describe_total(name: &str, total: EnergyTotal) -> Result<String> {
             "the capture failed after {}, when the ADC overran, its DMA failed or the probe fell behind reading it",
             energy(total)
         ),
-        EnergyTotal::NoSample => "no calibrated pair yet".to_owned(),
+        EnergyTotal::NoSample => "no calibrated sample yet".to_owned(),
         EnergyTotal::Stopped => "no capture since the probe started".to_owned(),
         _ => bail!("{name} answered with a total this tool does not know"),
     })

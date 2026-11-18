@@ -16,7 +16,7 @@ use escapement_verge_probe::version::StockVersion;
 
 use super::{
     Choice, Current, Fill, Picked, STOCK, VergeApp, answers, edged, field, frame, kib, label,
-    outline, progress, sentence_case, slot, wrapping,
+    outline, progress, sentence, sentence_case, slot, wrapping,
 };
 use crate::glyph::{self, Glyph};
 use crate::style::{self, Face, Role, Status, space, text};
@@ -99,14 +99,14 @@ impl BatchForm {
         if stock == StockFilter::None && ours == OursFilter::None && !self.isp {
             return Err((
                 Field::Takes,
-                "Tick at least one kind of unit for the batch to take.".into(),
+                "Tick at least one kind of probe for the batch to take.".into(),
             ));
         }
         let limit = if self.stop_after {
             let count: NonZeroUsize = self.count.trim().parse().map_err(|_| {
                 (
                     Field::Stop,
-                    "Write how many units to stop after, as a positive number.".to_owned(),
+                    "Write how many probes to stop after, as a positive number.".to_owned(),
                 )
             })?;
             Some(count)
@@ -332,13 +332,13 @@ impl VergeApp {
             });
             wrapping(
                 ui,
-                text(Role::Instruction, "One image for every unit plugged in").color(face.ink),
+                text(Role::Instruction, "One image for every probe plugged in").color(face.ink),
             );
             wrapping(
                 ui,
                 text(
                     Role::Body,
-                    "Choose the image and the units it takes, and arm it once. Then plug units in, one after another or several on a hub. Each goes through its bootloader on its own, one at a time, and blinks when it is done.",
+                    "Choose the image and the probes it takes, and arm it once. Then plug probes in, one after another or several on a hub. The batch updates them one at a time, and each blinks when it is done.",
                 )
                 .color(face.ink_2),
             );
@@ -377,7 +377,7 @@ impl VergeApp {
                 &mut form.isp,
                 text(
                     Role::Body,
-                    "Units that arrive in ISP mode, as after fitting the jumper",
+                    "Probes that arrive in ISP mode, as after fitting the jumper",
                 )
                 .color(face.ink),
             );
@@ -385,7 +385,7 @@ impl VergeApp {
                 &mut form.attached,
                 text(
                     Role::Body,
-                    "Units attached now, not only those plugged in from here on",
+                    "Probes attached now, not only those plugged in from here on",
                 )
                 .color(face.ink),
             );
@@ -413,7 +413,7 @@ impl VergeApp {
                     form.stop_after,
                     egui::TextEdit::singleline(&mut form.count).desired_width(48.0),
                 );
-                ui.label(text(Role::Body, "units are updated").color(face.ink));
+                ui.label(text(Role::Body, "probes are updated").color(face.ink));
             });
             note(ui, Field::Stop);
         });
@@ -425,7 +425,7 @@ impl VergeApp {
             );
             wrapping(
                 ui,
-                text(Role::Body, "One JSON line per unit: when, its port and serial, the firmware before and after, and the result.")
+                text(Role::Body, "One JSON line per probe: when, its port and serial, the firmware before and after, and the result.")
                     .color(face.ink_2),
             );
         });
@@ -466,7 +466,7 @@ impl VergeApp {
                 None => format!("Flash {what}"),
             };
             let mut question = format!(
-                "{lead} onto {}? Each goes through its bootloader on its own, without being asked again, until you stop the batch.",
+                "{lead} onto {}? The batch updates each probe it takes without asking again, until you stop it.",
                 filter.describe()
             );
             if filter.bootloaders {
@@ -529,11 +529,11 @@ impl VergeApp {
             None if run.state.paused.is_some() => ("Batch", "Paused", glyph::ATTENTION, None),
             None if run.stop.is_cancelled() => (
                 "Batch",
-                "Stopping: the unit under way finishes first",
+                "Stopping: the probe under way finishes first",
                 glyph::WORKING,
                 None,
             ),
-            None => ("Batch", "Plug units in", glyph::WORKING, None),
+            None => ("Batch", "Plug probes in", glyph::WORKING, None),
         };
         let ink = fill.map_or(face.ink, |fill| fill.on);
         let stroke = if fill.is_some() {
@@ -584,13 +584,13 @@ impl VergeApp {
                         run.stop.cancel();
                     }
                 } else if run.current.is_some() {
-                    if outline(ui, "Cancel the unit under way", !run.cancel.is_cancelled())
+                    if outline(ui, "Cancel the probe under way", !run.cancel.is_cancelled())
                         .clicked()
                     {
                         run.cancel.cancel();
                     }
                 } else {
-                    ui.label(text(Role::Body, "Stopping: no unit under way.").color(ink));
+                    ui.label(text(Role::Body, "Stopping: no probe under way.").color(ink));
                 }
             } else if on_slab(ui, "Back").clicked() {
                 back = true;
@@ -655,9 +655,9 @@ impl VergeApp {
         if let Some((port, current)) = &run.current {
             ui.add_space(space::S);
             field(ui, "Now", |ui| {
-                let mut words = format!("updating {port}");
+                let mut words = format!("Updating {port}");
                 if let Some(current) = current {
-                    words.push_str(&format!(" · {}", current.step));
+                    words.push_str(&format!(" · {}", sentence_case(&current.step.to_string())));
                     if current.step.unit() == StepUnit::Bytes && current.total > 0 {
                         words.push_str(&format!(
                             " · {} / {}",
@@ -691,7 +691,7 @@ impl VergeApp {
         }
         ui.add_space(space::M);
         if run.records.is_empty() {
-            label(ui, "No unit yet");
+            label(ui, "No probe yet");
         }
         for record in run.records.iter().rev() {
             egui::Frame::new()
@@ -704,14 +704,14 @@ impl VergeApp {
                         glyph.chip(ui, 20.0, chip.ground, chip.on);
                         ui.label(text(Role::Code, &record.port).color(face.ink));
                         let serial = match (&record.serial_before, &record.serial_after) {
-                            (Some(a), Some(b)) if a != b => format!("{a} -> {b}"),
+                            (Some(a), Some(b)) if a != b => format!("{a} → {b}"),
                             (Some(a), _) => a.clone(),
                             (None, Some(b)) => b.clone(),
                             (None, None) => "-".into(),
                         };
                         ui.label(text(Role::Code, serial).color(face.ink));
                         let firmware = match &record.firmware_after {
-                            Some(after) => format!("{} -> {after}", record.firmware_before),
+                            Some(after) => format!("{} → {after}", record.firmware_before),
                             None => record.firmware_before.clone(),
                         };
                         ui.label(text(Role::Code, firmware).color(face.ink_2));
@@ -720,7 +720,7 @@ impl VergeApp {
                         );
                     });
                     if let Some(reason) = &record.reason {
-                        wrapping(ui, text(Role::Body, reason).color(face.ink_2));
+                        wrapping(ui, text(Role::Body, sentence(reason)).color(face.ink_2));
                     }
                 });
         }

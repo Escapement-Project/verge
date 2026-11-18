@@ -131,7 +131,7 @@ fn list_is_the_default() {
         .stdout(predicate::str::contains(
             "QK7RM2VTX8D41  NXP's firmware V3.172",
         ))
-        .stdout(predicate::str::is_match(r"\n +update +jumper-free \(NXP's firmware\)").unwrap());
+        .stdout(predicate::str::is_match(r"\n +update +Jumper-free \(NXP's firmware\)").unwrap());
 }
 
 /// Every label sits under the serials and every value under the states, whatever the line.
@@ -190,7 +190,7 @@ fn two_units_need_a_serial() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "2 attached units could be meant: CJ3E7A91C2 and QK7RM2VTX8D41. Pick one with --serial",
+            "2 attached probes could be meant: CJ3E7A91C2 and QK7RM2VTX8D41. Pick one with --serial",
         ));
 }
 
@@ -228,7 +228,7 @@ fn flash_refuses_two_bootloaders() {
         .args(["isp", "flash", "--yes"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("2 units are in ISP mode"));
+        .stderr(predicate::str::contains("2 probes are in ISP mode"));
 }
 
 #[test]
@@ -369,7 +369,7 @@ fn flashing_a_unit_already_in_isp_mode_says_it_may_not_be_an_mculink() {
             .assert()
             .failure()
             .stderr(predicate::str::contains(
-                "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode.",
+                "In ISP mode an MCU-Link looks like any other LPC55S69 board.",
             ));
     }
     std::fs::remove_file(&image).unwrap();
@@ -386,7 +386,7 @@ fn a_jumper_free_update_does_not_carry_the_isp_warning() {
         .failure()
         .stderr(predicate::str::contains("Flash "))
         .stderr(predicate::str::contains("Pass --yes"))
-        .stderr(predicate::str::contains("cannot tell an MCU-Link").not());
+        .stderr(predicate::str::contains("looks like any other LPC55S69 board").not());
     std::fs::remove_file(&image).unwrap();
 }
 
@@ -507,7 +507,7 @@ fn a_batch_asks_once_and_says_what_it_takes() {
             " KiB), and flash it onto every standalone MCU-Link running NXP's firmware older than V3.200 or in ISP mode, attached from now on?",
         ))
         .stderr(predicate::str::contains(
-            "cannot tell an MCU-Link from any other",
+            "In ISP mode an MCU-Link looks like any other LPC55S69 board.",
         ))
         .stderr(predicate::str::contains("Pass --yes"));
 }
@@ -575,7 +575,7 @@ fn a_batch_taking_units_in_isp_mode_without_asking_still_warns() {
         .assert()
         .success()
         .stderr(predicate::str::contains(
-            "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode.",
+            "In ISP mode an MCU-Link looks like any other LPC55S69 board.",
         ));
     std::fs::remove_file(&record).unwrap();
 }
@@ -586,7 +586,7 @@ fn ours_is_refused_for_a_pro() {
         .args(["update", "--yes"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("the unit is an MCU-Link Pro"))
+        .stderr(predicate::str::contains("the probe is an MCU-Link Pro"))
         .stderr(predicate::str::contains(
             "with --stock, or a Verge build that declares it with --file IMAGE",
         ));
@@ -634,7 +634,7 @@ fn bootloader_sends_a_pro_into_isp_mode_only_for_stock() {
         .args(["isp", "enter"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("the unit is an MCU-Link Pro"))
+        .stderr(predicate::str::contains("the probe is an MCU-Link Pro"))
         .stderr(predicate::str::contains(
             "run `verge isp enter --stock`, then `verge isp flash --stock`",
         ));
@@ -643,14 +643,14 @@ fn bootloader_sends_a_pro_into_isp_mode_only_for_stock() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "The unit, an MCU-Link Pro, is in ISP mode at 1-1. Flash it with `verge isp flash --stock`.",
+            "The probe, an MCU-Link Pro, is in ISP mode at 1-1. Flash it with `verge isp flash --stock`.",
         ));
     tool("stock")
         .args(["isp", "enter"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "The unit, a standalone MCU-Link, is in ISP mode at 1-1, where the tool cannot tell its board. Flash it with `verge isp flash` and an image built for a standalone MCU-Link",
+            "The probe, a standalone MCU-Link, is in ISP mode at 1-1, where the tool cannot tell its board. Flash it with `verge isp flash` and an image built for a standalone MCU-Link",
         ));
 }
 
@@ -679,7 +679,7 @@ fn a_unit_that_names_no_board_needs_an_answer_at_a_terminal() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "This unit's firmware does not say which board it is",
+            "This probe's firmware does not say which board it is",
         ))
         .stderr(predicate::str::contains("--yes does not answer that"));
     tool("unnamed-board")
@@ -687,7 +687,7 @@ fn a_unit_that_names_no_board_needs_an_answer_at_a_terminal() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "so the tool cannot check that the image is built for it.",
+            "so nothing can check that the image is built for it.",
         ))
         .stderr(predicate::str::contains("Only an answer at a terminal"));
     let dir = sim_stock_dir("unnamed-stock", "3.172");
@@ -837,7 +837,7 @@ fn update_on_a_pro_needing_the_jumper_does_not_advise_a_plain_flash() {
     );
     assert!(
         stderr.contains(
-            "the unit is an MCU-Link Pro, and the image declares no boards, so verge takes it as a Verge image for the standalone MCU-Link only"
+            "the probe is an MCU-Link Pro, and the image declares no boards, so verge takes it as a Verge image for the standalone MCU-Link only"
         ),
         "{stderr}"
     );
@@ -858,7 +858,7 @@ fn the_jumper_advice_names_the_image_and_the_board() {
             image.display()
         )))
         .stderr(predicate::str::contains(
-            "that image is the one checked for this unit, an MCU-Link Pro",
+            "that image is the one checked for this probe, an MCU-Link Pro",
         ));
     std::fs::remove_file(&image).unwrap();
     let dir = sim_stock_dir("jumper-stock", "3.172");
@@ -883,7 +883,7 @@ fn a_failed_update_says_how_to_flash_the_same_image_again() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "The unit, a standalone MCU-Link, may be in ISP mode with a partial image",
+            "The probe may be in ISP mode with a partial image. It said it was a standalone MCU-Link before",
         ))
         .stderr(predicate::str::contains(
             "`verge isp flash --release v0.3.0`",
@@ -898,7 +898,7 @@ fn bootloader_on_a_pro_says_how_to_put_ours_on_it() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "To put a Verge image built for it on it, run `verge update --file IMAGE` instead, which checks that the image declares this board before anything is flashed",
+            "For a Verge image built for this board, run `verge update --file IMAGE` instead, which checks that the image declares the board before anything is flashed",
         ));
 }
 
@@ -924,7 +924,7 @@ fn the_jumper_path_asks_before_it_downloads_and_says_why() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "This unit cannot be updated without the jumper now. verge downloads the release first, to check that it is built for this unit. Download release v0.3.0 of Escapement-Project/mculink-verge from GitHub (",
+            "This probe cannot be updated without the jumper now. verge downloads the release first, to check that it is built for this probe. Download release v0.3.0 of Escapement-Project/mculink-verge from GitHub (",
         ))
         .stderr(predicate::str::contains("Pass --yes"));
 }
@@ -992,7 +992,7 @@ fn isp_reset_with_the_jumper_says_what_holds_the_pin() {
         .assert()
         .code(3)
         .stdout(predicate::str::contains(
-            "its ISP pin is still held low, by the ISP jumper or by a probe on its debug connector",
+            "its ISP pin is still held low, by the ISP jumper or by another probe on its debug connector",
         ));
 }
 
@@ -1015,7 +1015,7 @@ fn isp_reset_takes_a_port_among_two_bootloaders() {
         .args(["isp", "reset"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("2 units are in ISP mode"));
+        .stderr(predicate::str::contains("2 probes are in ISP mode"));
     tool("two-isp-ours")
         .args(["isp", "reset", "--port", "1-2"])
         .assert()
@@ -1062,7 +1062,7 @@ fn isp_enter_works_beside_another_bootloader() {
         .args(["update", "--yes", "--serial", "CJ3E7A91C2"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Another unit is in ISP mode"));
+        .stderr(predicate::str::contains("Another probe is in ISP mode"));
     tool("ours-beside-isp")
         .args(["isp", "enter", "--serial", "CJ3E7A91C2"])
         .assert()
@@ -1280,7 +1280,7 @@ fn dio_record_counts_the_probes_losses() {
         // Six toggles in 300 ms, the first lost: not an edge.
         .stderr(predicate::str::contains("DIO1 5 edges over 0.3"))
         .stderr(predicate::str::contains(
-            "The probe lost edges 1 time: the recording marks those spans unknown.",
+            "The probe lost edges once: the recording marks those spans unknown.",
         ));
 }
 
@@ -1295,7 +1295,7 @@ fn dio_names_the_pins_the_bench_marker_holds() {
         .stdout(predicate::str::contains("DIO1  input"))
         .stdout(predicate::str::contains("DIO2").count(1))
         .stdout(predicate::str::contains(
-            "A bench tool's command marker holds DIO2, DIO3 until the unit restarts.",
+            "A bench tool's command marker holds DIO2, DIO3 until the probe restarts.",
         ));
     tool("ours-plain-marked")
         .args(["dio", "--high", "0,2"])
@@ -1421,7 +1421,7 @@ fn energy_start_reports_the_rate() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "captures 2000 pairs a second, switching current ranges automatically.",
+            "captures 2000 samples a second, switching current ranges automatically.",
         ));
 }
 
@@ -1432,7 +1432,7 @@ fn energy_start_reports_the_high_range_held() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "captures 25000 pairs a second, holding the high range.",
+            "captures 25000 samples a second, holding the high range.",
         ));
 }
 
@@ -1443,7 +1443,7 @@ fn energy_start_refuses_a_rate_the_firmware_cannot_take() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "--rate takes 1 to 100,000 pairs a second",
+            "--rate takes 1 to 100,000 samples a second",
         ));
 }
 
@@ -1454,7 +1454,7 @@ fn energy_latest_reads_a_running_capture() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "3.30 V, 5.00 mA (high range, 350 mA setting), pair 100",
+            "3.30 V, 5.00 mA (high range, 350 mA setting), sample 100",
         ));
 }
 
@@ -1476,7 +1476,7 @@ fn energy_total_reads_the_running_total() {
         .assert()
         .success()
         .stdout(predicate::str::contains("17.1 mJ over 100"))
-        .stdout(predicate::str::contains("pairs since the start."));
+        .stdout(predicate::str::contains("samples since the start."));
 }
 
 #[test]
@@ -1508,7 +1508,7 @@ fn energy_watch_prints_a_line_a_read_and_leaves_a_running_capture_running() {
         .success()
         .stdout(
             predicate::str::is_match(
-                r"   0\.00 s  3\.30 V  5\.00 mA  \(high range, 350 mA setting\)  pair 100\d\d  interval -",
+                r"   0\.00 s  3\.30 V  5\.00 mA  \(high range, 350 mA setting\)  sample 100\d\d  interval -",
             )
             .unwrap(),
         )
@@ -1525,7 +1525,7 @@ fn energy_watch_stops_the_capture_it_started() {
         .args(["energy", "watch", "--rate", "1000", "--for", "200ms"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("no complete pair yet"))
+        .stdout(predicate::str::contains("no complete sample yet"))
         .stdout(predicate::str::contains("stopped: 0 J over"));
 }
 
@@ -1535,9 +1535,7 @@ fn energy_watch_refuses_a_zero_interval() {
         .args(["energy", "watch", "--every", "0s"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "--every has to be longer than nothing",
-        ));
+        .stderr(predicate::str::contains("--every has to be more than zero"));
 }
 
 #[test]
@@ -1557,11 +1555,11 @@ fn energy_watch_starts_a_capture_over_a_fault() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "the capture failed after 17.1 mJ over 10000 pairs, when the ADC overran, its DMA failed or the probe fell behind reading it. A new capture replaces it.",
+            "the capture failed after 17.1 mJ over 10000 samples, when the ADC overran, its DMA failed or the probe fell behind reading it. A new capture replaces it.",
         ))
         .stdout(predicate::str::contains("   0.20 s  3.30 V"))
         .stdout(predicate::str::contains("stopped: "))
-        .stdout(predicate::str::contains("pairs since the start."));
+        .stdout(predicate::str::contains("samples since the start."));
 }
 
 #[test]
@@ -1582,7 +1580,7 @@ fn energy_stop_after_a_fault_reports_what_was_kept() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "CJ3E7A91C2's capture had stopped already: the capture failed after 17.1 mJ over 10000 pairs, when the ADC overran, its DMA failed or the probe fell behind reading it.",
+            "CJ3E7A91C2's capture had stopped already: the capture failed after 17.1 mJ over 10000 samples, when the ADC overran, its DMA failed or the probe fell behind reading it.",
         ));
 }
 
@@ -1593,7 +1591,7 @@ fn energy_says_when_another_program_holds_the_probe() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "could not ask CJ3E7A91C2 what it runs: another program has it open",
+            "CJ3E7A91C2 could not be asked what it runs: another program has it open",
         ));
 }
 
@@ -1643,7 +1641,7 @@ fn energy_falls_back_to_cmsis_dap_when_verge_aux_is_taken() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "captures 2000 pairs a second, switching current ranges automatically.",
+            "captures 2000 samples a second, switching current ranges automatically.",
         ));
 }
 
@@ -1714,7 +1712,7 @@ fn several_units_that_fit_need_a_serial_off_a_terminal() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "2 attached units could be meant: CJ3E7A91C2 and CJ3E7AB3E4. Pick one with --serial",
+            "2 attached probes could be meant: CJ3E7A91C2 and CJ3E7AB3E4. Pick one with --serial",
         ));
 }
 
@@ -1727,7 +1725,7 @@ fn an_update_beside_a_unit_in_isp_mode_names_how_to_flash_it() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "2 attached units could be meant: CJ3E7A91C2 and the unit in ISP mode at 1-2. Pick one with --serial. The unit in ISP mode, at 1-2, has no serial: flash it with `verge isp flash --file verge.elf --port 1-2`",
+            "2 attached probes could be meant: CJ3E7A91C2 and the probe in ISP mode at 1-2. Pick one with --serial. The probe in ISP mode, at 1-2, has no serial: flash it with `verge isp flash --file verge.elf --port 1-2`",
         ));
 }
 
@@ -1755,7 +1753,7 @@ fn serial_is_refused_where_it_picks_nothing() {
     for (args, why) in [
         (
             &["batch", "--yes"][..],
-            "`batch` takes every unit of a kind",
+            "`batch` takes every probe of a kind",
         ),
         (&["inspect", "image.s19"][..], "`inspect` reads a file"),
         (&["isp", "reset"][..], "--port picks it instead"),
@@ -1814,14 +1812,14 @@ fn energy_record_writes_every_pair_and_leaves_a_running_capture() {
     let text = std::fs::read_to_string(&out).unwrap();
     assert!(text.starts_with("sequence,time_ns,millivolts,nanoamps,range\n"));
     let lines = csv_lines(&out);
-    assert!(lines.len() >= 1000, "{} pairs", lines.len());
+    assert!(lines.len() >= 1000, "{} samples", lines.len());
     assert!(
         lines
             .windows(2)
             .all(|w| w[1][0] == w[0][0] + 1 && w[1][1] == w[0][1] + 1_000_000)
     );
     assert!(
-        String::from_utf8_lossy(&output).contains(&format!("{} pairs to", lines.len())),
+        String::from_utf8_lossy(&output).contains(&format!("{} samples to", lines.len())),
         "{}",
         String::from_utf8_lossy(&output)
     );
@@ -1928,7 +1926,7 @@ fn energy_record_holds_the_high_range_when_asked() {
             "{range}: {output}"
         );
         assert_eq!(
-            output.contains("pairs were read under range"),
+            output.contains("samples were read under range"),
             under,
             "{range}: {output}"
         );
@@ -1951,7 +1949,7 @@ fn energy_record_works_while_a_debugger_holds_the_probe() {
         .arg(dir.path().join("held.sr"))
         .assert()
         .success()
-        .stderr(predicate::str::contains("pairs to"));
+        .stderr(predicate::str::contains("samples to"));
 }
 
 #[test]
@@ -2040,7 +2038,7 @@ fn csv_to_stdout_holds_only_the_csv() {
         .args(["energy", "record", "--csv", "--for", "200ms", "--out", "-"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("pairs to stdout"))
+        .stderr(predicate::str::contains("samples to stdout"))
         .get_output()
         .stdout
         .clone();
@@ -2074,7 +2072,7 @@ fn none_of_several_units_fits_says_why() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "no attached unit measures energy: CJ3E7A91C2 is a standalone MCU-Link running Verge, build 14d05d4, and QK7RM2VTX8D41 is a standalone MCU-Link running NXP's firmware V3.172. Energy measurement needs an MCU-Link Pro running Verge.",
+            "no attached probe measures energy: CJ3E7A91C2 is a standalone MCU-Link running Verge, build 14d05d4, and QK7RM2VTX8D41 is a standalone MCU-Link running NXP's firmware V3.172. Energy measurement needs an MCU-Link Pro running Verge.",
         ))
         .stderr(predicate::str::contains("serial").not());
     tool("two-isp")
@@ -2088,7 +2086,7 @@ fn none_of_several_units_fits_says_why() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "2 units are in ISP mode already, at 1-1 and 1-2, and report no serial. `verge isp flash --port 1-1` flashes one",
+            "2 probes are in ISP mode already, at 1-1 and 1-2, and report no serial. `verge isp flash --port 1-1` flashes one",
         ));
 }
 
@@ -2105,7 +2103,7 @@ fn a_unit_a_debugger_holds_waits_for_it() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "CJ3E7A91C2 cannot be updated as it is. Close the debugger first. Another program holds its CMSIS-DAP interface, and the tool does not update a unit in use.",
+            "CJ3E7A91C2 cannot be updated as it is. Close the debugger first. Another program holds its CMSIS-DAP interface, and a probe in use gets no update.",
         ));
 }
 
@@ -2117,7 +2115,7 @@ fn beside_a_unit_in_isp_mode_the_other_waits() {
         .assert()
         .success()
         .stdout(predicate::str::is_match(
-            r"\n +update +Another unit is in ISP mode, at 1-2\. Flash that one or unplug it, then update this one",
+            r"\n +update +Another probe is in ISP mode, at 1-2\. Flash that one or unplug it, then update this one",
         )
         .unwrap())
         .stdout(predicate::str::contains("ISP jumper").not());
@@ -2126,7 +2124,7 @@ fn beside_a_unit_in_isp_mode_the_other_waits() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "Another unit is in ISP mode, at 1-2.",
+            "Another probe is in ISP mode, at 1-2.",
         ))
         .stderr(predicate::str::contains(
             "flash it with `verge isp flash --release --port 1-2`",
@@ -2143,21 +2141,21 @@ fn the_isp_commands_say_what_works() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "2 units are in ISP mode, at 1-1 and 1-2. Pick one with --port, as --port 1-1, or unplug all but one",
+            "2 probes are in ISP mode, at 1-1 and 1-2. Pick one with --port, as --port 1-1, or unplug all but one",
         ));
     tool("ours")
         .args(["isp", "info"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "no unit is in ISP mode. `verge isp enter` puts CJ3E7A91C2 there without the jumper",
+            "no probe is in ISP mode. `verge isp enter` puts CJ3E7A91C2 there without the jumper",
         ));
     tool("isp")
         .args(["isp", "enter"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "the unit at 1-1 is in ISP mode already. `verge isp flash` flashes it; `verge isp reset` starts the image it holds",
+            "the probe at 1-1 is in ISP mode already. `verge isp flash` flashes it; `verge isp reset` starts the image it holds",
         ));
     tool("mini")
         .args(["isp", "info"])
@@ -2172,7 +2170,7 @@ fn the_isp_commands_say_what_works() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "the tool works with a bootloader only while no other is attached: unplug the mini first",
+            "a flash needs one bootloader alone on the bus: unplug the mini first",
         ))
         .stderr(predicate::str::contains("flashes").not());
 }
@@ -2266,9 +2264,9 @@ fn ending_a_running_capture_says_so() {
         .args(["energy", "start", "--rate", "1k"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("captures 1000 pairs a second"))
+        .stdout(predicate::str::contains("captures 1000 samples a second"))
         .stdout(predicate::str::contains(
-            "This replaced the capture that was running, and its total: 17.1 mJ over 10003 pairs",
+            "This replaced the capture that was running, and its total: 17.1 mJ over 10003 samples",
         ));
     tool("ours-pro-energy")
         .arg("restart")
@@ -2296,7 +2294,7 @@ fn argument_errors_say_what_is_taken() {
         .args(["energy", "start", "--rate", "25k"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("captures 25000 pairs a second"));
+        .stdout(predicate::str::contains("captures 25000 samples a second"));
     tool("ours-plain")
         .args(["dio", "--high", "0,"])
         .assert()
@@ -2309,7 +2307,7 @@ fn argument_errors_say_what_is_taken() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "--window has to be longer than nothing",
+            "--window has to be more than zero",
         ));
     tool("ours-pro").args(["power", "On"]).assert().success();
 }
@@ -2381,8 +2379,18 @@ fn verbose_lines_carry_no_spans() {
         .args(["-v", "update", "--yes"])
         .assert()
         .success()
-        .stderr(predicate::str::contains(" INFO bootloader K2.1.0 answers"))
+        .stderr(predicate::str::contains("DEBUG bootloader K2.1.0 answers"))
         .stderr(predicate::str::contains("step{").not());
+}
+
+/// The bootloader's version is detail for `-v`: a default update does not log it above the bars.
+#[test]
+fn a_default_update_does_not_log_the_bootloader() {
+    tool("ours")
+        .args(["update", "--yes"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("bootloader K2.1.0 answers").not());
 }
 
 /// A unit on the SWD jumper is refused for what is true of it. One running Verge that another
@@ -2394,7 +2402,7 @@ fn the_jumper_is_named_and_a_held_unit_restarts() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "CJ3E7A91C2 has its SWD jumper fitted, which takes away the interfaces the tool reaches its DIO pins through",
+            "CJ3E7A91C2 has its SWD jumper fitted, which takes away the interfaces that reach its DIO pins",
         ))
         .stderr(predicate::str::contains("not running Verge").not());
     tool("busy")
@@ -2468,7 +2476,7 @@ fn isp_reset_with_nothing_in_isp_mode_says_so() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "no unit is in ISP mode, so there is nothing to reset",
+            "no probe is in ISP mode, so there is nothing to reset",
         ))
         .stderr(predicate::str::contains("isp enter").not())
         .stderr(predicate::str::contains("jumper").not());

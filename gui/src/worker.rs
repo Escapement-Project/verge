@@ -242,7 +242,7 @@ fn load_error(error: &LoadError) -> JobError {
         }
         LoadError::NoStock { .. } => Some("Install NXP's LinkServer, or pick the image as a file."),
         LoadError::OtherBoard { .. } | LoadError::NotForBoard { .. } => {
-            Some("Pick NXP's firmware instead: it goes on any board.")
+            Some(crate::app::other_image(error))
         }
         error if download_again(error) => Some(DOWNLOAD_AGAIN),
         LoadError::Release(ReleaseError::CachedCopyFailed { left: Some(_), .. }) => {
@@ -291,7 +291,7 @@ fn look_up_again<H: Http>(github: &GitHub<H>, source: &Source, forward: &Forward
 pub fn arm_error(error: &ArmError) -> String {
     let advice = match error {
         ArmError::OursUndated => {
-            " Tick \"of any build\" to take every unit running Verge, or untick Verge."
+            " Tick \"of any build\" to take every probe running Verge, or untick Verge."
         }
         ArmError::NotForBoard { .. } => " Pick a Verge image built for it, or NXP's firmware.",
         ArmError::Image(_) => "",
@@ -309,7 +309,7 @@ fn recovery(left: Left, board: Option<Board>) -> Option<String> {
         ),
         Left::Partial | Left::Unverified => Some(match board {
             Some(board) => format!(
-                "Flash it again with the same image, which is built for {}: in ISP mode the window cannot tell its board.",
+                "It said it was {} before it went into ISP mode, where the app cannot ask it. Flash it again with the same image, which is built for it.",
                 board.a()
             ),
             None => "Flash it again with the same image.".to_owned(),
@@ -386,13 +386,13 @@ fn update_error(error: &UpdateError, board: Option<Board>) -> JobError {
     let (advice, left_in_isp) = match error {
         UpdateError::Isp(_) => (
             Some(
-                "The unit may be in ISP mode with a partial image. Flashing it again recovers it.",
+                "The probe may be in ISP mode with a partial image. Flashing it again recovers it.",
             ),
             true,
         ),
         UpdateError::NoReturn(_) => (
             Some(
-                "Look at what is attached now. If the unit stays away, fit the ISP jumper and flash it again.",
+                "Look at what is attached now. If the probe stays away, fit the ISP jumper and flash it again.",
             ),
             false,
         ),
@@ -422,7 +422,7 @@ fn update_error(error: &UpdateError, board: Option<Board>) -> JobError {
 /// Restarts a unit running Verge, as `verge restart` does, and waits for it to come back, in the
 /// window's words.
 fn restart<B: Bus>(bus: &B, unit: &Unit) -> Result<(), String> {
-    let name = unit.serial().unwrap_or("the unit");
+    let name = unit.serial().unwrap_or("the probe");
     update::restart(bus, unit).map_err(|error| match error {
         RestartError::Open(error) => format!("opening {name}: {error}"),
         RestartError::Request(error) => format!("asking {name} to restart: {error}"),
@@ -534,8 +534,8 @@ impl Observer for BatchForward<'_, '_> {
 
     fn paused(&mut self, reason: Option<&str>) {
         match reason {
-            Some(reason) => tracing::warn!("paused. {reason}"),
-            None => tracing::info!("resumed"),
+            Some(reason) => tracing::warn!("Paused. {reason}"),
+            None => tracing::info!("Resumed."),
         }
     }
 }
@@ -570,9 +570,9 @@ fn failed_in_isp(entry: &Entry, source: &Source) -> String {
         _ => String::new(),
     };
     format!(
-        "The unit at {}{board} failed and is in ISP mode, maybe with a partial image. The batch \
+        "The probe at {}{board} failed and is in ISP mode, maybe with a partial image. The batch \
          waits until it is unplugged. To flash it again with the batch's image, stop the batch, \
-         then pick the unit in ISP mode under Units and flash it with {image}.",
+         then pick the probe in ISP mode under Probes and flash it with {image}.",
         entry.port
     )
 }
@@ -787,7 +787,7 @@ fn serve<B: Bus + Sync, H: Http + Clone + Send + 'static>(
                 .map_err(|error| enter_error(&error));
                 match &result {
                     Ok(()) => {
-                        tracing::info!("{} is in ISP mode", unit.serial().unwrap_or("the unit"))
+                        tracing::info!("{} is in ISP mode", unit.serial().unwrap_or("the probe"))
                     }
                     Err(error) => tracing::error!("{}", error.message),
                 }
@@ -914,7 +914,7 @@ impl Backend for Worker {
                     return Some(Event::WorkerFailed(JobError {
                         message: format!("the USB worker stopped: {text}"),
                         advice: Some(
-                            "Quit and start Verge again. If a flash was under way, flash the unit again."
+                            "Quit and start Verge again. If a flash was under way, flash the probe again."
                                 .into(),
                         ),
                         left_in_isp: true,

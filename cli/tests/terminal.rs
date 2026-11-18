@@ -189,14 +189,14 @@ fn a_stopped_batch_tallies_its_failures() {
         ],
     );
     p.exp_string("FAILED").unwrap();
-    p.exp_string("waiting for units: 1 failed").unwrap();
+    p.exp_string("waiting for probes: 1 failed").unwrap();
     p.send_control('c').unwrap();
     let rest = p.exp_string("[exit 1]").unwrap();
     assert!(
         rest.contains("Batch stopped: 0 updated, 0 current, 0 skipped, 1 failed, 0 waiting."),
         "{rest}"
     );
-    assert!(rest.contains("1 unit failed; the record file"), "{rest}");
+    assert!(rest.contains("1 probe failed; the record file"), "{rest}");
     std::fs::remove_file(&record).unwrap();
 }
 
@@ -210,7 +210,7 @@ fn a_no_to_the_jumper_download_still_says_how() {
     let rest = p.exp_string("[exit 1]").unwrap();
     assert!(rest.contains("Nothing was downloaded."), "{rest}");
     assert!(
-        rest.contains("To use the jumper: unplug the unit, fit the ISP jumper, plug it back in, and run `verge isp flash` with an image built for a standalone MCU-Link."),
+        rest.contains("To use the jumper: unplug the probe, fit the ISP jumper, plug it back in, and run `verge isp flash` with an image built for a standalone MCU-Link."),
         "{rest}"
     );
     assert!(!rest.contains("ERROR"), "{rest}");
@@ -243,7 +243,7 @@ fn ctrl_c_ends_a_recording_plainly() {
         "{rest}"
     );
     assert!(!rest.contains("WARN"), "{rest}");
-    assert!(rest.contains("pairs to"), "{rest}");
+    assert!(rest.contains("samples to"), "{rest}");
 }
 
 /// NO_COLOR leaves verge's own lines uncoloured on a terminal.
@@ -256,6 +256,6 @@ fn no_color_is_honoured() {
         .env_remove("RUST_LOG");
     let mut p = spawn_command(command, Some(20_000)).unwrap();
     let rest = p.exp_eof().unwrap();
-    assert!(rest.contains("ERROR no unit is in ISP mode"), "{rest}");
+    assert!(rest.contains("ERROR no probe is in ISP mode"), "{rest}");
     assert!(!rest.contains('\u{1b}'), "{rest:?}");
 }

@@ -396,7 +396,7 @@ fn unit_name(unit: &Unit) -> String {
     let location = unit.device.location.as_deref().unwrap_or("?");
     match unit.serial() {
         Some(serial) => format!("{serial} at {location}"),
-        None => format!("the unit at {location}"),
+        None => format!("the probe at {location}"),
     }
 }
 
@@ -905,7 +905,7 @@ impl VergeApp {
         }
         // `main` asks only once a unit is selected.
         let Some(unit) = self.selected_unit() else {
-            return blocked("Pick a unit", "Pick a unit on the left.".into());
+            return blocked("Pick a probe", "Pick a probe on the left.".into());
         };
         let offer = offer(unit, &self.units);
         let Some(path) = offer.best() else {
@@ -981,7 +981,7 @@ impl VergeApp {
             if let Err(error) = checked {
                 return blocked(
                     "Not for this board",
-                    format!("{} Pick {STOCK} for that.", sentence(&error.to_string())),
+                    format!("{} {}", sentence(&error.to_string()), other_image(&error)),
                 );
             }
         }
@@ -1086,13 +1086,13 @@ impl VergeApp {
         let stock = self.choice == Choice::Stock;
         let then = match unit.hardware() {
             _ if stock => format!(
-                "In ISP mode the tool cannot tell the unit's board: flash it with {STOCK}, which goes on any board."
+                "In ISP mode the app cannot tell the probe's board: flash it with {STOCK}, which goes on any board."
             ),
             Hardware::Board(board) => format!(
-                "In ISP mode the tool cannot tell the unit's board: flash it with an image built for {}.",
+                "In ISP mode the app cannot tell the probe's board: flash it with an image built for {}.",
                 board.a()
             ),
-            _ => "In ISP mode the tool cannot tell the unit's board, and its firmware did not say: check that an image is built for it before you flash it.".to_owned(),
+            _ => "In ISP mode the app cannot tell the probe's board, and its firmware did not say: check that an image is built for it before you flash it.".to_owned(),
         };
         let cancel = self.job(
             Kind::Enter,
@@ -1116,7 +1116,7 @@ impl VergeApp {
     fn enter_refusal(&self, unit: &Unit) -> Option<String> {
         if let Err(refused) = update::check_entry(unit, self.choice == Choice::Stock) {
             return Some(format!(
-                "{} To put {STOCK} on it, pick {STOCK} as the image first. To put a Verge image built for it on it, update it with that file instead: the update checks that the image declares this board before anything is flashed.",
+                "{} To put {STOCK} on it, pick {STOCK} as the image first. For a Verge image built for this board, update it with that file instead: the update checks that the image declares the board before anything is flashed.",
                 sentence(&refused.to_string())
             ));
         }
@@ -1306,7 +1306,7 @@ impl VergeApp {
             ui.add_space(space::M);
             let idle = !self.busy();
             for (view, words) in [
-                (View::Units, "Units"),
+                (View::Units, "Probes"),
                 (View::Batch, "Batch"),
                 (View::Bench, "Bench"),
             ] {
@@ -1400,7 +1400,7 @@ impl VergeApp {
                 ui,
                 Status::Attention,
                 if matches!(self.operation, Operation::Batch(_)) {
-                    "The window closes when the batch's unit under way finishes. The batch takes no new units."
+                    "The window closes when the batch's probe under way finishes. The batch takes no new probes."
                 } else if self.bench.finishing() {
                     "Closing once the file is written."
                 } else if self.bench.recording() {
@@ -1412,7 +1412,7 @@ impl VergeApp {
                 } else if self.bench.busy() {
                     "Closing once the file is written."
                 } else {
-                    "The window closes when this update finishes. Cancel stops it at the next safe point; a unit already in its bootloader stays in ISP mode for the next flash."
+                    "The window closes when this update finishes. Cancel stops it at the next safe point; a probe already in its bootloader stays in ISP mode for the next flash."
                 },
             );
         }
@@ -1593,7 +1593,7 @@ impl VergeApp {
                         if self.units.is_empty() {
                             "Plug in an MCU-Link"
                         } else {
-                            "Pick a unit"
+                            "Pick a probe"
                         },
                     )
                     .color(face.ink),
@@ -1611,12 +1611,12 @@ impl VergeApp {
         self.unit_slab(ui, &unit);
         ui.add_space(space::M);
         if denied(&unit) {
-            let refused = "The system does not let your user open this unit. The tool cannot ask it what it runs or update it, with or without the jumper.";
+            let refused = "The system does not let your user open this probe. The app cannot ask it what it runs or update it, with or without the jumper.";
             if cfg!(target_os = "linux") {
                 udev_rules(
                     ui,
                     &format!(
-                        "{refused} Your user needs the udev rules on Verge's Getting started page. Then unplug the unit, plug it back in and press Rescan."
+                        "{refused} Your user needs the udev rules on Verge's Getting started page. Then unplug the probe, plug it back in and press Rescan."
                     ),
                 );
             } else {
@@ -1669,7 +1669,7 @@ impl VergeApp {
                 ui,
                 Status::Attention,
                 &format!(
-                    "Restart {} into ISP mode? It stays there until it is flashed, or reset out of ISP mode. In ISP mode the tool cannot tell its board.",
+                    "Restart {} into ISP mode? It stays there until it is flashed, or reset out of ISP mode. In ISP mode the app cannot tell its board.",
                     unit_name(&asked)
                 ),
             );
@@ -1693,7 +1693,7 @@ impl VergeApp {
                 None => format!("Flash {what}"),
             };
             let mut question = format!(
-                "{lead} onto {}? Keep it plugged in until the tool says it is done.",
+                "{lead} onto {}? Keep it plugged in until the app says it is done.",
                 unit_name(&unit)
             );
             let unknown =
@@ -1760,7 +1760,7 @@ impl VergeApp {
                 ui,
                 text(
                     Role::Body,
-                    "Or leave ISP mode without flashing: the unit starts the image it holds. Take its ISP jumper off first.",
+                    "Or leave ISP mode without flashing: the probe starts the image it holds. Take its ISP jumper off first.",
                 )
                 .color(face.ink_2),
             );
@@ -1794,13 +1794,17 @@ impl VergeApp {
     /// What the unit's state means for an update, in a few words: the slab's subline.
     fn path_line(&self, unit: &Unit) -> String {
         match &unit.state {
-            State::Bootloader => "Waiting for an image".to_owned(),
+            State::Bootloader => match offer(unit, &self.units).best() {
+                Some(Path::FlashNow) => "Waiting for an image",
+                _ => "Cannot be flashed beside another bootloader",
+            }
+            .to_owned(),
             State::MiniBootloader => "A different board: not supported".to_owned(),
             State::Unreadable { .. } if denied(unit) => "Your user may not open it".to_owned(),
             State::Unreadable { .. } if too_old_to_ask(unit) => {
-                format!("Too old to ask: {STOCK} V2.x speaks HID only")
+                "Too old to ask what it runs".to_owned()
             }
-            State::Unreadable { reason, .. } => format!("Could not ask: {reason}"),
+            State::Unreadable { .. } => "Could not ask what it runs".to_owned(),
             State::Held { .. } => "Another program holds its CMSIS-DAP".to_owned(),
             State::Probe { .. } => match offer(unit, &self.units).best() {
                 Some(Path::OursJumperFree | Path::StockJumperFree | Path::DaplinkRsJumperFree) => {
@@ -1928,7 +1932,7 @@ impl VergeApp {
                             release.checksum.name
                         );
                         if let Some(standing) = standing {
-                            words.push_str(&format!(" · the unit {standing}"));
+                            words.push_str(&format!(" · the probe {standing}"));
                         }
                         words
                     }
@@ -1981,7 +1985,7 @@ impl VergeApp {
                 .show(ui, |ui| {
                     ui.checkbox(
                         &mut self.force,
-                        text(Role::Body, "Install anyway: flash this release even though the unit runs the same or a newer build").color(face.ink),
+                        text(Role::Body, "Install anyway: flash this release even though the probe runs the same or a newer build").color(face.ink),
                     );
                 });
         }
@@ -2027,7 +2031,7 @@ impl VergeApp {
                 ui.add_space(space::M);
                 ui.label(text(Role::Display, "Working").color(face.ink));
             });
-            ui.label(text(Role::Instruction, "Do not unplug the unit").color(face.ink));
+            ui.label(text(Role::Instruction, "Do not unplug the probe").color(face.ink));
             let mut facts = vec![job.target.clone()];
             facts.extend(job.image.clone());
             facts.push(format!("{:.1} s", now - job.started));
@@ -2149,7 +2153,7 @@ impl VergeApp {
         let reset = ended.kind == Kind::Reset;
         let (word, instruction, glyph, fill) = match &ended.result {
             Ok(Done::Back(Outcome::Running(_))) => {
-                ("Done", "The unit is back", glyph::DONE, Fill::lume(face))
+                ("Done", "The probe is back", glyph::DONE, Fill::lume(face))
             }
             Ok(Done::Back(Outcome::JumperStillFitted)) if reset => (
                 "Still in ISP mode",
@@ -2208,13 +2212,13 @@ impl VergeApp {
             ),
             Err(error) if ended.kind == Kind::Enter && !error.left_in_isp => (
                 "Failed",
-                "The unit did not reach ISP mode",
+                "The probe did not reach ISP mode",
                 glyph::FAILED,
                 Fill::status(Status::Fault, face),
             ),
             Err(error) if reset && error.left_in_isp => (
                 "Failed",
-                "The unit is still in ISP mode",
+                "The probe is still in ISP mode",
                 glyph::FAILED,
                 Fill::status(Status::Fault, face),
             ),
@@ -2226,7 +2230,7 @@ impl VergeApp {
             ),
             Err(error) if error.left_in_isp => (
                 "Failed",
-                "The unit may be in ISP mode",
+                "The probe may be in ISP mode",
                 glyph::FAILED,
                 Fill::status(Status::Fault, face),
             ),
@@ -2251,7 +2255,7 @@ impl VergeApp {
             }
             Err(_) if ended.failed == Some(Step::WaitForFirmware) => (
                 "Failed",
-                "The unit did not come back",
+                "The probe did not come back",
                 glyph::FAILED,
                 Fill::status(Status::Fault, face),
             ),
@@ -2335,8 +2339,15 @@ impl VergeApp {
                         ui.ctx().copy_text(self.log.text());
                     }
                     ui.label(
-                        text(Role::Label, format!("{warnings} warn · {errors} error"))
-                            .color(face.ink_2),
+                        text(
+                            Role::Label,
+                            format!(
+                                "{} · {}",
+                                plural(warnings, "warning"),
+                                plural(errors, "error")
+                            ),
+                        )
+                        .color(face.ink_2),
                     );
                     if !self.log_open
                         && let Some(line) = lines.last()
@@ -2401,18 +2412,15 @@ pub(crate) fn progress(ui: &mut Ui, fraction: f32, max_width: f32) {
 /// What to do for a unit that needs the jumper, naming its board and the image to flash once it
 /// is in ISP mode, where nothing tells its board.
 fn jumper_advice(unit: &Unit, action: &Action) -> String {
-    let fit = Path::Jumper.describe();
     let Hardware::Board(board) = unit.hardware() else {
-        return format!(
-            "{fit} This unit's firmware does not say which board it is, and in ISP mode nothing does: flash it with an image built for it."
-        );
+        return "This probe's firmware does not say which board it is, and in ISP mode nothing does: flash it with an image built for it.".to_owned();
     };
     match action {
         Action::Ready {
             source: Source::Release(_),
             ..
         } if board != Board::McuLink => format!(
-            "{fit} This unit is {}. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it with {STOCK}, or with a file built for {}.",
+            "This probe is {}. In ISP mode the app cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it with {STOCK}, or with a file built for {}.",
             board.a(),
             board.a()
         ),
@@ -2421,16 +2429,16 @@ fn jumper_advice(unit: &Unit, action: &Action) -> String {
             what,
             ..
         } => format!(
-            "{fit} This unit is {}. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it then with {what} only if it is built for {}.",
+            "This probe is {}. In ISP mode the app cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it with {what} only if it is built for {}.",
             board.a(),
             board.a()
         ),
         Action::Ready { what, .. } => format!(
-            "{fit} This unit is {}. In ISP mode the tool cannot tell its board, so flash it then with {what}, which is built for it.",
+            "This probe is {}. In ISP mode the app cannot tell its board, so flash it with {what}, which is built for it.",
             board.a()
         ),
         Action::Blocked { .. } => format!(
-            "{fit} This unit is {}. In ISP mode the tool cannot tell its board, so flash it then with an image built for {}.",
+            "This probe is {}. In ISP mode the app cannot tell its board, so flash it with an image built for {}.",
             board.a(),
             board.a()
         ),
@@ -2449,7 +2457,7 @@ fn window_notes(unit: &Unit, offer: &escapement_verge_probe::paths::Offer) -> Ve
         return offer.notes.clone();
     }
     let mut notes = vec![format!(
-        "The tool could not ask this unit what it runs: {reason}."
+        "The app could not ask this probe what it runs: {reason}."
     )];
     if escapement_verge_probe::paths::asking_again_may_free(guess) {
         notes.push(
@@ -2458,6 +2466,22 @@ fn window_notes(unit: &Unit, offer: &escapement_verge_probe::paths::Offer) -> Ve
         );
     }
     notes
+}
+
+/// What else can go on a probe a Verge image is not for, after the refusal that says NXP's
+/// firmware can.
+pub(crate) fn other_image(error: &LoadError) -> &'static str {
+    match error {
+        LoadError::NotForBoard { .. } => {
+            "Pick NXP's firmware under Image, or a Verge file built for this board."
+        }
+        _ => "Pick NXP's firmware under Image.",
+    }
+}
+
+/// `n` of `what`, as "1 warning" or "0 errors".
+fn plural(n: usize, what: &str) -> String {
+    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
 }
 
 /// An error message as a sentence: capitalised, with a full stop.
