@@ -20,6 +20,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 escapement-verge-probe = { version = "0.1.0", path = "../../verge-probe", features = ["tickwave"] }
 escapement-tickwave-egui = { version = "0.1.0", path = "../../tickwave/crates/egui" }
+jiff = "1.0.1"
 
 [lints]
 workspace = true

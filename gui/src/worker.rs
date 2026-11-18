@@ -12,17 +12,34 @@ use escapement_verge_probe::batch::{
     ArmError, Armed, Batch, Entry, Filter, Observer, Record, RecordWriter, Status, Tally,
     open_record,
 };
+use escapement_verge_probe::board::Board;
 use escapement_verge_probe::dap::EntryError;
-use escapement_verge_probe::progress::{Cancel, Progress, Step};
+use escapement_verge_probe::detect::Hardware;
+use escapement_verge_probe::progress::{Cancel, Left, Progress, Step};
 use escapement_verge_probe::release::{Download, GitHub, Http, Release, ReleaseError};
 use escapement_verge_probe::source::{self, LoadError, Loaded, Source};
-use escapement_verge_probe::update::{self, Outcome, Timing, UpdateError};
+use escapement_verge_probe::update::{self, Outcome, RestartError, Timing, UpdateError};
 use escapement_verge_probe::{Bus, Unit, detect};
 
 pub enum Request {
     Bench(crate::bench_worker::Command),
     Detect,
-    Release,
+    /// Looks up the release with this tag, or the latest.
+    Release(Option<String>),
+    /// Restarts a unit running Verge, as `verge restart` does, then looks at the bus again.
+    Restart(Box<Unit>),
+    /// Resets the unit in ISP mode at this port out of it, as `verge isp reset` does.
+    Reset {
+        port: Option<String>,
+        cancel: Cancel,
+    },
+    /// Restarts a unit into its bootloader without the jumper and leaves it there, as `verge isp
+    /// enter` does; with `stock`, for NXP's firmware, which goes on any board.
+    Enter {
+        unit: Box<Unit>,
+        stock: bool,
+        cancel: Cancel,
+    },
     Install {
         unit: Box<Unit>,
         source: Source,
@@ -55,9 +72,20 @@ pub struct BatchState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobError {
     pub message: String,
-    pub advice: Option<&'static str>,
+    pub advice: Option<String>,
     /// Whether the unit may have been left in ISP mode.
     pub left_in_isp: bool,
+    /// What a cancel left on the unit, where the job was cancelled.
+    pub stopped: Option<Stopped>,
+}
+
+/// What a cancel left on the unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stopped {
+    /// Stopped before anything was sent to the unit.
+    Unchanged,
+    /// Stopped once the unit was asked for its bootloader, leaving it as this says.
+    Left(Left),
 }
 
 #[derive(Clone, Debug)]
@@ -72,6 +100,8 @@ pub enum ProgressEvent {
 pub enum InstallEvent {
     Loaded(String),
     Finished(Result<Outcome, JobError>),
+    /// The unit waits in ISP mode, or why it does not.
+    Entered(Result<(), JobError>),
 }
 
 #[derive(Clone, Debug)]
@@ -91,6 +121,8 @@ pub enum Event {
     Progress(ProgressEvent),
     Install(InstallEvent),
     Batch(BatchEvent),
+    /// A restart's result: an error says why the unit did not come back.
+    Restarted(Result<(), String>),
     WorkerFailed(JobError),
 }
 
@@ -210,7 +242,7 @@ fn load_error(error: &LoadError) -> JobError {
         }
         LoadError::NoStock { .. } => Some("Install NXP's LinkServer, or pick the image as a file."),
         LoadError::OtherBoard { .. } | LoadError::NotForBoard { .. } => {
-            Some("Pick Stock to put NXP's image on it instead.")
+            Some("Pick NXP's firmware instead: it goes on any board.")
         }
         error if download_again(error) => Some(DOWNLOAD_AGAIN),
         LoadError::Release(ReleaseError::CachedCopyFailed { left: Some(_), .. }) => {
@@ -220,8 +252,9 @@ fn load_error(error: &LoadError) -> JobError {
     };
     JobError {
         message: error.to_string(),
-        advice,
+        advice: advice.map(str::to_owned),
         left_in_isp: false,
+        stopped: None,
     }
 }
 
@@ -240,11 +273,15 @@ fn download_again(error: &LoadError) -> bool {
 const DOWNLOAD_AGAIN: &str = "Try again: the question then asks to download the release.";
 const CLEAR_THE_COPY: &str = "Delete that copy, then try again.";
 
-/// Looks the latest release up again for the window. Its questions judge the cache by its own
-/// lookup, and a release the cache could not give may have been published again since, so
-/// without this the next question would still name no download.
-fn look_up_again<H: Http>(github: &GitHub<H>, forward: &Forward<'_>) {
-    let release = source::release(github, None)
+/// Looks the release `source` names up again for the window: its tag, or the latest. Its
+/// questions judge the cache by its own lookup, and a release the cache could not give may have
+/// been published again since, so without this the next question would still name no download.
+fn look_up_again<H: Http>(github: &GitHub<H>, source: &Source, forward: &Forward<'_>) {
+    let tag = match source {
+        Source::Release(tag) => tag.as_deref(),
+        _ => None,
+    };
+    let release = source::release(github, tag)
         .map(Box::new)
         .map_err(|e| e.to_string());
     forward.send(Event::Release(release));
@@ -256,15 +293,98 @@ pub fn arm_error(error: &ArmError) -> String {
         ArmError::OursUndated => {
             " Tick \"of any build\" to take every unit running Verge, or untick Verge."
         }
-        ArmError::NotForBoard { .. } => " Pick a Verge image built for it, or Stock.",
+        ArmError::NotForBoard { .. } => " Pick a Verge image built for it, or NXP's firmware.",
         ArmError::Image(_) => "",
     };
     format!("{}{advice}", crate::app::sentence(&error.to_string()))
 }
 
-fn update_error(error: &UpdateError) -> JobError {
+/// What to do once a cancel left the unit as `left`, in the window's words: a unit in ISP mode is
+/// listed under Units, with Reset out of ISP mode and the image choices.
+fn recovery(left: Left, board: Option<Board>) -> Option<String> {
+    match left {
+        Left::InIsp => Some(
+            "Reset out of ISP mode starts the image it holds, and flashing it installs the new one."
+                .to_owned(),
+        ),
+        Left::Partial | Left::Unverified => Some(match board {
+            Some(board) => format!(
+                "Flash it again with the same image, which is built for {}: in ISP mode the window cannot tell its board.",
+                board.a()
+            ),
+            None => "Flash it again with the same image.".to_owned(),
+        }),
+        Left::Flashed | Left::Reset => None,
+    }
+}
+
+/// Why entering ISP mode failed. Nothing is flashed, so there is no new image to install.
+fn enter_error(error: &UpdateError) -> JobError {
+    match error {
+        UpdateError::Cancelled(left) => JobError {
+            message: error.to_string(),
+            advice: (*left == Left::InIsp)
+                .then(|| "Reset out of ISP mode starts the image it holds.".to_owned()),
+            left_in_isp: left.in_isp(),
+            stopped: Some(Stopped::Left(*left)),
+        },
+        error => update_error(error, None),
+    }
+}
+
+/// Why a reset out of ISP mode failed. The unit stays in ISP mode unless it left it: a cancel
+/// while it restarts, or a restart it did not come back from.
+fn reset_error(error: &UpdateError) -> JobError {
+    let (left_in_isp, stopped) = match error {
+        UpdateError::Cancelled(left) => (left.in_isp(), Some(Stopped::Left(*left))),
+        UpdateError::Stopped => (true, Some(Stopped::Unchanged)),
+        // The bootloader is still there: it did not answer, or refused the reset.
+        UpdateError::RomSilent { .. } | UpdateError::Isp(_) => (true, None),
+        // No bootloader to reset, or what came back after the reset was not the unit as expected.
+        _ => (false, None),
+    };
+    JobError {
+        message: error.to_string(),
+        advice: matches!(error, UpdateError::RomSilent { .. })
+            .then(|| update::ROM_SILENT_ADVICE.to_owned()),
+        left_in_isp,
+        stopped,
+    }
+}
+
+/// Why an update failed, and what to do. `board` is the unit's board where it is known, for the
+/// recovery of a cancel that left it in ISP mode.
+fn update_error(error: &UpdateError, board: Option<Board>) -> JobError {
+    match error {
+        UpdateError::Cancelled(left) => {
+            return JobError {
+                message: error.to_string(),
+                advice: recovery(*left, board),
+                left_in_isp: left.in_isp(),
+                stopped: Some(Stopped::Left(*left)),
+            };
+        }
+        UpdateError::Stopped => {
+            return JobError {
+                message: error.to_string(),
+                advice: None,
+                left_in_isp: false,
+                stopped: Some(Stopped::Unchanged),
+            };
+        }
+        // The bootloader never answered, so nothing was written.
+        UpdateError::RomSilent { .. } => {
+            return JobError {
+                message: error.to_string(),
+                advice: Some(update::ROM_SILENT_ADVICE.to_owned()),
+                left_in_isp: true,
+                stopped: None,
+            };
+        }
+        _ => {}
+    }
     let (advice, left_in_isp) = match error {
-        UpdateError::Isp(_) | UpdateError::Cancelled | UpdateError::RomSilent { .. } => (
+        UpdateError::Isp(_) => (
             Some(
                 "The unit may be in ISP mode with a partial image. Flashing it again recovers it.",
             ),
@@ -293,9 +413,25 @@ fn update_error(error: &UpdateError) -> JobError {
     };
     JobError {
         message: error.to_string(),
-        advice,
+        advice: advice.map(str::to_owned),
         left_in_isp,
+        stopped: None,
     }
+}
+
+/// Restarts a unit running Verge, as `verge restart` does, and waits for it to come back, in the
+/// window's words.
+fn restart<B: Bus>(bus: &B, unit: &Unit) -> Result<(), String> {
+    let name = unit.serial().unwrap_or("the unit");
+    update::restart(bus, unit).map_err(|error| match error {
+        RestartError::Open(error) => format!("opening {name}: {error}"),
+        RestartError::Request(error) => format!("asking {name} to restart: {error}"),
+        RestartError::Look(error) => error.to_string(),
+        RestartError::NoReturn => format!(
+            "{name} did not come back within {} s of its restart",
+            update::RESTART_RETURNS.as_secs()
+        ),
+    })
 }
 
 #[allow(
@@ -323,14 +459,15 @@ fn install<B: Bus, H: Http + Clone + Send + 'static>(
     )
     .map_err(|error| {
         if download_again(&error) {
-            look_up_again(github, progress);
+            look_up_again(github, source, progress);
         }
         load_error(&error)
     })?
     .ok_or_else(|| JobError {
-        message: "cancelled before anything was flashed".into(),
+        message: UpdateError::Stopped.to_string(),
         advice: None,
         left_in_isp: false,
+        stopped: Some(Stopped::Unchanged),
     })?;
     progress.send(Event::Install(InstallEvent::Loaded(loaded.name.clone())));
     tracing::info!("installing {}", loaded.name);
@@ -343,7 +480,13 @@ fn install<B: Bus, H: Http + Clone + Send + 'static>(
         cancel,
         cancel,
     )
-    .map_err(|error| update_error(&error))
+    .map_err(|error| {
+        let board = match unit.hardware() {
+            Hardware::Board(board) => Some(board),
+            _ => None,
+        };
+        update_error(&error, board)
+    })
 }
 
 /// A batch's events, and its record file.
@@ -397,7 +540,7 @@ impl Observer for BatchForward<'_, '_> {
     }
 }
 
-fn state<B: Bus + Sync>(batch: &Batch<'_, B>) -> BatchState {
+fn state<B: Bus + Sync>(batch: &Batch<'_, B>, source: &Source) -> BatchState {
     BatchState {
         tally: batch.tally(),
         waiting: batch
@@ -406,8 +549,32 @@ fn state<B: Bus + Sync>(batch: &Batch<'_, B>) -> BatchState {
             .filter(|e| e.status == Status::Waiting)
             .map(|e| (e.port.clone(), e.serial_before.clone()))
             .collect(),
-        paused: batch.paused().map(str::to_owned),
+        paused: batch.paused().map(|reason| match batch.failed_in_isp() {
+            Some(entry) => failed_in_isp(entry, source),
+            None => reason.to_owned(),
+        }),
     }
+}
+
+/// The wait for a unit that failed and is in ISP mode, in the window's words: the window flashes
+/// it under Units once the batch is stopped.
+fn failed_in_isp(entry: &Entry, source: &Source) -> String {
+    let image = match source {
+        Source::Release(Some(tag)) => format!("release {tag}"),
+        Source::Release(None) => "the latest release".to_owned(),
+        Source::Stock(_) => crate::app::STOCK.to_owned(),
+        Source::File(path) => format!("the file {}", path.display()),
+    };
+    let board = match &entry.hardware {
+        Hardware::Board(board) => format!(", {},", board.a()),
+        _ => String::new(),
+    };
+    format!(
+        "The unit at {}{board} failed and is in ISP mode, maybe with a partial image. The batch \
+         waits until it is unplugged. To flash it again with the batch's image, stop the batch, \
+         then pick the unit in ISP mode under Units and flash it with {image}.",
+        entry.port
+    )
 }
 
 #[allow(
@@ -432,9 +599,9 @@ fn run_batch<B: Bus + Sync, H: Http + Clone + Send + 'static>(
     let loaded = load_stoppable(github, source, None, true, download, forward, stop);
     let Some(loaded) = loaded.map_err(|error| {
         if download_again(&error) {
-            look_up_again(github, forward);
+            look_up_again(github, source, forward);
         }
-        match load_error(&error).advice {
+        match load_error(&error).advice.as_deref() {
             Some(advice @ (DOWNLOAD_AGAIN | CLEAR_THE_COPY)) => {
                 format!("{} {advice}", crate::app::sentence(&error.to_string()))
             }
@@ -450,6 +617,7 @@ fn run_batch<B: Bus + Sync, H: Http + Clone + Send + 'static>(
         name: loaded.name,
         version: loaded.version,
         source: source.clone(),
+        repo: github.repo().clone(),
     };
     armed.check(&filter).map_err(|error| arm_error(&error))?;
     // The default record directory, the user's data directory, need not exist yet.
@@ -484,7 +652,7 @@ fn run_batch<B: Bus + Sync, H: Http + Clone + Send + 'static>(
     let mut stepped = Ok(());
     while !batch.finished() && stepped.is_ok() {
         stepped = batch.step(&mut observer);
-        let now = state(&batch);
+        let now = state(&batch, source);
         if shown.as_ref() != Some(&now) {
             observer
                 .forward
@@ -552,6 +720,7 @@ fn serve<B: Bus + Sync, H: Http + Clone + Send + 'static>(
                                 dio_reason: Some(crate::bench_worker::DioUnavailable::connection(
                                     &error,
                                 )),
+                                refused: crate::bench_worker::refused(&error),
                                 error: Some(format!("{error:#}")),
                                 ..Status::default()
                             })),
@@ -575,11 +744,60 @@ fn serve<B: Bus + Sync, H: Http + Clone + Send + 'static>(
                 bench.take();
                 forward.send(Event::Units(detect(bus).map_err(|e| e.to_string())));
             }
-            Request::Release => {
-                let release = source::release(github, None)
+            Request::Release(tag) => {
+                let release = source::release(github, tag.as_deref())
                     .map(Box::new)
                     .map_err(|e| e.to_string());
                 forward.send(Event::Release(release));
+            }
+            Request::Restart(unit) => {
+                bench.take();
+                let result = restart(bus, &unit);
+                if let Err(error) = &result {
+                    tracing::error!("{error}");
+                }
+                forward.send(Event::Restarted(result));
+                forward.send(Event::Units(detect(bus).map_err(|e| e.to_string())));
+            }
+            Request::Reset { port, cancel } => {
+                bench.take();
+                let result = update::reset_now(
+                    bus,
+                    port.as_deref(),
+                    &Timing::default(),
+                    &mut forward,
+                    &cancel,
+                )
+                .map_err(|error| reset_error(&error));
+                match &result {
+                    Ok(_) => tracing::info!("the reset finished"),
+                    Err(error) => tracing::error!("{}", error.message),
+                }
+                forward.send(Event::Install(InstallEvent::Finished(result)));
+            }
+            Request::Enter {
+                unit,
+                stock,
+                cancel,
+            } => {
+                bench.take();
+                let result = update::enter_bootloader(
+                    bus,
+                    &unit,
+                    stock,
+                    &Timing::default(),
+                    &mut forward,
+                    &cancel,
+                )
+                .map(drop)
+                .map_err(|error| enter_error(&error));
+                match &result {
+                    Ok(()) => {
+                        tracing::info!("{} is in ISP mode", unit.serial().unwrap_or("the unit"))
+                    }
+                    Err(error) => tracing::error!("{}", error.message),
+                }
+                forward.send(Event::Install(InstallEvent::Entered(result)));
             }
             Request::Install {
                 unit,
@@ -700,11 +918,13 @@ impl Backend for Worker {
                         .unwrap_or_else(|| "no message".into());
                     tracing::error!("the USB worker stopped: {text}");
                     return Some(Event::WorkerFailed(JobError {
-                        message: format!("the USB worker stopped unexpectedly: {text}"),
+                        message: format!("the USB worker stopped: {text}"),
                         advice: Some(
-                            "Restart the tool. If a flash was under way, flash the unit again.",
+                            "Quit and start Verge again. If a flash was under way, flash the unit again."
+                                .into(),
                         ),
                         left_in_isp: true,
+                        stopped: None,
                     }));
                 }
                 None
@@ -735,7 +955,21 @@ impl Backend for Manual {
         self.sent.push(match request {
             Request::Bench(command) => format!("bench {command:?}"),
             Request::Detect => "detect".into(),
-            Request::Release => "release".into(),
+            Request::Release(None) => "release".into(),
+            Request::Release(Some(tag)) => format!("release {tag}"),
+            Request::Restart(unit) => format!("restart {}", unit.device.instance),
+            Request::Reset { port, cancel } => {
+                self.last_cancel = Some(cancel);
+                format!("reset {port:?}")
+            }
+            Request::Enter {
+                unit,
+                stock,
+                cancel,
+            } => {
+                self.last_cancel = Some(cancel);
+                format!("enter {} stock {stock}", unit.device.instance)
+            }
             Request::Install {
                 source,
                 download,
@@ -772,5 +1006,76 @@ impl Backend for Shared {
 
     fn try_recv(&mut self) -> Option<Event> {
         self.lock().expect("the test's backend lock").try_recv()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cancel says what it left, and a unit left in ISP mode gets the way back in the window's
+    /// words, not a command. One after the verified flash leaves the unit restarting, and needs
+    /// none.
+    #[test]
+    fn a_cancel_says_what_it_left_and_how_to_recover_it() {
+        for left in [
+            Left::InIsp,
+            Left::Partial,
+            Left::Unverified,
+            Left::Flashed,
+            Left::Reset,
+        ] {
+            let error = update_error(&UpdateError::Cancelled(left), None);
+            assert_eq!(error.message, left.to_string());
+            assert_eq!(error.left_in_isp, left.in_isp(), "{left:?}");
+            assert_eq!(error.stopped, Some(Stopped::Left(left)));
+            assert_eq!(error.advice.is_some(), left.in_isp(), "{left:?}");
+            assert!(
+                !error
+                    .advice
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("verge "),
+                "{left:?}: {:?}",
+                error.advice
+            );
+        }
+        let error = update_error(&UpdateError::Cancelled(Left::Partial), Some(Board::McuLink));
+        let advice = error.advice.unwrap();
+        assert!(advice.contains("a standalone MCU-Link"), "{advice}");
+    }
+
+    /// A reset leaves the unit in ISP mode unless it left it: cancelled while it restarts, or gone
+    /// and not back. An entry cancelled once the unit is in ISP mode says so, with the way out.
+    #[test]
+    fn a_reset_or_an_entry_says_where_it_left_the_unit() {
+        let restarting = reset_error(&UpdateError::Cancelled(Left::Reset));
+        assert!(!restarting.left_in_isp);
+        assert_eq!(restarting.stopped, Some(Stopped::Left(Left::Reset)));
+        let gone = reset_error(&UpdateError::NoReturn(std::time::Duration::from_secs(10)));
+        assert!(!gone.left_in_isp);
+        assert!(!reset_error(&UpdateError::NoneInIsp).left_in_isp);
+        let unchanged = reset_error(&UpdateError::Stopped);
+        assert!(unchanged.left_in_isp);
+        assert_eq!(unchanged.stopped, Some(Stopped::Unchanged));
+        let entered = enter_error(&UpdateError::Cancelled(Left::InIsp));
+        assert!(entered.left_in_isp);
+        assert_eq!(entered.stopped, Some(Stopped::Left(Left::InIsp)));
+        assert_eq!(
+            enter_error(&UpdateError::Stopped).stopped,
+            Some(Stopped::Unchanged)
+        );
+        assert_eq!(
+            entered.advice.as_deref(),
+            Some("Reset out of ISP mode starts the image it holds.")
+        );
+        let silent = update_error(
+            &UpdateError::RomSilent {
+                waited: std::time::Duration::from_secs(5),
+                last: "timed out".into(),
+            },
+            None,
+        );
+        assert_eq!(silent.advice.as_deref(), Some(update::ROM_SILENT_ADVICE));
     }
 }

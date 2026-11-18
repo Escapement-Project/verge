@@ -281,7 +281,7 @@ pub(crate) fn render(frame: &mut Frame, model: &Model) {
         Paragraph::new(vec![
             Line::from(model.pair_text()),
             Line::from(model.total_text()),
-            Line::from(leave).style(Style::new().fg(Color::DarkGray)),
+            Line::from(leave).style(Style::new().fg(colour(Color::DarkGray))),
         ])
         .block(Block::bordered().title(format!(
             " {} energy{} ",
@@ -336,6 +336,15 @@ pub(crate) fn render(frame: &mut Frame, model: &Model) {
     }
 }
 
+/// `colour`, or the terminal's own where NO_COLOR asks for none.
+fn colour(colour: Color) -> Color {
+    if crate::no_colour() {
+        Color::Reset
+    } else {
+        colour
+    }
+}
+
 struct Graph {
     title: &'static str,
     points: Vec<(f64, f64)>,
@@ -362,7 +371,7 @@ fn chart(frame: &mut Frame, area: Rect, graph: &Graph, model: &Model) {
     let dataset = Dataset::default()
         .marker(Marker::Braille)
         .graph_type(GraphType::Line)
-        .style(Style::new().fg(color))
+        .style(Style::new().fg(colour(color)))
         .data(points);
     frame.render_widget(
         Chart::new(vec![dataset])
@@ -397,6 +406,9 @@ pub fn watch<B: Bus>(
     if options.every.is_zero() {
         bail!("--every has to be longer than nothing");
     }
+    if options.window.is_zero() {
+        bail!("--window has to be longer than nothing");
+    }
     let totals = pro
         .info()
         .with_context(|| format!("asking {name} what it runs"))?
@@ -429,9 +441,13 @@ pub fn watch<B: Bus>(
                 "{name} already runs a capture, which keeps its current ranges: --range is for a capture this starts"
             );
         }
-        if streams {
-            pro.stream_energy_capture_identified(0)
-                .with_context(|| format!("streaming {name}'s capture"))?;
+        if streams && let Err(error) = pro.stream_energy_capture_identified(0) {
+            return Err(super::energy_error(
+                pro,
+                name,
+                &format!("streaming {name}'s capture"),
+                error,
+            ));
         }
         None
     } else {
@@ -445,9 +461,12 @@ pub fn watch<B: Bus>(
         match start {
             Ok(start) => Some(start.actual_rate_pairs_per_second),
             Err(start) => {
-                return Err(anyhow!(start).context(format!(
-                    "starting {name}'s capture; completion may be uncertain"
-                )));
+                return Err(super::energy_error(
+                    pro,
+                    name,
+                    &format!("starting {name}'s capture"),
+                    start,
+                ));
             }
         }
     };
@@ -1168,7 +1187,7 @@ mod tests {
         let screen = screen(&model);
         assert!(screen.contains("CJ3E7A91C2 energy"), "{screen}");
         assert!(
-            screen.contains("3.30 V  20.0 µA  (350 mA, high gain)  pair 1900"),
+            screen.contains("3.30 V  20.0 µA  (low range, 350 mA setting)  pair 1900"),
             "{screen}"
         );
         assert!(

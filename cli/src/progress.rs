@@ -7,19 +7,42 @@ use tracing::span::EnteredSpan;
 use tracing::{Span, info_span};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
-#[derive(Default)]
+/// The width of the label before each bar: the longest step label, or a batch's port and serial.
+const LABEL: usize = 26;
+
 pub struct Bars {
+    /// What the bar over the steps says: the operation, or the unit a batch updates.
+    name: String,
     overall: Option<EnteredSpan>,
     current: Option<EnteredSpan>,
 }
 
+impl Default for Bars {
+    fn default() -> Bars {
+        Bars::new("update")
+    }
+}
+
 fn style(template: &str) -> ProgressStyle {
-    ProgressStyle::with_template(template)
+    ProgressStyle::with_template(&template.replace("{msg}", &format!("{{msg:>{LABEL}}}")))
         .expect("the bar templates are valid")
         .progress_chars("=> ")
 }
 
 impl Bars {
+    pub fn new(name: impl Into<String>) -> Bars {
+        Bars {
+            name: name.into(),
+            overall: None,
+            current: None,
+        }
+    }
+
+    /// Names the bar over the steps of the next plan.
+    pub fn rename(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+    }
+
     fn finish_current(&mut self) {
         if self.current.take().is_some()
             && let Some(overall) = &self.overall
@@ -27,9 +50,7 @@ impl Bars {
             overall.pb_inc(1);
         }
     }
-}
 
-impl Bars {
     /// Removes the bars, as when one unit of a batch is done.
     pub fn clear(&mut self) {
         self.current.take();
@@ -47,8 +68,8 @@ impl Progress for Bars {
     fn plan(&mut self, steps: &[Step]) {
         self.finish_current();
         let span = info_span!("update");
-        span.pb_set_style(&style("{msg:>22} [{bar:30}] {pos}/{len} steps  {elapsed}"));
-        span.pb_set_message("update");
+        span.pb_set_style(&style("{msg} [{bar:30}] {pos}/{len} steps  {elapsed}"));
+        span.pb_set_message(&self.name);
         span.pb_set_length(steps.len() as u64);
         span.pb_start();
         self.overall = Some(span.entered());
@@ -60,12 +81,12 @@ impl Progress for Bars {
         match step.unit() {
             Unit::Bytes => {
                 span.pb_set_style(&style(
-                    "{msg:>22} [{bar:30}] {bytes}/{total_bytes}  {binary_bytes_per_sec}",
+                    "{msg} [{bar:30}] {bytes}/{total_bytes}  {binary_bytes_per_sec}",
                 ));
                 span.pb_set_length(total);
             }
             Unit::None => {
-                span.pb_set_style(&style("{msg:>22} {spinner} {elapsed}"));
+                span.pb_set_style(&style("{msg} {spinner} {elapsed}"));
             }
         }
         span.pb_set_message(&step.to_string());
@@ -81,5 +102,26 @@ impl Progress for Bars {
 
     fn note(&mut self, text: &str) {
         tracing::warn!("{text}");
+    }
+}
+
+/// A spinner with a line of text that changes, for something that runs until it ends: a batch
+/// waiting for units, or a recording. Hidden where stderr is not a terminal.
+pub struct Spinner(Span);
+
+impl Spinner {
+    pub fn new(text: &str) -> Spinner {
+        let span = info_span!("spinner");
+        span.pb_set_style(
+            &ProgressStyle::with_template("{spinner} {msg}  {elapsed}")
+                .expect("the spinner template is valid"),
+        );
+        span.pb_set_message(text);
+        span.pb_start();
+        Spinner(span)
+    }
+
+    pub fn set(&self, text: &str) {
+        self.0.pb_set_message(text);
     }
 }

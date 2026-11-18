@@ -128,8 +128,10 @@ fn list_is_the_default() {
         .stdout(predicate::str::contains(
             "CJ3E7A91C2     Verge, build 14d05d4",
         ))
-        .stdout(predicate::str::contains("QK7RM2VTX8D41  stock V3.172"))
-        .stdout(predicate::str::is_match(r"\n +update +jumper-free \(stock\)").unwrap());
+        .stdout(predicate::str::contains(
+            "QK7RM2VTX8D41  NXP's firmware V3.172",
+        ))
+        .stdout(predicate::str::is_match(r"\n +update +jumper-free \(NXP's firmware\)").unwrap());
 }
 
 /// Every label sits under the serials and every value under the states, whatever the line.
@@ -188,7 +190,7 @@ fn two_units_need_a_serial() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "2 MCU-Links are attached (CJ3E7A91C2, QK7RM2VTX8D41)",
+            "2 attached units could be meant: CJ3E7A91C2 and QK7RM2VTX8D41. Pick one with --serial",
         ));
 }
 
@@ -199,17 +201,24 @@ fn old_stock_is_sent_to_the_jumper() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "Stock V3.108 has no jumper-free update",
+            "NXP's firmware V3.108 has no jumper-free update",
         ))
         .stderr(predicate::str::contains("fit the ISP jumper"));
 }
 
+/// A flash the unit came back from in ISP mode went in, but the unit does not run it yet: a
+/// script sees status 3, not success.
 #[test]
 fn flash_with_the_jumper_still_on() {
     tool("isp-jumper")
         .args(["isp", "flash", "--yes"])
         .assert()
-        .success()
+        .code(3)
+        .stdout(predicate::str::contains("its ISP pin is still held low"));
+    tool("isp-jumper")
+        .args(["update", "--yes"])
+        .assert()
+        .code(3)
         .stdout(predicate::str::contains("its ISP pin is still held low"));
 }
 
@@ -231,7 +240,9 @@ fn an_image_that_never_comes_back_says_what_to_do() {
         .arg(fixture("layout.s19"))
         .assert()
         .failure()
-        .stderr(predicate::str::contains("did not come back"))
+        .stderr(predicate::str::contains(
+            "did not come back within 15 s of the reset",
+        ))
         .stderr(predicate::str::contains("verge list"));
 }
 
@@ -267,13 +278,13 @@ fn release_compares_each_unit() {
         .success()
         .stdout(predicate::str::starts_with("v0.3.0"))
         .stdout(predicate::str::contains(
-            "checked against mculink-verge-v0.3.0.s19.minisig and mculink-verge-v0.3.0.s19.sha256",
+            "signed in mculink-verge-v0.3.0.s19.minisig, checksum in mculink-verge-v0.3.0.s19.sha256",
         ))
         .stdout(predicate::str::contains(
             "runs 14d05d4, which carries no version",
         ))
         .stdout(predicate::str::contains(
-            "runs stock; installing this release replaces it",
+            "runs NXP's firmware; installing this release replaces it",
         ));
 }
 
@@ -448,7 +459,8 @@ fn a_batch_updates_each_unit_as_it_arrives_and_records_it() {
         .stdout(predicate::str::contains(
             "Batch done: 3 updated, 1 current, 1 skipped, 0 failed, 0 waiting.",
         ))
-        .stdout(predicate::str::contains("1-3      CJ"))
+        // The serial is padded as `list` pads it, so the columns after it line up.
+        .stdout(predicate::str::contains("1-3      CJ3E7AC4F5      Verge"))
         .stdout(predicate::str::contains("1-3      blinking"))
         .stdout(predicate::str::contains("SKIPPED: needs the ISP jumper"))
         // The batch ends with the third update, so the last unit is not left blinking.
@@ -492,7 +504,7 @@ fn a_batch_asks_once_and_says_what_it_takes() {
             "Download release v0.3.0 of Escapement-Project/mculink-verge from GitHub (",
         ))
         .stderr(predicate::str::contains(
-            " KiB), and flash it onto every full MCU-Link running stock below V3.200 or in ISP mode, attached from now on?",
+            " KiB), and flash it onto every standalone MCU-Link running NXP's firmware older than V3.200 or in ISP mode, attached from now on?",
         ))
         .stderr(predicate::str::contains(
             "cannot tell an MCU-Link from any other",
@@ -507,7 +519,7 @@ fn ours_any_takes_ours_as_stock_below_takes_stock() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "every full MCU-Link running Verge or in ISP mode, attached from now on?",
+            "every standalone MCU-Link running Verge or in ISP mode, attached from now on?",
         ));
 }
 
@@ -575,7 +587,9 @@ fn ours_is_refused_for_a_pro() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("the unit is an MCU-Link Pro"))
-        .stderr(predicate::str::contains("with --stock"));
+        .stderr(predicate::str::contains(
+            "with --stock, or a Verge build that declares it with --file IMAGE",
+        ));
 }
 
 /// A simulated image of ours in a file of its own, declaring `boards` where they are given.
@@ -636,14 +650,14 @@ fn bootloader_sends_a_pro_into_isp_mode_only_for_stock() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "The unit, a full MCU-Link, is in ISP mode at 1-1, where the tool cannot tell its board. Flash it with `verge isp flash` and an image built for a full MCU-Link",
+            "The unit, a standalone MCU-Link, is in ISP mode at 1-1, where the tool cannot tell its board. Flash it with `verge isp flash` and an image built for a standalone MCU-Link",
         ));
 }
 
 #[test]
 fn list_names_each_units_board() {
     for (scenario, board) in [
-        ("bench", "MCU-Link"),
+        ("bench", "standalone MCU-Link"),
         ("pro", "MCU-Link Pro"),
         ("isp", "cannot be told in ISP mode"),
         ("unnamed-board", "not reported"),
@@ -682,7 +696,7 @@ fn a_unit_that_names_no_board_needs_an_answer_at_a_terminal() {
         .arg(&dir)
         .assert()
         .success()
-        .stdout(predicate::str::contains("now runs stock V3.172"));
+        .stdout(predicate::str::contains("now runs NXP's firmware V3.172"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -693,7 +707,7 @@ fn flash_says_which_boards_the_image_is_built_for() {
         (
             "flash-plain",
             None,
-            "The image is built for the full MCU-Link only.",
+            "The image declares no boards, so verge takes it as a Verge image for the standalone MCU-Link only.",
         ),
         (
             "flash-pro",
@@ -703,7 +717,7 @@ fn flash_says_which_boards_the_image_is_built_for() {
         (
             "flash-both",
             Some(0b11),
-            "The image is built for the full MCU-Link and the MCU-Link Pro.",
+            "The image is built for the standalone MCU-Link and the MCU-Link Pro.",
         ),
     ] {
         let image = sim_image(name, boards);
@@ -738,7 +752,7 @@ fn inspect_says_which_boards_an_image_declares() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "declares no boards: as a Verge image, it goes on the full MCU-Link only",
+            "declares no boards, so verge takes it as a Verge image for the standalone MCU-Link only",
         ));
 }
 
@@ -768,7 +782,7 @@ fn a_batch_that_cannot_date_ours_does_not_arm() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "onto every full MCU-Link running stock, attached from now on?",
+            "onto every standalone MCU-Link running NXP's firmware, attached from now on?",
         ))
         .stderr(predicate::str::contains("Pass --yes"));
     std::fs::remove_dir_all(&dir).unwrap();
@@ -793,7 +807,7 @@ fn a_batch_for_the_pro_needs_an_image_built_for_it() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "the batch takes the MCU-Link Pro, and the image is built for the full MCU-Link only",
+            "the batch takes the MCU-Link Pro, and the image declares no boards, so verge takes it as a Verge image for the standalone MCU-Link only",
         ));
     assert!(!record.exists());
     let image = sim_image("batch-pro", Some(0b10));
@@ -803,14 +817,14 @@ fn a_batch_for_the_pro_needs_an_image_built_for_it() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "onto every MCU-Link Pro running stock or Verge, attached from now on?",
+            "onto every MCU-Link Pro running NXP's firmware or Verge, attached from now on?",
         ))
         .stderr(predicate::str::contains("Pass --yes"));
     std::fs::remove_file(&image).unwrap();
 }
 
 /// The third review's proof: a Pro whose stock has no jumper-free update. The latest release
-/// declares nothing, so it is for the full MCU-Link only, and `update` refuses it as it would on
+/// declares nothing, so it is for the standalone MCU-Link only, and `update` refuses it as it would on
 /// the jumper-free path, rather than send the user to a plain `verge isp flash`.
 #[test]
 fn update_on_a_pro_needing_the_jumper_does_not_advise_a_plain_flash() {
@@ -823,7 +837,7 @@ fn update_on_a_pro_needing_the_jumper_does_not_advise_a_plain_flash() {
     );
     assert!(
         stderr.contains(
-            "the unit is an MCU-Link Pro, and this image is built for the full MCU-Link only"
+            "the unit is an MCU-Link Pro, and the image declares no boards, so verge takes it as a Verge image for the standalone MCU-Link only"
         ),
         "{stderr}"
     );
@@ -869,7 +883,7 @@ fn a_failed_update_says_how_to_flash_the_same_image_again() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "The unit, a full MCU-Link, may be in ISP mode with a partial image",
+            "The unit, a standalone MCU-Link, may be in ISP mode with a partial image",
         ))
         .stderr(predicate::str::contains(
             "`verge isp flash --release v0.3.0`",
@@ -910,7 +924,7 @@ fn the_jumper_path_asks_before_it_downloads_and_says_why() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "This unit cannot be updated without the jumper now. Download release v0.3.0 of Escapement-Project/mculink-verge from GitHub (",
+            "This unit cannot be updated without the jumper now. verge downloads the release first, to check that it is built for this unit. Download release v0.3.0 of Escapement-Project/mculink-verge from GitHub (",
         ))
         .stderr(predicate::str::contains("Pass --yes"));
 }
@@ -935,7 +949,7 @@ fn the_advice_names_a_repository_given_on_the_command_line() {
         ));
 }
 
-/// Ours names only the Pro in its product string, so a full MCU-Link with its SWD jumper asks
+/// Ours names only the Pro in its product string, so a standalone MCU-Link with its SWD jumper asks
 /// about its board, which `--yes` does not answer.
 #[test]
 fn ours_with_its_swd_jumper_asks_about_its_board_and_stock_is_sent_to_take_it_off() {
@@ -976,7 +990,7 @@ fn isp_reset_with_the_jumper_says_what_holds_the_pin() {
     tool("isp-jumper")
         .args(["isp", "reset"])
         .assert()
-        .success()
+        .code(3)
         .stdout(predicate::str::contains(
             "its ISP pin is still held low, by the ISP jumper or by a probe on its debug connector",
         ));
@@ -988,7 +1002,7 @@ fn isp_reset_of_a_blank_unit_says_it_may_hold_no_image() {
     tool("isp")
         .args(["isp", "reset"])
         .assert()
-        .success()
+        .code(3)
         .stdout(predicate::str::contains(
             "or its flash holds no image the ROM starts",
         ));
@@ -1152,7 +1166,7 @@ fn dio_refuses_stock() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "is stock V3.172, not running Verge",
+            "runs NXP's firmware V3.172, not Verge",
         ));
 }
 
@@ -1213,7 +1227,7 @@ fn dio_record_writes_a_standalone_units_pins_alone() {
         .arg(&out)
         .assert()
         .success()
-        .stdout(predicate::str::contains(
+        .stderr(predicate::str::contains(
             "CJ3E7A91C2: DIO0 0 edges, DIO2 0 edges over 0.3",
         ));
     let file = std::fs::read(&out).unwrap();
@@ -1238,7 +1252,7 @@ fn dio_record_counts_each_pins_edges() {
         .arg(dir.path().join("pins.tickwave"))
         .assert()
         .success()
-        .stdout(predicate::str::is_match("DIO0 0 edges, DIO1 [67] edges over 0\\.3").unwrap());
+        .stderr(predicate::str::is_match("DIO0 0 edges, DIO1 [67] edges over 0\\.3").unwrap());
 }
 
 /// Beside a Pro that records its pins with its energy capture, `dio record` picks the unit that
@@ -1251,7 +1265,7 @@ fn dio_record_picks_the_unit_that_streams_its_pins_alone() {
         .arg(dir.path().join("pins.tickwave"))
         .assert()
         .success()
-        .stdout(predicate::str::contains("DIO0 0 edges"));
+        .stderr(predicate::str::contains("DIO0 0 edges"));
 }
 
 /// Where the probe lost edges, the recording says how often.
@@ -1264,8 +1278,8 @@ fn dio_record_counts_the_probes_losses() {
         .assert()
         .success()
         // Six toggles in 300 ms, the first lost: not an edge.
-        .stdout(predicate::str::contains("DIO1 5 edges over 0.3"))
-        .stdout(predicate::str::contains(
+        .stderr(predicate::str::contains("DIO1 5 edges over 0.3"))
+        .stderr(predicate::str::contains(
             "The probe lost edges 1 time: the recording marks those spans unknown.",
         ));
 }
@@ -1315,7 +1329,7 @@ fn dio_record_leaves_out_pins_the_bench_marker_holds() {
         .stderr(predicate::str::contains(
             "reports DIO0, DIO1 of the pins asked for: a bench tool holds the rest",
         ))
-        .stdout(predicate::str::contains("DIO0 0 edges, DIO1 0 edges over"));
+        .stderr(predicate::str::contains("DIO0 0 edges, DIO1 0 edges over"));
 }
 
 /// A Pro without its energy circuit streams its DIO pins as a standalone unit does, and the
@@ -1366,7 +1380,9 @@ fn restart_refuses_stock() {
         .arg("restart")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("not running Verge"));
+        .stderr(predicate::str::contains(
+            "runs NXP's firmware V3.172, not Verge, so it takes no restart request",
+        ));
 }
 
 #[test]
@@ -1426,7 +1442,9 @@ fn energy_start_refuses_a_rate_the_firmware_cannot_take() {
         .args(["energy", "start", "--rate", "100001"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("100001 is not in 1..=100000"));
+        .stderr(predicate::str::contains(
+            "--rate takes 1 to 100,000 pairs a second",
+        ));
 }
 
 #[test]
@@ -1436,7 +1454,7 @@ fn energy_latest_reads_a_running_capture() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "3.30 V, 5.00 mA (350 mA, low gain), pair 100",
+            "3.30 V, 5.00 mA (high range, 350 mA setting), pair 100",
         ));
 }
 
@@ -1490,7 +1508,7 @@ fn energy_watch_prints_a_line_a_read_and_leaves_a_running_capture_running() {
         .success()
         .stdout(
             predicate::str::is_match(
-                r"   0\.00 s  3\.30 V  5\.00 mA  \(350 mA, low gain\)  pair 100\d\d  interval -",
+                r"   0\.00 s  3\.30 V  5\.00 mA  \(high range, 350 mA setting\)  pair 100\d\d  interval -",
             )
             .unwrap(),
         )
@@ -1564,7 +1582,7 @@ fn energy_stop_after_a_fault_reports_what_was_kept() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "stopped: the capture failed after 17.1 mJ over 10000 pairs, when the ADC overran, its DMA failed or the probe fell behind reading it.",
+            "CJ3E7A91C2's capture had stopped already: the capture failed after 17.1 mJ over 10000 pairs, when the ADC overran, its DMA failed or the probe fell behind reading it.",
         ));
 }
 
@@ -1658,7 +1676,7 @@ fn energy_refuses_stock() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "is stock V3.172, not running Verge",
+            "runs NXP's firmware V3.172, not Verge",
         ));
 }
 
@@ -1696,7 +1714,7 @@ fn several_units_that_fit_need_a_serial_off_a_terminal() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "2 MCU-Links are attached (CJ3E7A91C2, CJ3E7AB3E4); pick one by serial",
+            "2 attached units could be meant: CJ3E7A91C2 and CJ3E7AB3E4. Pick one with --serial",
         ));
 }
 
@@ -1709,7 +1727,7 @@ fn an_update_beside_a_unit_in_isp_mode_names_how_to_flash_it() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "pick one by serial. The unit in ISP mode, at 1-2, has no serial: flash it with `verge isp flash --file verge.elf --port 1-2`",
+            "2 attached units could be meant: CJ3E7A91C2 and the unit in ISP mode at 1-2. Pick one with --serial. The unit in ISP mode, at 1-2, has no serial: flash it with `verge isp flash --file verge.elf --port 1-2`",
         ));
 }
 
@@ -1719,7 +1737,9 @@ fn list_shows_only_the_unit_serial_names() {
         .args(["--serial", "QK7RM2VTX8D41", "list"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("QK7RM2VTX8D41  stock V3.172"))
+        .stdout(predicate::str::contains(
+            "QK7RM2VTX8D41  NXP's firmware V3.172",
+        ))
         .stdout(predicate::str::contains("CJ3E7A91C2").not());
     tool("bench")
         .args(["--serial", "NOSUCHUNIT", "list"])
@@ -1787,9 +1807,9 @@ fn energy_record_writes_every_pair_and_leaves_a_running_capture() {
         .arg(&out)
         .assert()
         .success()
-        .stdout(predicate::str::contains("the capture keeps running."))
+        .stderr(predicate::str::contains("the capture keeps running."))
         .get_output()
-        .stdout
+        .stderr
         .clone();
     let text = std::fs::read_to_string(&out).unwrap();
     assert!(text.starts_with("sequence,time_ns,millivolts,nanoamps,range\n"));
@@ -1822,9 +1842,9 @@ fn energy_record_lines_up_dio_edges_with_the_pairs() {
         .assert()
         .success()
         .get_output()
-        .stdout
+        .stderr
         .clone();
-    let stdout = String::from_utf8_lossy(&output);
+    let said = String::from_utf8_lossy(&output);
     let text = std::fs::read_to_string(&out).unwrap();
     let mut lines = text.lines();
     assert_eq!(
@@ -1858,8 +1878,8 @@ fn energy_record_lines_up_dio_edges_with_the_pairs() {
         }
     }
     assert!(
-        stdout.contains(&format!("{} edges on DIO3.\n", edges.len())),
-        "{stdout}"
+        said.contains(&format!("{} edges on DIO3.\n", edges.len())),
+        "{said}"
     );
 }
 
@@ -1875,7 +1895,7 @@ fn energy_record_stops_the_capture_it_started() {
         .arg(&out)
         .assert()
         .success()
-        .stdout(predicate::str::contains("the capture stopped."));
+        .stderr(predicate::str::contains("the capture stopped."));
     let mut zip = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
     let mut metadata = String::new();
     std::io::Read::read_to_string(&mut zip.by_name("metadata").unwrap(), &mut metadata).unwrap();
@@ -1899,7 +1919,7 @@ fn energy_record_holds_the_high_range_when_asked() {
             .assert()
             .success()
             .get_output()
-            .stdout
+            .stderr
             .clone();
         let output = String::from_utf8_lossy(&output);
         assert_eq!(
@@ -1931,7 +1951,7 @@ fn energy_record_works_while_a_debugger_holds_the_probe() {
         .arg(dir.path().join("held.sr"))
         .assert()
         .success()
-        .stdout(predicate::str::contains("pairs to"));
+        .stderr(predicate::str::contains("pairs to"));
 }
 
 #[test]
@@ -1953,4 +1973,529 @@ fn energy_record_needs_verge_aux() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("is not an MCU-Link Pro"));
+}
+
+/// The file's extension picks a recording's format; a flag the name contradicts is refused before
+/// any unit is touched, and a name that says nothing gets a tickwave recording, named as such.
+#[test]
+fn a_recordings_name_picks_its_format() {
+    use escapement_verge_probe::tickwave::format::decode::Index;
+    let dir = tempfile::tempdir().unwrap();
+    let csv = dir.path().join("run.csv");
+    tool("ours-pro-energy")
+        .args(["energy", "record", "--for", "200ms", "--out"])
+        .arg(&csv)
+        .assert()
+        .success();
+    assert!(
+        std::fs::read_to_string(&csv)
+            .unwrap()
+            .starts_with("sequence,time_ns")
+    );
+    let named = dir.path().join("run.tickwave");
+    tool("ours-pro-energy")
+        .args(["energy", "record", "--for", "200ms", "--out"])
+        .arg(&named)
+        .assert()
+        .success();
+    Index::of_file(&std::fs::read(&named).unwrap()).unwrap();
+    let unnamed = dir.path().join("run.dat");
+    tool("ours-pro-energy")
+        .args(["energy", "record", "--for", "200ms", "--out"])
+        .arg(&unnamed)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("run.dat (a tickwave recording)"));
+    Index::of_file(&std::fs::read(&unnamed).unwrap()).unwrap();
+    let wrong = dir.path().join("wrong.sr");
+    tool("ours-pro-energy")
+        .args(["energy", "record", "--tickwave", "--for", "200ms", "--out"])
+        .arg(&wrong)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--tickwave writes a tickwave recording, and",
+        ))
+        .stderr(predicate::str::contains("name the file .tickwave"));
+    assert!(!wrong.exists());
+    let pins = dir.path().join("pins.csv");
+    tool("ours-plain")
+        .args(["dio", "record", "--for", "100ms", "--out"])
+        .arg(&pins)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`dio record` writes a tickwave recording: name it .tickwave",
+        ));
+    assert!(!pins.exists());
+}
+
+/// `--out -` is stdout, for CSV only: stdout then holds the CSV and nothing else, and the summary
+/// goes to stderr. Nothing named `-` is made.
+#[test]
+fn csv_to_stdout_holds_only_the_csv() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = tool("ours-pro-energy")
+        .current_dir(dir.path())
+        .args(["energy", "record", "--csv", "--for", "200ms", "--out", "-"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("pairs to stdout"))
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(
+        lines.next(),
+        Some("sequence,time_ns,millivolts,nanoamps,range")
+    );
+    assert!(
+        lines.all(|line| line.split(',').count() == 5),
+        "a line that is not CSV: {text}"
+    );
+    tool("ours-pro-energy")
+        .current_dir(dir.path())
+        .args(["energy", "record", "--for", "200ms", "--out", "-"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--out - writes to stdout, which takes CSV only: add --csv",
+        ));
+    assert!(!dir.path().join("-").exists());
+}
+
+/// Where no attached unit can do what was asked, the refusal says what each one is, and never
+/// asks for a serial nobody could give.
+#[test]
+fn none_of_several_units_fits_says_why() {
+    tool("bench")
+        .args(["energy", "latest"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no attached unit measures energy: CJ3E7A91C2 is a standalone MCU-Link running Verge, build 14d05d4, and QK7RM2VTX8D41 is a standalone MCU-Link running NXP's firmware V3.172. Energy measurement needs an MCU-Link Pro running Verge.",
+        ))
+        .stderr(predicate::str::contains("serial").not());
+    tool("two-isp")
+        .args(["update", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("none reports a serial"))
+        .stderr(predicate::str::contains("?").not());
+    tool("two-isp")
+        .args(["isp", "enter"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "2 units are in ISP mode already, at 1-1 and 1-2, and report no serial. `verge isp flash --port 1-1` flashes one",
+        ));
+}
+
+/// A unit a debugger holds is offered no update until the debugger closes, not the ISP jumper.
+#[test]
+fn a_unit_a_debugger_holds_waits_for_it() {
+    tool("ours-pro-debugger")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"\n +update +Close the debugger first\. ").unwrap())
+        .stdout(predicate::str::contains("ISP jumper").not());
+    tool("ours-pro-debugger")
+        .args(["update", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "CJ3E7A91C2 cannot be updated as it is. Close the debugger first. Another program holds its CMSIS-DAP interface, and the tool does not update a unit in use.",
+        ));
+}
+
+/// Beside a unit in ISP mode, a running unit is not sent to the jumper, which would make two:
+/// it waits for the other one, and `update` says how to flash that.
+#[test]
+fn beside_a_unit_in_isp_mode_the_other_waits() {
+    tool("ours-beside-isp")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(
+            r"\n +update +Another unit is in ISP mode, at 1-2\. Flash that one or unplug it, then update this one",
+        )
+        .unwrap())
+        .stdout(predicate::str::contains("ISP jumper").not());
+    tool("ours-beside-isp")
+        .args(["--serial", "CJ3E7A91C2", "update", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Another unit is in ISP mode, at 1-2.",
+        ))
+        .stderr(predicate::str::contains(
+            "flash it with `verge isp flash --release --port 1-2`",
+        ))
+        .stderr(predicate::str::contains("fit the ISP jumper").not());
+}
+
+/// The ISP commands point at `--port` where it picks one of several bootloaders, at `isp enter`
+/// where a running unit can go to ISP mode without the jumper, and refuse a mini in its own words.
+#[test]
+fn the_isp_commands_say_what_works() {
+    tool("two-isp")
+        .args(["isp", "info"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "2 units are in ISP mode, at 1-1 and 1-2. Pick one with --port, as --port 1-1, or unplug all but one",
+        ));
+    tool("ours")
+        .args(["isp", "info"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no unit is in ISP mode. `verge isp enter` puts CJ3E7A91C2 there without the jumper",
+        ));
+    tool("isp")
+        .args(["isp", "enter"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "the unit at 1-1 is in ISP mode already. `verge isp flash` flashes it; `verge isp reset` starts the image it holds",
+        ));
+    tool("mini")
+        .args(["isp", "info"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "verge does not work with the mini",
+        ))
+        .stderr(predicate::str::contains("firmware").not());
+    tool("isp-mini")
+        .args(["isp", "reset"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "the tool works with a bootloader only while no other is attached: unplug the mini first",
+        ))
+        .stderr(predicate::str::contains("flashes").not());
+}
+
+/// NXP's own file, given with --file, goes on any board as --stock's would, and the mini's file
+/// is refused by its name.
+#[test]
+fn linkservers_files_are_known_by_their_names() {
+    let dir = sim_stock_dir("by-name", "3.172");
+    let file = dir.join("MCU-LINK_CMSIS-DAP_V3_172.s19");
+    tool("ours-pro")
+        .args(["update", "--yes", "--file"])
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("now runs NXP's firmware V3.172"));
+    tool("isp")
+        .arg("inspect")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "is NXP's firmware V3.172, by its name: it goes on any board NXP's firmware supports",
+        ));
+    let mini = dir.join("MCU-MINI_CMSIS-DAP_V3_172.s19");
+    std::fs::copy(&file, &mini).unwrap();
+    tool("isp")
+        .args(["isp", "flash", "--yes", "--file"])
+        .arg(&mini)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "is NXP's firmware for the MCU-Link mini, and verge does not work with the mini",
+        ));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `--take` takes a list as the docs write it, with commas.
+#[test]
+fn take_takes_commas() {
+    tool("arrivals")
+        .args(["batch", "--take", "stock,isp"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "every standalone MCU-Link running NXP's firmware or in ISP mode",
+        ));
+}
+
+/// A tag given without its "v" finds the release.
+#[test]
+fn a_release_tag_without_its_v_is_found() {
+    tool("stock")
+        .args(["update", "--yes", "--release", "0.3.0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("now runs Verge, build v0.3.0"));
+}
+
+/// A firmware too old for the capture commands is named as such, and a start that was never
+/// sent is not called uncertain.
+#[test]
+fn an_old_build_is_named_without_uncertainty() {
+    for args in [
+        &["energy", "start"][..],
+        &["energy", "watch", "--for", "100ms"][..],
+        &["energy", "stop"][..],
+    ] {
+        tool("ours-pro-old-aux")
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "CJ3E7A91C2 runs build 26ea505, which predates the capture commands this tool uses: update it first",
+            ))
+            .stderr(predicate::str::contains("uncertain").not());
+    }
+}
+
+/// What ends or cuts off a running capture says so.
+#[test]
+fn ending_a_running_capture_says_so() {
+    tool("ours-pro-energy")
+        .args(["power", "off"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "A capture is running; the target now has no supply from the Pro.",
+        ));
+    tool("ours-pro-energy")
+        .args(["energy", "start", "--rate", "1k"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("captures 1000 pairs a second"))
+        .stdout(predicate::str::contains(
+            "This replaced the capture that was running, and its total: 17.1 mJ over 10003 pairs",
+        ));
+    tool("ours-pro-energy")
+        .arg("restart")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "restarted. Its energy capture ended.",
+        ));
+    tool("ours-pro")
+        .args(["energy", "stop"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("CJ3E7A91C2 was not capturing"));
+}
+
+/// Argument errors say what the option takes, in the tool's words.
+#[test]
+fn argument_errors_say_what_is_taken() {
+    tool("arrivals")
+        .args(["batch", "--count", "0"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--count has to be at least 1"));
+    tool("ours-pro")
+        .args(["energy", "start", "--rate", "25k"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("captures 25000 pairs a second"));
+    tool("ours-plain")
+        .args(["dio", "--high", "0,"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "an empty pin name: name pins as 0 to 3, dio0 to dio3, or all",
+        ));
+    tool("ours-pro")
+        .args(["energy", "watch", "--window", "0s"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--window has to be longer than nothing",
+        ));
+    tool("ours-pro").args(["power", "On"]).assert().success();
+}
+
+/// `read` goes to real probes, so a simulated bench refuses it rather than touch one.
+#[test]
+fn read_refuses_a_simulated_bench() {
+    tool("bench")
+        .args(["read", "--chip", "CC1312R", "b32", "0", "1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--simulate has no target to read"));
+}
+
+/// A bad VERGE_REPO stops only what uses releases, and names itself.
+#[test]
+fn a_bad_verge_repo_stops_only_releases() {
+    tool("ours").env("VERGE_REPO", "bad").assert().success();
+    tool("ours")
+        .env("VERGE_REPO", "bad")
+        .args(["update", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "VERGE_REPO is \"bad\"; it has to be OWNER/NAME",
+        ));
+}
+
+/// `release --serial` checks the serial before it prints anything.
+#[test]
+fn release_checks_the_serial_first() {
+    tool("bench")
+        .args(["--serial", "NOPE", "release"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "no attached MCU-Link has serial NOPE",
+        ));
+}
+
+/// The line after an update names the unit as the user picked it, and the serial it reports now.
+#[test]
+fn done_names_the_serial_that_changed() {
+    tool("bench")
+        .args(["--serial", "QK7RM2VTX8D41", "update", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(
+            r"Done: QK7RM2VTX8D41 at 1-2 now runs Verge, build v0\.3\.0, and reports serial CJ\w+\.",
+        )
+        .unwrap());
+}
+
+/// `list -v` shows what Verge Aux said about a unit a debugger holds.
+#[test]
+fn list_verbose_shows_a_held_units_build() {
+    tool("ours-pro-debugger")
+        .args(["list", "-v"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"\n +capabilities +.*energy capture").unwrap());
+}
+
+/// `-v` lines carry no span names, and the waits are said in seconds as `restart` says them.
+#[test]
+fn verbose_lines_carry_no_spans() {
+    tool("ours")
+        .args(["-v", "update", "--yes"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(" INFO bootloader K2.1.0 answers"))
+        .stderr(predicate::str::contains("step{").not());
+}
+
+/// A unit on the SWD jumper is refused for what is true of it. One running Verge that another
+/// program holds is restarted all the same: the request goes to its USB core, as the docs say.
+#[test]
+fn the_jumper_is_named_and_a_held_unit_restarts() {
+    tool("swd-jumper")
+        .arg("dio")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "CJ3E7A91C2 has its SWD jumper fitted, which takes away the interfaces the tool reaches its DIO pins through",
+        ))
+        .stderr(predicate::str::contains("not running Verge").not());
+    tool("busy")
+        .arg("restart")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("CJ3E7A91C2 restarted."));
+}
+
+/// A unit the system does not let this user open is listed with the way to allow it on Linux,
+/// and offered no update until it may.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_unit_this_user_may_not_open_points_at_the_udev_rules() {
+    tool("denied")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("#usb-permissions-on-linux"))
+        .stdout(predicate::str::contains("ISP jumper").not());
+}
+
+/// A missing file is named once.
+#[test]
+fn a_missing_file_is_named_once() {
+    tool("isp")
+        .args(["isp", "flash", "--yes", "--file", "/nonexistent.elf"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "reading /nonexistent.elf: No such file or directory",
+        ))
+        .stderr(predicate::str::contains("ERROR /nonexistent.elf").not())
+        .stderr(predicate::str::contains("os error").not());
+}
+
+/// A mini that cannot be updated is refused in a sentence, not a table row.
+#[test]
+fn a_mini_is_refused_in_a_sentence() {
+    tool("mini")
+        .args(["update", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "the MCU-Link mini in ISP mode at 1-1 cannot be updated as it is. verge does not work with the MCU-Link mini.",
+        ));
+}
+
+/// Counts read as words: one run is "1 run", one page "1 page".
+#[test]
+fn inspect_counts_in_words() {
+    let path = std::env::temp_dir().join(format!("verge-cli-{}-one.s19", std::process::id()));
+    std::fs::write(&path, "S1070100AABBCCDDE9\n").unwrap();
+    Command::cargo_bin("verge")
+        .unwrap()
+        .arg("inspect")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "4 bytes into flash: 1 page of 512 bytes to erase and write, in 1 run",
+        ));
+    std::fs::remove_file(&path).unwrap();
+}
+
+/// A reset with nothing in ISP mode says so, and sends the user nowhere: entering ISP mode to leave
+/// it again, or fitting the jumper, would be pointless.
+#[test]
+fn isp_reset_with_nothing_in_isp_mode_says_so() {
+    tool("ours")
+        .args(["isp", "reset"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no unit is in ISP mode, so there is nothing to reset",
+        ))
+        .stderr(predicate::str::contains("isp enter").not())
+        .stderr(predicate::str::contains("jumper").not());
+}
+
+/// A reader that closes the pipe early ends a recording to stdout quietly, as `head` expects.
+#[test]
+fn csv_to_a_pipe_that_closes_early_ends_quietly() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_verge"))
+        .args(["--simulate", "ours-pro-energy", "--simulate-pace", "1"])
+        .args(["energy", "record", "--csv", "--for", "5s", "--out", "-"])
+        .env_remove("RUST_LOG")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut first = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut first)
+        .unwrap();
+    assert!(first.starts_with("sequence,time_ns"), "{first}");
+    // The reader goes away: the next write finds the pipe closed.
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{:?}: {stderr}", output.status);
+    assert!(!stderr.contains("Broken pipe"), "{stderr}");
+    assert!(!stderr.contains("ERROR"), "{stderr}");
 }

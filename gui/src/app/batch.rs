@@ -7,7 +7,7 @@ use std::path::{Path as FsPath, PathBuf};
 
 use egui::{Color32, Margin, Stroke, Ui, vec2};
 use escapement_verge_probe::batch::{
-    self, Board, Filter, OursFilter, Record, Settled, StockFilter, Tally,
+    self, ArmError, Board, Filter, OursFilter, Record, Settled, StockFilter, Tally,
 };
 use escapement_verge_probe::paths::ISP_IDENTITY_WARNING;
 use escapement_verge_probe::progress::{Cancel, Unit as StepUnit};
@@ -15,8 +15,8 @@ use escapement_verge_probe::source::{ImageVersion, Source};
 use escapement_verge_probe::version::StockVersion;
 
 use super::{
-    Choice, Current, Fill, Picked, VergeApp, edged, field, frame, kib, label, outline, progress,
-    sentence_case, slot, wrapping,
+    Choice, Current, Fill, Picked, STOCK, VergeApp, answers, edged, field, frame, kib, label,
+    outline, progress, sentence_case, slot, wrapping,
 };
 use crate::glyph::{self, Glyph};
 use crate::style::{self, Face, Role, Status, space, text};
@@ -72,15 +72,22 @@ impl BatchForm {
         }
     }
 
-    /// The filter and the count, or why the form does not make one.
-    fn filter(&self) -> Result<(Filter, Option<NonZeroUsize>), String> {
+    /// The filter and the count, or why the form does not make one and the field that says so.
+    fn filter(&self) -> Result<(Filter, Option<NonZeroUsize>), (Field, String)> {
         let below = self.stock_below.trim();
         let stock = match (self.stock, below.is_empty()) {
             (false, _) => StockFilter::None,
             (true, true) => StockFilter::Any,
             (true, false) => StockFilter::Below(
                 StockVersion::parse(below.strip_prefix(['V', 'v']).unwrap_or(below)).ok_or_else(
-                    || format!("\"{below}\" is not a stock version; write it like 3.172."),
+                    || {
+                        (
+                            Field::Takes,
+                            format!(
+                                "\"{below}\" is not a version of {STOCK}: write it like 3.172."
+                            ),
+                        )
+                    },
                 )?,
             ),
         };
@@ -90,11 +97,17 @@ impl BatchForm {
             (true, false) => OursFilter::Older,
         };
         if stock == StockFilter::None && ours == OursFilter::None && !self.isp {
-            return Err("Tick at least one kind of unit for the batch to take.".into());
+            return Err((
+                Field::Takes,
+                "Tick at least one kind of unit for the batch to take.".into(),
+            ));
         }
         let limit = if self.stop_after {
             let count: NonZeroUsize = self.count.trim().parse().map_err(|_| {
-                "Write how many units to stop after, as a positive number.".to_owned()
+                (
+                    Field::Stop,
+                    "Write how many units to stop after, as a positive number.".to_owned(),
+                )
             })?;
             Some(count)
         } else {
@@ -113,6 +126,15 @@ impl BatchForm {
     }
 }
 
+/// The part of the form a reason not to arm is about.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Image,
+    Takes,
+    Board,
+    Stop,
+}
+
 /// A batch the window armed: running, or ended and still shown.
 pub(in crate::app) struct BatchRun {
     name: Option<String>,
@@ -125,6 +147,8 @@ pub(in crate::app) struct BatchRun {
     cancel: Cancel,
     ended: Option<Result<Tally, String>>,
     started: f64,
+    /// When it ended, which stops its clock.
+    ended_at: Option<f64>,
 }
 
 impl BatchRun {
@@ -155,7 +179,7 @@ impl BatchRun {
         }
     }
 
-    pub(in crate::app) fn handle(&mut self, event: BatchEvent, _now: f64) {
+    pub(in crate::app) fn handle(&mut self, event: BatchEvent, now: f64) {
         match event {
             BatchEvent::Armed { name, filter } => {
                 self.name = Some(name);
@@ -175,6 +199,7 @@ impl BatchRun {
             BatchEvent::State(state) => self.state = state,
             BatchEvent::Ended(result) => {
                 self.current = None;
+                self.ended_at = Some(now);
                 if let Ok(tally) = &result {
                     self.state.tally = *tally;
                 }
@@ -209,11 +234,21 @@ impl VergeApp {
     /// The image chosen above, as a batch's source, or why there is none. A batch that cannot arm
     /// with it says so here, as far as the choice tells before the image is loaded: a release's
     /// image is checked against the board once it is downloaded.
-    fn batch_source(&self, filter: &Filter) -> Result<(Source, String), String> {
+    fn batch_source(&self, filter: &Filter) -> Result<(Source, String), (Field, String)> {
+        let image = |reason: String| (Field::Image, reason);
+        // Where the image does not suit the units ticked, the field to change.
+        let refused = |error: &ArmError| {
+            let field = match error {
+                ArmError::OursUndated => Field::Takes,
+                ArmError::NotForBoard { .. } => Field::Board,
+                ArmError::Image(_) => Field::Image,
+            };
+            (field, arm_error(error))
+        };
         let (source, what, version) = match self.choice {
             Choice::Release => match &self.release {
-                None => return Err("Looking up the latest release.".into()),
-                Some(Err(error)) => return Err(error.clone()),
+                None => return Err(image("Looking up the release.".into())),
+                Some(Err(error)) => return Err(image(error.clone())),
                 Some(Ok(release)) => (
                     Source::Release(Some(release.tag.clone())),
                     format!("release {}", release.tag),
@@ -221,10 +256,14 @@ impl VergeApp {
                 ),
             },
             Choice::Stock => match &self.stock {
-                None => return Err("No stock image in LinkServer's usual places.".into()),
+                None => {
+                    return Err(image(format!(
+                        "No image of {STOCK} in LinkServer's usual places."
+                    )));
+                }
                 Some(found) => (
                     Source::Stock(found.path.parent().map(FsPath::to_path_buf)),
-                    format!("stock V{}", found.version),
+                    format!("{STOCK} V{}", found.version),
                     ImageVersion::Stock(found.version),
                 ),
             },
@@ -232,24 +271,28 @@ impl VergeApp {
                 Some(Picked {
                     path,
                     image: Ok(image),
+                    version,
                 }) => {
-                    batch::check(filter, image, &ImageVersion::Unknown)
-                        .map_err(|error| arm_error(&error))?;
+                    batch::check(filter, image, version).map_err(|error| refused(&error))?;
                     (
                         Source::File(path.clone()),
                         path.display().to_string(),
-                        ImageVersion::Unknown,
+                        version.clone(),
                     )
                 }
                 Some(Picked {
                     image: Err(error), ..
-                }) => return Err(error.clone()),
-                None => return Err("Pick an ELF or S-record, or drop one on the window.".into()),
+                }) => return Err(image(error.clone())),
+                None => {
+                    return Err(image(
+                        "Pick an ELF or S-record, or drop one on the window.".into(),
+                    ));
+                }
             },
         };
         filter
             .check_version(&version)
-            .map_err(|error| arm_error(&error))?;
+            .map_err(|error| refused(&error))?;
         Ok((source, what))
     }
 
@@ -263,10 +306,24 @@ impl VergeApp {
 
     fn batch_setup(&mut self, ui: &mut Ui, now: f64) {
         let face = style::face(ui.ctx());
-        if let Some(error) = &self.worker_error {
-            edged(ui, Status::Fault, &format!("{error}. Restart the tool."));
-            return;
+        // The strip says why.
+        let stopped = self.worker_error.is_some();
+        if stopped {
+            ui.disable();
         }
+        let ready = self.batch_form.filter().and_then(|(filter, limit)| {
+            self.batch_source(&filter)
+                .map(|(source, what)| (source, what, filter, limit))
+        });
+        // Why the batch cannot arm, under the field it is about as well as at the foot.
+        let refused = ready.as_ref().err().cloned();
+        let note = |ui: &mut Ui, here: Field| {
+            if let Some((field, reason)) = &refused
+                && *field == here
+            {
+                edged(ui, Status::Attention, reason);
+            }
+        };
         frame(ui, None, Stroke::new(1.0, face.rule), |ui| {
             ui.horizontal(|ui| {
                 glyph::WAITING.show(ui, 48.0, face.ink);
@@ -288,11 +345,12 @@ impl VergeApp {
         });
         ui.add_space(space::M);
         self.image_choice(ui, None);
+        note(ui, Field::Image);
         ui.add_space(space::S);
         let form = &mut self.batch_form;
         field(ui, "Takes", |ui| {
             ui.horizontal(|ui| {
-                ui.checkbox(&mut form.stock, text(Role::Body, "Stock").color(face.ink));
+                ui.checkbox(&mut form.stock, text(Role::Body, STOCK).color(face.ink));
                 ui.add_enabled_ui(form.stock, |ui| {
                     label(ui, "only below");
                     ui.add(
@@ -331,6 +389,7 @@ impl VergeApp {
                 )
                 .color(face.ink),
             );
+            note(ui, Field::Takes);
         });
         field(ui, "Board", |ui| {
             ui.horizontal(|ui| {
@@ -342,6 +401,7 @@ impl VergeApp {
                     );
                 }
             });
+            note(ui, Field::Board);
         });
         field(ui, "Stop", |ui| {
             ui.horizontal(|ui| {
@@ -355,6 +415,7 @@ impl VergeApp {
                 );
                 ui.label(text(Role::Body, "units are updated").color(face.ink));
             });
+            note(ui, Field::Stop);
         });
         field(ui, "Record", |ui| {
             ui.add(
@@ -370,19 +431,22 @@ impl VergeApp {
         });
         ui.add_space(space::L);
 
-        let ready = self.batch_form.filter().and_then(|(filter, limit)| {
-            self.batch_source(&filter)
-                .map(|(source, what)| (source, what, filter, limit))
-        });
         let (source, what, filter, limit) = match ready {
-            Ok(ready) => ready,
-            Err(reason) => {
+            Ok(ready) if !stopped => ready,
+            refused => {
+                let words = if stopped {
+                    "Worker stopped"
+                } else {
+                    "Cannot arm"
+                };
                 ui.add_enabled(
                     false,
-                    egui::Button::new(text(Role::Action, "Cannot arm").color(face.ink_2))
+                    egui::Button::new(text(Role::Action, words).color(face.ink_2))
                         .min_size(vec2(320.0, crate::style::SLOT_HEIGHT)),
                 );
-                wrapping(ui, text(Role::Body, reason).color(face.ink_2));
+                if let Err((_, reason)) = refused {
+                    wrapping(ui, text(Role::Body, reason).color(face.ink_2));
+                }
                 return;
             }
         };
@@ -410,8 +474,8 @@ impl VergeApp {
             }
             edged(ui, Status::Attention, &question);
             ui.add_space(space::S);
-            ui.horizontal(|ui| {
-                if slot(ui, "Confirm", Some(Fill::lume(face))).clicked() {
+            match answers(ui, "Confirm", Fill::lume(face), false) {
+                Some(true) => {
                     let record = PathBuf::from(self.batch_form.record.trim());
                     let stop = Cancel::new();
                     let cancel = Cancel::new();
@@ -426,11 +490,12 @@ impl VergeApp {
                         cancel: cancel.clone(),
                         ended: None,
                         started: now,
+                        ended_at: None,
                     });
                     self.batch_form.confirming = None;
                     self.backend.send(Request::Batch {
-                        source: source.clone(),
-                        filter: filter.clone(),
+                        source,
+                        filter,
                         download: super::agreed(download.as_ref()),
                         limit,
                         record,
@@ -438,10 +503,9 @@ impl VergeApp {
                         cancel,
                     });
                 }
-                if slot(ui, "Back", None).clicked() {
-                    self.batch_form.confirming = None;
-                }
-            });
+                Some(false) => self.batch_form.confirming = None,
+                None => {}
+            }
             return;
         }
         if slot(ui, "Arm batch", Some(Fill::lume(face))).clicked() {
@@ -477,6 +541,8 @@ impl VergeApp {
         } else {
             Stroke::new(2.0, face.ink)
         };
+        let armed = run.name.is_some();
+        let mut back = false;
         frame(ui, fill.map(|fill| fill.ground), stroke, |ui| {
             ui.horizontal(|ui| {
                 glyph.show(ui, 48.0, ink);
@@ -484,19 +550,60 @@ impl VergeApp {
                 ui.label(text(Role::Display, word).color(ink));
             });
             wrapping(ui, text(Role::Instruction, instruction).color(ink));
-            let mut facts = vec![
-                run.name
-                    .clone()
-                    .unwrap_or_else(|| "loading the image".into()),
-            ];
+            // A batch that never armed loaded no image.
+            let mut facts: Vec<String> = match (&run.name, &run.ended) {
+                (Some(name), _) => vec![name.clone()],
+                (None, None) => vec!["loading the image".into()],
+                (None, Some(_)) => Vec::new(),
+            };
             facts.push(run.filter.clone());
-            facts.push(format!("{:.0} s", now - run.started));
+            facts.push(format!(
+                "{:.0} s",
+                run.ended_at.unwrap_or(now) - run.started
+            ));
             wrapping(ui, text(Role::Code, facts.join(" · ")).color(ink));
-            wrapping(
-                ui,
-                text(Role::Code, format!("recording to {}", run.record.display())).color(ink),
-            );
+            let record = match (&run.ended, armed) {
+                (Some(_), false) => "record file: nothing was recorded".to_owned(),
+                _ => format!("record file: {}", run.record.display()),
+            };
+            wrapping(ui, text(Role::Code, record).color(ink));
+            // The batch's own controls stay here, above everything that grows.
+            ui.add_space(space::M);
+            // Drawn in the slab's own ink, which reads on its fill.
+            let on_slab = |ui: &mut Ui, words: &str| {
+                ui.add_sized(
+                    vec2(320.0, crate::style::SLOT_HEIGHT),
+                    egui::Button::new(text(Role::Action, words).color(ink))
+                        .fill(Color32::TRANSPARENT)
+                        .stroke(Stroke::new(1.0, ink)),
+                )
+            };
+            if run.running() {
+                if !run.stop.is_cancelled() {
+                    if on_slab(ui, "Stop").clicked() {
+                        run.stop.cancel();
+                    }
+                } else if run.current.is_some() {
+                    if outline(ui, "Cancel the unit under way", !run.cancel.is_cancelled())
+                        .clicked()
+                    {
+                        run.cancel.cancel();
+                    }
+                } else {
+                    ui.label(text(Role::Body, "Stopping: no unit under way.").color(ink));
+                }
+            } else if on_slab(ui, "Back").clicked() {
+                back = true;
+            }
         });
+        if back {
+            self.last_batch = None;
+            self.batch_form.record = record_path(&self.batch_form.dir);
+            return;
+        }
+        let Some(run) = self.batch() else {
+            return;
+        };
         ui.add_space(space::M);
         let tally = run.state.tally;
         ui.horizontal(|ui| {
@@ -616,19 +723,6 @@ impl VergeApp {
                         wrapping(ui, text(Role::Body, reason).color(face.ink_2));
                     }
                 });
-        }
-        ui.add_space(space::L);
-        if run.running() {
-            if run.stop.is_cancelled() {
-                if outline(ui, "Cancel the unit under way", !run.cancel.is_cancelled()).clicked() {
-                    run.cancel.cancel();
-                }
-            } else if slot(ui, "Stop", None).clicked() {
-                run.stop.cancel();
-            }
-        } else if slot(ui, "Back", None).clicked() {
-            self.last_batch = None;
-            self.batch_form.record = record_path(&self.batch_form.dir);
         }
     }
 }

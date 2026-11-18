@@ -399,10 +399,21 @@ fn motion_id() -> Id {
     Id::unique("verge-mark-motion")
 }
 
-/// Whether the mark may move: false when the desktop asks for reduced motion, and in the tests,
-/// whose pictures would otherwise depend on when they were taken.
+/// Whether the window may move: false when the desktop asks for reduced motion, and in the tests,
+/// whose pictures would otherwise depend on when they were taken. Off, the mark holds still and
+/// egui's own animations, its fades and scrolling, finish at once.
 pub fn set_motion(ctx: &egui::Context, on: bool) {
     ctx.data_mut(|d| d.insert_temp(motion_id(), on));
+    let moving = egui::Style::default();
+    ctx.all_styles_mut(|style| {
+        if on {
+            style.animation_time = moving.animation_time;
+            style.scroll_animation = moving.scroll_animation;
+        } else {
+            style.animation_time = 0.0;
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        }
+    });
 }
 
 #[must_use]

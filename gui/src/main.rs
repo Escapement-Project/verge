@@ -34,7 +34,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 use crate::app::{Config, VergeApp};
 use crate::worker::Worker;
 
-/// Update the firmware on an MCU-Link, in a window.
+/// Update MCU-Links, drive their DIO pins, and power and measure a target from an MCU-Link Pro,
+/// in a window.
 #[derive(Parser)]
 #[command(name = "verge-gui", version)]
 struct Args {
@@ -143,6 +144,7 @@ fn main() -> eframe::Result {
         .with(stderr)
         .with(window)
         .init();
+    tracing::info!("Verge {} (verge-gui)", env!("CARGO_PKG_VERSION"));
 
     let simulated = simulated(&args);
     // A simulated GitHub signs with a key made for the run, so a copy kept from another run
@@ -161,10 +163,10 @@ fn main() -> eframe::Result {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("verge")
+            .with_title("Verge")
             .with_app_id(APP_ID)
             .with_inner_size([1080.0, 700.0])
-            .with_min_inner_size([860.0, 560.0])
+            .with_min_inner_size([860.0, 640.0])
             .with_drag_and_drop(true)
             .with_icon(Arc::new(icon())),
         ..Default::default()
@@ -177,9 +179,7 @@ fn main() -> eframe::Result {
             style::install(&ctx);
             #[cfg(target_os = "linux")]
             follow_desktop_face(&ctx);
-            if desktop_reduces_motion() {
-                mark::set_motion(&ctx, false);
-            }
+            follow_desktop_motion(&ctx);
             log.set_repaint(ctx.clone());
             let repaint = {
                 let ctx = ctx.clone();
@@ -215,8 +215,7 @@ fn main() -> eframe::Result {
 
 /// The XDG portal's `reduced-motion` setting: 1 when the desktop asks for reduced motion.
 #[cfg(target_os = "linux")]
-fn portal_reduced_motion() -> zbus::Result<u32> {
-    let connection = zbus::blocking::Connection::session()?;
+fn portal_reduced_motion(connection: &zbus::blocking::Connection) -> zbus::Result<u32> {
     let reply = connection.call_method(
         Some("org.freedesktop.portal.Desktop"),
         "/org/freedesktop/portal/desktop",
@@ -228,21 +227,61 @@ fn portal_reduced_motion() -> zbus::Result<u32> {
     Ok(u32::try_from(value)?)
 }
 
-/// Whether the desktop asks for reduced motion, read once at start. Without a portal, or with one
-/// too old to have the setting, the mark moves.
-#[cfg(target_os = "linux")]
-fn desktop_reduces_motion() -> bool {
-    match portal_reduced_motion() {
-        Ok(setting) => setting == 1,
-        Err(error) => {
-            tracing::debug!("no reduced-motion setting: {error}");
-            false
-        }
+/// How often the window reads the desktop's reduced-motion setting again.
+const MOTION_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Holds the window still while the desktop asks for reduced motion: read at start, then again
+/// every [`MOTION_EVERY`] on a thread of its own, so a change made while the window runs is
+/// followed.
+fn follow_desktop_motion(ctx: &egui::Context) {
+    let mut reads = motion_reader();
+    let mut reduced = reads();
+    mark::set_motion(ctx, !reduced);
+    let ctx = ctx.clone();
+    let watcher = std::thread::Builder::new()
+        .name("motion".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(MOTION_EVERY);
+                let now = reads();
+                if now != reduced {
+                    reduced = now;
+                    mark::set_motion(&ctx, !reduced);
+                    ctx.request_repaint();
+                }
+            }
+        });
+    if let Err(error) = watcher {
+        tracing::debug!("not following the desktop's motion setting: {error}");
     }
 }
 
+/// Reads whether the desktop asks for reduced motion, through one session bus connection kept for
+/// as long as the window follows the setting. Without a portal, or with one too old to have the
+/// setting, the window moves.
+#[cfg(target_os = "linux")]
+fn motion_reader() -> impl FnMut() -> bool + Send + 'static {
+    let connection = zbus::blocking::Connection::session()
+        .inspect_err(|error| tracing::debug!("no session bus for the motion setting: {error}"))
+        .ok();
+    move || match connection.as_ref().map(portal_reduced_motion) {
+        Some(Ok(setting)) => setting == 1,
+        Some(Err(error)) => {
+            tracing::debug!("no reduced-motion setting: {error}");
+            false
+        }
+        None => false,
+    }
+}
+
+/// Reads whether the desktop asks for reduced motion.
+#[cfg(not(target_os = "linux"))]
+fn motion_reader() -> impl FnMut() -> bool + Send + 'static {
+    desktop_reduces_motion
+}
+
 /// Whether Windows' animation setting is off ("Animation effects", or "Show animations in Windows"
-/// before Windows 11), read once at start. If it cannot be read, the mark moves.
+/// before Windows 11). If it cannot be read, the window moves.
 #[cfg(target_os = "windows")]
 fn desktop_reduces_motion() -> bool {
     match windows::UI::ViewManagement::UISettings::new().and_then(|ui| ui.AnimationsEnabled()) {
@@ -254,7 +293,7 @@ fn desktop_reduces_motion() -> bool {
     }
 }
 
-/// Whether "Reduce motion" is on in macOS's accessibility settings, read once at start.
+/// Whether "Reduce motion" is on in macOS's accessibility settings.
 #[cfg(target_os = "macos")]
 fn desktop_reduces_motion() -> bool {
     objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()

@@ -16,14 +16,14 @@ pub struct ReadArgs {
     #[arg(long)]
     chip: String,
     /// The wire to the target.
-    #[arg(long, value_enum, default_value_t = Wire::Swd)]
+    #[arg(long, value_enum, ignore_case = true, default_value_t = Wire::Swd)]
     protocol: Wire,
     /// The wire clock in kHz. The probe's default when left out.
-    #[arg(long)]
+    #[arg(long, value_name = "KHZ")]
     speed: Option<u32>,
     /// The cJTAG scan format to connect in. OScan1 when left out. Nothing checks that the target
     /// has the format: ask only for one it has.
-    #[arg(long, value_enum, value_name = "FORMAT")]
+    #[arg(long, value_enum, ignore_case = true, value_name = "FORMAT")]
     cjtag_format: Option<CjtagFormat>,
     /// Print the attach and read times on stderr.
     #[arg(long)]
@@ -41,7 +41,7 @@ pub struct ReadArgs {
 /// At a terminal with several probes attached, the serial of the one the user picks. It asks
 /// probe-rs, which lists every probe it can drive, not only MCU-Links.
 fn pick_probe() -> Result<Option<String>> {
-    if !crate::interactive() {
+    if !crate::question::interactive() {
         return Ok(None);
     }
     let probes = Lister::new().list_all();
@@ -55,11 +55,7 @@ fn pick_probe() -> Result<Option<String>> {
             format!("{serial:<14} {}", probe.identifier)
         })
         .collect();
-    let index = dialoguer::Select::new()
-        .with_prompt("Which probe?")
-        .items(&items)
-        .default(0)
-        .interact()?;
+    let index = crate::question::choose("Which probe?", &items)?;
     let probe = &probes[index];
     let serial = serial_number(probe).map(str::to_owned).with_context(|| {
         format!(
@@ -119,10 +115,16 @@ enum Width {
     B64,
 }
 
-pub fn read(args: &ReadArgs, serial: Option<&str>) -> Result<()> {
+/// Refuses options that do not go together, before any probe is opened.
+pub fn check(args: &ReadArgs) -> Result<()> {
     if args.cjtag_format.is_some() && args.protocol != Wire::Cjtag {
         anyhow::bail!("--cjtag-format needs --protocol cjtag");
     }
+    Ok(())
+}
+
+pub fn read(args: &ReadArgs, serial: Option<&str>) -> Result<()> {
+    check(args)?;
     let picked = match serial {
         Some(_) => None,
         None => pick_probe()?,

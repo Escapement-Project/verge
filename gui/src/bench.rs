@@ -2,8 +2,11 @@
 //! Acquisition, and the recording's queries and drawing through tickwave, continue independently
 //! of frames.
 
-use crate::app::{choice, edged, label, outline, sentence, sentence_case};
-use crate::bench_worker::{Command, DioChange, Status, group_name};
+use crate::app::{
+    Fill, answers, board_label, choice, edged, firmware_label, label, outline, sentence,
+    sentence_case,
+};
+use crate::bench_worker::{Command, DioChange, Refusal, Status, group_name};
 use crate::style::{self, Role, space, text};
 use crate::worker::{Backend, Request};
 use egui::{CornerRadius, Frame, Margin, ScrollArea, Stroke, Ui, vec2};
@@ -13,13 +16,16 @@ use escapement_tickwave_egui::view::{
 use escapement_tickwave_egui::{
     Extras, Graph, Palette, Shown, Strip, ViewState, Viewer, Window, Y,
 };
+use escapement_verge_probe::detect::{Jumpered, State};
 use escapement_verge_probe::tickwave::{self as recordings, Snapshots};
-use escapement_verge_probe::{BoardKind, EnergyRanges, Unit, pro};
+use escapement_verge_probe::{
+    BoardKind, CalibrationRange, EnergyCalibration, EnergyRanges, EnergyTotal, Unit, pro,
+};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::AtomicBool,
+    atomic::{AtomicBool, Ordering},
     mpsc::{self, Receiver},
 };
 use std::time::{Duration, Instant, SystemTime};
@@ -66,6 +72,8 @@ struct Channels {
     p: Option<usize>,
     under: Option<usize>,
     lanes: Vec<usize>,
+    /// Each lane's pin, in the same order.
+    pins: Vec<String>,
     /// Ticks a second.
     rate: f64,
     timebase: escapement_tickwave_egui::view::format::model::Ratio,
@@ -86,6 +94,10 @@ impl Channels {
             under: r.channel("under_range"),
             lanes: (0..4)
                 .filter_map(|k| r.channel(&format!("DIO{k}")))
+                .collect(),
+            pins: (0..4)
+                .map(|k| format!("DIO{k}"))
+                .filter(|name| r.channel(name).is_some())
                 .collect(),
             rate: timebase.num() as f64 / timebase.den() as f64,
             timebase,
@@ -127,6 +139,21 @@ const AHEAD: Duration = Duration::from_millis(50);
 const MARKER_PAGE: usize = 50;
 /// The strip's height under the graph.
 const STRIP: f32 = 64.0;
+/// The least height the trace keeps: the strip under the graph goes first.
+const TRACE: f32 = 120.0;
+/// What tickwave's graph draws under its trace: each DIO lane, then the time axis and the key.
+const LANE: f32 = 24.0;
+const UNDER_TRACE: f32 = 48.0;
+
+/// A question the panel asks itself, before it acts. The worker asks the others: driving pins, and
+/// turning the supply off under a capture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Question {
+    Start,
+    Restart,
+    /// Deleting the recording at this path.
+    Discard(PathBuf),
+}
 
 pub struct Bench {
     pub status: Option<Status>,
@@ -151,10 +178,19 @@ pub struct Bench {
     /// The window and value range the graph drew last frame.
     shown: Option<Shown>,
     io: Option<Receiver<Result<FileResult, String>>>,
+    /// Whether a file dialog the file thread opened is open.
+    dialog: Arc<AtomicBool>,
     failed: bool,
     notice: Option<String>,
-    start_confirm: bool,
+    asking: Option<Question>,
     off_confirm: bool,
+    /// The USB worker has stopped, so nothing connects.
+    stopped: bool,
+    /// The user asked for the Units view, to update the unit.
+    to_units: bool,
+    /// A restart the user confirmed, for the window to send; then the unit restarting.
+    restart: Option<Unit>,
+    restarting: Option<String>,
     /// The height under the graph, measured on the frame before.
     footer: f32,
     /// Compactions waiting for the file thread, and the one it runs.
@@ -167,6 +203,8 @@ pub struct Bench {
     recorded_slot: Option<Snapshots>,
     /// The followed window's width, in seconds, which carries over to the next file opened.
     span_seconds: f64,
+    /// Edges counted in a recording of DIO edges alone, by interval.
+    edges: Vec<(Range<i64>, Vec<u64>)>,
 }
 
 impl Bench {
@@ -199,10 +237,15 @@ impl Bench {
             marker_selected: None,
             shown: None,
             io: Some(rx),
+            dialog: Arc::new(AtomicBool::new(false)),
             failed: false,
             notice: None,
-            start_confirm: false,
+            asking: None,
             off_confirm: false,
+            stopped: false,
+            to_units: false,
+            restart: None,
+            restarting: None,
             footer: 120.0,
             compactions: Vec::new(),
             compacting: None,
@@ -210,6 +253,7 @@ impl Bench {
             writing: false,
             recorded_slot: None,
             span_seconds: 10.0,
+            edges: Vec::new(),
         }
     }
     pub fn recording(&self) -> bool {
@@ -221,17 +265,60 @@ impl Bench {
     pub fn take_failure(&mut self) -> bool {
         std::mem::take(&mut self.failed)
     }
-    pub fn worker_failed(&mut self, message: &str) {
+    /// Whether a file dialog is open, which a pending close waits for.
+    pub fn dialog_open(&self) -> bool {
+        self.dialog.load(Ordering::Relaxed)
+    }
+    /// Whether a finished recording waits to be compacted, which a pending close waits for.
+    pub fn compacting(&self) -> bool {
+        !self.compactions.is_empty() || self.compacting.is_some()
+    }
+    /// Whether the user asked to update the unit, which the Units view does.
+    pub fn take_units_request(&mut self) -> bool {
+        std::mem::take(&mut self.to_units)
+    }
+    /// A restart the user confirmed, for the window to send to the worker.
+    pub fn take_restart(&mut self) -> Option<Unit> {
+        let unit = self.restart.take()?;
+        self.restarting = unit.serial().map(str::to_owned).or(Some(String::new()));
+        Some(unit)
+    }
+    /// The restart's result. The worker looks at the bus again after it.
+    pub fn restarted(&mut self, result: Result<(), String>) {
+        self.notice = result
+            .err()
+            .map(|error| format!("{} Press Rescan to look again.", sentence(&error)));
+    }
+    /// The units the window lists changed: a restart's unit is back, or gone for good, and the
+    /// panel connects to what is selected.
+    pub fn units_changed(&mut self) {
+        self.restarting = None;
+    }
+    /// The USB worker stopped: nothing connects again, and the strip says why.
+    pub fn worker_failed(&mut self) {
+        self.stopped = true;
         self.connection = None;
         self.status = None;
-        self.start_confirm = false;
+        self.asking = None;
         self.off_confirm = false;
-        self.notice = Some(message.to_owned());
+        self.restarting = None;
         // The worker closed the recording as it failed: finish it as a stop would.
         if self.writing
             && let Some(path) = self.recorded.clone()
         {
             self.ended(path);
+        }
+    }
+    /// Holds the file thread for good, as if a file dialog were open on it, or a recording
+    /// waited for it to be compacted.
+    #[cfg(test)]
+    pub(crate) fn hold(&mut self, dialog: bool, compaction: Option<PathBuf>) {
+        let (send, receive) = mpsc::channel();
+        std::mem::forget(send);
+        self.io = Some(receive);
+        self.dialog.store(dialog, Ordering::Relaxed);
+        if let Some(path) = compaction {
+            self.compact(path, None);
         }
     }
     #[cfg(test)]
@@ -329,7 +416,7 @@ impl Bench {
             && let Err(error) = viewer.reopen()
         {
             // The compaction's own reopen tries again once its copy is in place.
-            self.notice = Some(format!("Reading the finished capture: {error}"));
+            self.notice = Some(format!("Reading the finished recording: {error}"));
         }
         self.compact(path, viewer);
     }
@@ -345,6 +432,7 @@ impl Bench {
             self.span_seconds = channels.seconds(*span);
         }
         self.channels = None;
+        self.edges.clear();
         self.state = following(0);
     }
     fn open(&mut self, path: PathBuf) {
@@ -379,7 +467,7 @@ impl Bench {
                 Err(error) => self.notice = Some(format!("Opening {}: {error}", path.display())),
             },
             Ok(false) => {
-                self.notice = Some("Repairing the capture a crash cut off…".into());
+                self.notice = Some("Repairing the recording a crash cut off…".into());
                 self.compact(path, None);
             }
             Err(error) => self.notice = Some(format!("Opening {}: {error}", path.display())),
@@ -391,6 +479,13 @@ impl Bench {
             && *span <= 0
         {
             *span = channels.ticks(self.span_seconds);
+            // A finished recording shorter than the span opens whole.
+            if self.live.is_none()
+                && let Some(extent) = viewer.recording(Recording::extent)
+                && extent.end - extent.start < *span
+            {
+                self.state.window = Window::At(extent);
+            }
         }
         self.channels = Some(channels);
         self.viewer = Some(viewer);
@@ -420,18 +515,26 @@ impl Bench {
         });
     }
     pub fn disconnect(&mut self, backend: &mut dyn Backend) {
-        self.start_confirm = false;
+        self.unit_questions();
         self.off_confirm = false;
         if self.connection.take().is_some() {
             backend.send(Request::Bench(Command::Disconnect));
         }
         self.status = None;
     }
+    /// Withdraws a question about the unit, which no longer stands once it is another or none. A
+    /// question about the open recording stands.
+    fn unit_questions(&mut self) {
+        if matches!(self.asking, Some(Question::Start | Question::Restart)) {
+            self.asking = None;
+        }
+    }
+
     fn connect(&mut self, unit: &Unit, backend: &mut dyn Backend) {
-        if self.connection.as_deref() == Some(&unit.device.instance) {
+        if self.connection.as_deref() == Some(&unit.device.instance) || self.stopped {
             return;
         }
-        self.start_confirm = false;
+        self.unit_questions();
         self.off_confirm = false;
         self.status = None;
         self.connection = Some(unit.device.instance.clone());
@@ -443,12 +546,17 @@ impl Bench {
             .to_string()
             .replace(':', "-");
         let path = self.directory.join(format!("capture-{now}.tickwave"));
-        backend.send(Request::Bench(Command::Start {
-            rate: self.rate,
-            ranges: self.ranges,
-            path,
+        let dio_only = self.status.as_ref().is_some_and(|s| !s.energy);
+        backend.send(Request::Bench(if dio_only {
+            Command::StartDio { path }
+        } else {
+            Command::Start {
+                rate: self.rate,
+                ranges: self.ranges,
+                path,
+            }
         }));
-        self.start_confirm = false;
+        self.asking = None;
     }
     pub fn tick(&mut self) {
         let received = self.io.as_ref().and_then(|rx| match rx.try_recv() {
@@ -479,7 +587,7 @@ impl Bench {
                     if self.path.as_ref() == Some(&path) {
                         self.close();
                     }
-                    self.notice = Some("Capture discarded.".into());
+                    self.notice = Some("Recording discarded.".into());
                 }
                 Err(error) => {
                     tracing::error!("file operation: {error}");
@@ -543,6 +651,7 @@ impl Bench {
     ) {
         let face = style::face(ui.ctx());
         egui::Panel::left("bench")
+            .resizable(false)
             .exact_size(SIDE)
             .frame(
                 Frame::new()
@@ -562,7 +671,6 @@ impl Bench {
                 self.poll(ui);
                 self.graph(ui);
             });
-        self.dialogs(ui, backend);
     }
 
     fn side(
@@ -573,112 +681,231 @@ impl Bench {
         backend: &mut dyn Backend,
     ) {
         let face = style::face(ui.ctx());
+        // While a question is open, the rest of the panel waits for its answer.
+        let asking = self.asking.is_some()
+            || self.off_confirm
+            || self
+                .status
+                .as_ref()
+                .is_some_and(|s| s.confirm_dio.is_some());
+        let recording = self.recording();
         let name = label(ui, "Unit");
         let chosen = units
             .iter()
             .find(|u| Some(&u.device.instance) == selected.as_ref());
-        egui::ComboBox::from_id_salt("bench-unit")
-            .width(ui.available_width())
-            .selected_text(text(
-                Role::Code,
-                chosen.and_then(Unit::serial).unwrap_or("Select a unit"),
-            ))
-            .show_ui(ui, |ui| {
-                for unit in units {
-                    ui.add_enabled_ui(!self.recording(), |ui| {
-                        ui.selectable_value(
-                            selected,
-                            Some(unit.device.instance.clone()),
-                            text(Role::Code, unit.serial().unwrap_or("No serial")),
+        ui.add_enabled_ui(!asking, |ui| {
+            egui::ComboBox::from_id_salt("bench-unit")
+                .width(ui.available_width())
+                .selected_text(text(
+                    Role::Code,
+                    chosen.map_or_else(|| "Select a unit".to_owned(), who),
+                ))
+                .show_ui(ui, |ui| {
+                    for unit in units {
+                        let refused = refusal(unit).map(|(why, _)| why);
+                        let response = ui
+                            .add_enabled_ui(!recording && refused.is_none(), |ui| {
+                                ui.selectable_value(
+                                    selected,
+                                    Some(unit.device.instance.clone()),
+                                    text(Role::Code, entry(unit)),
+                                )
+                            })
+                            .inner;
+                        response.on_disabled_hover_text(
+                            refused.unwrap_or_else(|| "Stop recording first.".to_owned()),
                         );
-                    });
-                }
-            })
-            .response
-            .labelled_by(name.id);
+                    }
+                })
+                .response
+                .labelled_by(name.id);
+            if let Some(unit) = chosen {
+                ui.label(text(Role::Label, what(unit)).color(face.ink_2));
+            }
+        });
+        let refused = chosen.and_then(refusal);
         match chosen {
-            Some(unit) => match pro::validate(unit, pro::Feature::Energy) {
-                Ok(()) => self.connect(unit, backend),
-                // A standalone MCU-Link, for its DIO pins.
-                Err(_) if pro::validate(unit, pro::Feature::Dio).is_ok() => {
-                    self.connect(unit, backend);
-                }
-                Err(error) => {
-                    self.disconnect(backend);
-                    ui.add_space(space::S);
-                    edged(ui, style::Status::Attention, &sentence(&error.to_string()));
-                }
-            },
-            None => self.disconnect(backend),
+            Some(unit) if refused.is_none() && self.restarting.is_none() => {
+                self.connect(unit, backend);
+            }
+            _ => self.disconnect(backend),
         }
-        match (&self.status, chosen) {
-            (Some(status), _) if status.connected => {
-                let status = status.clone();
-                if status.target_power {
-                    self.supply(ui, &status, backend);
+        if let Some(unit) = chosen.filter(|unit| unit.takes_restart())
+            && !self.stopped
+        {
+            ui.add_space(space::S);
+            if self.asking == Some(Question::Restart) {
+                edged(
+                    ui,
+                    style::Status::Attention,
+                    &format!(
+                        "Restart {}? Its DIO pins go back to inputs, a Pro's target supply turns off and a capture ends.",
+                        who(unit)
+                    ),
+                );
+                ui.add_space(space::S);
+                match answers(ui, "Restart", Fill::ink(face), true) {
+                    Some(true) => {
+                        self.asking = None;
+                        self.restart = Some(unit.clone());
+                    }
+                    Some(false) => self.asking = None,
+                    None => {}
                 }
-                if status.energy {
-                    self.acquisition(ui, &status, backend);
-                } else {
-                    let note = if status.board == Some(BoardKind::Pro) {
-                        "This Pro has no energy measurement circuit fitted, so it measures no \
-                         energy."
+            } else {
+                let free = !recording && !asking && self.restarting.is_none();
+                let response = outline(ui, "Restart", free)
+                    .on_hover_text("Restarts the unit, as unplugging it would.");
+                if response.clicked() {
+                    self.asking = Some(Question::Restart);
+                }
+                if recording {
+                    response.on_disabled_hover_text("Stop recording first.");
+                }
+            }
+        }
+        // Whether the notice is drawn already, beside what it is about.
+        let mut shown = false;
+        if self.stopped {
+            ui.add_space(space::S);
+            ui.label(text(Role::Body, "Not connected: the USB worker stopped.").color(face.ink_2));
+        } else if self.restarting.is_some() {
+            ui.add_space(space::S);
+            ui.label(text(Role::Body, "Restarting…").color(face.ink_2));
+        } else if let Some((why, update)) = &refused {
+            ui.add_space(space::S);
+            edged(ui, style::Status::Attention, why);
+            if *update {
+                self.update_offer(ui);
+            }
+        } else {
+            match (&self.status, chosen) {
+                (Some(status), _) if status.connected => {
+                    let status = status.clone();
+                    if status.target_power {
+                        self.supply(ui, &status, asking, backend);
+                    }
+                    if status.energy {
+                        self.acquisition(ui, &status, asking, backend);
+                        ui.add_enabled_ui(!asking, |ui| calibration(ui, &status));
                     } else {
-                        "A standalone MCU-Link has DIO pins. Supply control and energy \
-                         measurement need a Pro."
-                    };
+                        let note = if status.board == Some(BoardKind::Pro) {
+                            "This Pro has no energy measurement circuit fitted, so it measures no \
+                             energy."
+                        } else {
+                            "A standalone MCU-Link has DIO pins. Supply control and energy \
+                             measurement need a Pro."
+                        };
+                        ui.add_space(space::S);
+                        ui.add(egui::Label::new(text(Role::Body, note).color(face.ink_2)).wrap());
+                        self.dio_recording(ui, &status, asking, backend);
+                    }
+                }
+                // Refused for what the unit runs or is: an update, or a jumper, changes it.
+                (Some(status), Some(_)) if status.refused.is_some() => {
+                    if let Some(why) = self.notice.take() {
+                        ui.add_space(space::S);
+                        edged(ui, style::Status::Attention, &why);
+                        self.notice = Some(why);
+                        shown = true;
+                    }
+                    if status.refused == Some(Refusal::Update) {
+                        ui.add_space(space::S);
+                        self.update_offer(ui);
+                    }
+                }
+                // The worker dropped the session, after a failure: the notice below says why.
+                (Some(_), Some(unit)) => {
                     ui.add_space(space::S);
-                    ui.add(egui::Label::new(text(Role::Body, note).color(face.ink_2)).wrap());
+                    if outline(ui, "Reconnect", !asking).clicked() {
+                        self.connection = None;
+                        self.connect(unit, backend);
+                    }
                 }
-            }
-            // The worker dropped the session, after a failure: the notice below says why.
-            (Some(_), Some(unit)) => {
-                ui.add_space(space::S);
-                if outline(ui, "Reconnect", true).clicked() {
-                    self.connection = None;
-                    self.connect(unit, backend);
+                (None, Some(_)) if self.connection.is_some() => {
+                    ui.add_space(space::S);
+                    ui.label(text(Role::Body, "Connecting…").color(face.ink_2));
                 }
+                _ => {}
             }
-            (None, Some(_)) if self.connection.is_some() => {
-                ui.add_space(space::S);
-                ui.label(text(Role::Body, "Connecting…").color(face.ink_2));
-            }
-            _ => {}
         }
-        if let Some(notice) = self.notice.clone() {
+        if let Some(notice) = self.notice.clone()
+            && !shown
+        {
             ui.add_space(space::S);
             edged(ui, style::Status::Attention, &notice);
         }
-        self.dio(ui, chosen, backend);
-        self.markers(ui);
-        self.measurements(ui);
-        self.kept(ui);
+        let refused_session = self.status.as_ref().is_some_and(|s| s.refused.is_some());
+        if refused.is_none() && !refused_session && !self.stopped {
+            self.dio(ui, chosen, asking, backend);
+        }
+        ui.add_enabled_ui(!asking, |ui| {
+            self.markers(ui);
+            self.measurements(ui);
+            self.kept(ui);
+        });
     }
 
-    fn dio(&mut self, ui: &mut Ui, chosen: Option<&Unit>, backend: &mut dyn Backend) {
+    /// The way to an update, for a unit Bench refuses for what it runs.
+    fn update_offer(&mut self, ui: &mut Ui) {
+        if outline(ui, "Update under Units", true).clicked() {
+            self.to_units = true;
+        }
+    }
+
+    /// Recording the DIO pins alone, on a board without energy capture.
+    fn dio_recording(
+        &mut self,
+        ui: &mut Ui,
+        status: &Status,
+        asking: bool,
+        backend: &mut dyn Backend,
+    ) {
+        let face = style::face(ui.ctx());
+        ui.add_space(space::L);
+        label(ui, "Recording");
+        if status.recording {
+            ui.label(text(Role::Body, "Recording the DIO pins").color(face.ink));
+            if outline(ui, "Stop recording", true).clicked() {
+                backend.send(Request::Bench(Command::Stop));
+            }
+            return;
+        }
+        let pins = status.dio.as_ref().map_or(0, |dio| dio.pins);
+        let why = if !status.dio_stream {
+            Some("This build of Verge predates DIO recording: update it under Units.")
+        } else if status.dio_reason.is_some() || pins == 0 {
+            Some("No DIO pins to record: the DIO section says why.")
+        } else {
+            None
+        };
+        let response = outline(ui, "Start recording", !asking && why.is_none());
+        if response.clicked() {
+            self.start(backend);
+        }
+        if let Some(why) = why {
+            response.on_disabled_hover_text(why);
+        }
+    }
+
+    fn dio(&mut self, ui: &mut Ui, chosen: Option<&Unit>, asking: bool, backend: &mut dyn Backend) {
         let face = style::face(ui.ctx());
         ui.add_space(space::L);
         label(ui, "DIO");
-        let state = self
-            .status
+        let status = self.status.clone();
+        let state = status
             .as_ref()
             .filter(|s| s.connected)
             .and_then(|s| s.dio.clone());
         let Some(state) = state else {
-            let reason = self
-                .status
-                .as_ref()
-                .and_then(|s| s.dio_reason.as_ref().map(ToString::to_string))
-                .or_else(|| {
-                    chosen.and_then(|unit| {
-                        pro::validate(unit, pro::Feature::Dio)
-                            .err()
-                            .map(|error| error.to_string())
-                    })
-                })
-                .unwrap_or_else(|| {
-                    "Select a Pro or standalone MCU-Link running Verge to use DIO.".into()
-                });
+            let reason = match &status {
+                Some(status) => status.dio_reason.as_ref().map(ToString::to_string),
+                None if self.connection.is_some() => Some("Connecting…".to_owned()),
+                None => None,
+            }
+            .unwrap_or_else(|| {
+                "Select a Pro or standalone MCU-Link running Verge to use DIO.".into()
+            });
             ui.add_enabled(false, egui::Label::new(text(Role::Body, reason)));
             return;
         };
@@ -687,8 +914,8 @@ impl Bench {
                 egui::Label::new(
                     text(
                         Role::Body,
-                        "A bench tool has given the DIO pins to its command marker. Run verge \
-                         restart to give them back.",
+                        "A bench tool has given the DIO pins to its command marker. Restart the \
+                         unit to give them back.",
                     )
                     .color(face.ink_2),
                 )
@@ -696,7 +923,88 @@ impl Bench {
             );
             return;
         }
-        // Pins the marker holds are not DIO pins. On the standalone MCU-Link each is a group.
+        ui.add_enabled_ui(!asking, |ui| self.dio_pins(ui, &state, backend));
+        // Pins the marker holds are not DIO pins, and are not listed.
+        let held = 0x0f & !state.pins;
+        if held != 0 {
+            ui.add(
+                egui::Label::new(
+                    text(
+                        Role::Body,
+                        format!(
+                            "{} {} held by a bench tool's command marker. Restart the unit to \
+                             give them back.",
+                            pin_list(held),
+                            if held.count_ones() == 1 { "is" } else { "are" }
+                        ),
+                    )
+                    .color(face.ink_2),
+                )
+                .wrap(),
+            );
+        }
+        let place = match chosen.and_then(Unit::verge).and_then(|ours| ours.board) {
+            Some(BoardKind::Plain) => {
+                "DIO0 to DIO3 are J8's pads, left to right with the USB connector on the left. \
+                 They work at 3.3 V only. "
+            }
+            Some(BoardKind::Pro) => "DIO0 to DIO3 are J19 pins 2 to 5. ",
+            _ => "",
+        };
+        ui.add(
+            egui::Label::new(
+                text(
+                    Role::Body,
+                    format!("{place}Inputs have pull-downs. Outputs read their drive."),
+                )
+                .color(face.ink_2),
+            )
+            .wrap(),
+        );
+        if let Some(status) = &status
+            && let Some(change) = status.confirm_dio
+        {
+            let group = group_name(change.mask);
+            let pins = if change.mask.count_ones() == 1 {
+                "this pin"
+            } else {
+                "these pins"
+            };
+            let voltage = if status.board == Some(BoardKind::Plain) {
+                " J8 drives 3.3 V, which can damage a target that runs at a lower voltage."
+            } else {
+                ""
+            };
+            ui.add_space(space::S);
+            edged(
+                ui,
+                style::Status::Attention,
+                &format!(
+                    "Drive {group}? Check that the target is not driving {pins}. The probe cannot \
+                     detect contention.{voltage}"
+                ),
+            );
+            ui.add_space(space::S);
+            match answers(ui, &format!("Drive {group}"), Fill::ink(face), true) {
+                Some(true) => backend.send(Request::Bench(Command::Dio {
+                    change,
+                    confirmed: true,
+                })),
+                Some(false) => backend.send(Request::Bench(Command::CancelDio)),
+                None => {}
+            }
+        }
+    }
+
+    /// The pins' directions and levels, and the controls that change them.
+    fn dio_pins(
+        &mut self,
+        ui: &mut Ui,
+        state: &escapement_verge_probe::DioState,
+        backend: &mut dyn Backend,
+    ) {
+        let face = style::face(ui.ctx());
+        // On the standalone MCU-Link each pin is a group.
         for group in state
             .groups
             .iter()
@@ -769,24 +1077,6 @@ impl Bench {
                     ui.end_row();
                 }
             });
-        let place = match chosen.and_then(Unit::verge).and_then(|ours| ours.board) {
-            Some(BoardKind::Plain) => {
-                "DIO0 to DIO3 are J8's pads, left to right with the USB connector on the left. \
-                 They work at 3.3 V only. "
-            }
-            Some(BoardKind::Pro) => "DIO0 to DIO3 are J19 pins 2 to 5. ",
-            _ => "",
-        };
-        ui.add(
-            egui::Label::new(
-                text(
-                    Role::Body,
-                    format!("{place}Inputs have pull-downs. Outputs read their drive."),
-                )
-                .color(face.ink_2),
-            )
-            .wrap(),
-        );
     }
 
     fn markers(&mut self, ui: &mut Ui) {
@@ -833,6 +1123,10 @@ impl Bench {
                     .flatten()
                     .collect::<Vec<_>>()
                     .join(" · ");
+                    // The probe lost markers just before this one.
+                    if a.kind.as_deref() == Some("marker-after-loss") {
+                        ui.label(text(Role::Body, "Markers lost here").color(face.attention_ink));
+                    }
                     let response = ui.add(
                         egui::Button::new(text(Role::Code, words))
                             .selected(self.marker_selected == Some(marker.cursor))
@@ -840,12 +1134,6 @@ impl Bench {
                     );
                     if response.clicked() {
                         picked = Some(marker.cursor);
-                    }
-                    if a.kind.as_deref() == Some("marker-after-loss") {
-                        ui.label(
-                            text(Role::Body, "Markers lost before this one")
-                                .color(face.attention_ink),
-                        );
                     }
                 }
             });
@@ -912,22 +1200,52 @@ impl Bench {
         }
     }
 
-    fn supply(&mut self, ui: &mut Ui, status: &Status, backend: &mut dyn Backend) {
+    fn supply(&mut self, ui: &mut Ui, status: &Status, asking: bool, backend: &mut dyn Backend) {
         let face = style::face(ui.ctx());
         ui.add_space(space::L);
         label(ui, "Target supply");
-        ui.horizontal(|ui| {
-            if outline(ui, if status.supply { "Turn off" } else { "Turn on" }, true).clicked() {
-                backend.send(Request::Bench(Command::Supply {
-                    on: !status.supply,
-                    confirmed: false,
-                }));
-            }
-            ui.label(
-                text(Role::Figures, if status.supply { "on" } else { "off" })
-                    .color(if status.supply { face.ink } else { face.ink_2 }),
-            );
+        ui.add_enabled_ui(!asking, |ui| {
+            ui.horizontal(|ui| {
+                // The question takes the button's place.
+                if !self.off_confirm
+                    && outline(ui, if status.supply { "Turn off" } else { "Turn on" }, true)
+                        .clicked()
+                {
+                    backend.send(Request::Bench(Command::Supply {
+                        on: !status.supply,
+                        confirmed: false,
+                    }));
+                }
+                ui.label(
+                    text(Role::Figures, if status.supply { "on" } else { "off" })
+                        .color(if status.supply { face.ink } else { face.ink_2 }),
+                );
+            });
         });
+        if self.off_confirm {
+            ui.add_space(space::S);
+            edged(
+                ui,
+                style::Status::Attention,
+                "Turn off the target supply? A capture is running, and turning the supply off \
+                 removes the target's power.",
+            );
+            ui.add_space(space::S);
+            match answers(ui, "Turn off", Fill::ink(face), true) {
+                Some(true) => {
+                    backend.send(Request::Bench(Command::Supply {
+                        on: false,
+                        confirmed: true,
+                    }));
+                    self.off_confirm = false;
+                }
+                Some(false) => {
+                    self.off_confirm = false;
+                    backend.send(Request::Bench(Command::CancelSupply));
+                }
+                None => {}
+            }
+        }
         // Without an energy circuit there is nothing to measure it with.
         if !status.energy {
             return;
@@ -942,9 +1260,28 @@ impl Bench {
             }
             .color(face.ink_2),
         );
+        let total = match status.total {
+            Some(EnergyTotal::Total(total)) => Some(format!(
+                "total {} over {} pairs since the start",
+                si(total.energy_nanojoules as f64 * 1e-9, "J"),
+                total.integrated_pairs
+            )),
+            Some(EnergyTotal::NoSample) => Some("total: no calibrated pair yet".to_owned()),
+            _ => None,
+        };
+        if let Some(total) = total {
+            ui.label(text(Role::Figures, total).color(face.ink_2))
+                .on_hover_text("The probe's energy total, which a capture's start clears.");
+        }
     }
 
-    fn acquisition(&mut self, ui: &mut Ui, status: &Status, backend: &mut dyn Backend) {
+    fn acquisition(
+        &mut self,
+        ui: &mut Ui,
+        status: &Status,
+        asking: bool,
+        backend: &mut dyn Backend,
+    ) {
         let face = style::face(ui.ctx());
         ui.add_space(space::L);
         label(ui, "Acquisition");
@@ -956,83 +1293,142 @@ impl Bench {
                 }
                 .color(face.ink),
             );
-            if outline(ui, "Stop recording", true).clicked() {
+            if outline(ui, "Stop recording", !asking).clicked() {
                 backend.send(Request::Bench(Command::Stop));
             }
             return;
         }
-        ui.add(
-            egui::DragValue::new(&mut self.rate)
-                .range(1..=100_000)
-                .suffix(" pairs/s"),
-        );
-        ui.horizontal_wrapped(|ui| {
-            for rate in [1_000, 25_000, 65_000, 100_000] {
-                if choice(ui, &format!("{}k", rate / 1000), self.rate == rate).clicked() {
-                    self.rate = rate;
-                }
+        if let Some(EnergyTotal::Failed(total)) = status.total {
+            ui.add(
+                egui::Label::new(
+                    text(
+                        Role::Body,
+                        format!(
+                            "The last capture failed after {} over {} pairs: the ADC overran, its \
+                             DMA failed or the probe fell behind reading it. Starting a capture \
+                             clears it.",
+                            si(total.energy_nanojoules as f64 * 1e-9, "J"),
+                            total.integrated_pairs
+                        ),
+                    )
+                    .color(face.attention_ink),
+                )
+                .wrap(),
+            );
+        }
+        let question = self.asking == Some(Question::Start);
+        ui.add_enabled_ui(!asking, |ui| {
+            if status.capturing {
+                // Recording a running capture keeps its rate and ranges.
+                ui.add(
+                    egui::Label::new(
+                        text(
+                            Role::Body,
+                            match status.running_rate {
+                                Some(rate) => {
+                                    format!("Running at {rate} pairs/s, started elsewhere")
+                                }
+                                None => "Running at its own rate, started elsewhere".to_owned(),
+                            },
+                        )
+                        .color(face.ink),
+                    )
+                    .wrap(),
+                );
+            } else {
+                ui.add(
+                    egui::DragValue::new(&mut self.rate)
+                        .range(1..=100_000)
+                        .suffix(" pairs/s"),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    for rate in [1_000, 25_000, 65_000, 100_000] {
+                        if choice(ui, &format!("{}k", rate / 1000), self.rate == rate).clicked() {
+                            self.rate = rate;
+                        }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    for (ranges, words) in [
+                        (EnergyRanges::Auto, "Auto range"),
+                        (EnergyRanges::High, "High range"),
+                    ] {
+                        if choice(ui, words, self.ranges == ranges).clicked() {
+                            self.ranges = ranges;
+                        }
+                    }
+                });
+                ui.add(
+                    egui::Label::new(
+                        text(
+                            Role::Body,
+                            match self.ranges {
+                                EnergyRanges::Auto => {
+                                    "Reads currents down to tens of nA. Each switch to the low \
+                                     range dips the reading for about a millisecond."
+                                }
+                                EnergyRanges::High => {
+                                    "Reads the target undisturbed, but currents under about 0.65 \
+                                     mA read unreliably and are marked under range."
+                                }
+                            },
+                        )
+                        .color(face.ink_2),
+                    )
+                    .wrap(),
+                );
             }
-        });
-        if !status.capturing {
-            ui.horizontal_wrapped(|ui| {
-                for (ranges, words) in [
-                    (EnergyRanges::Auto, "Auto range"),
-                    (EnergyRanges::High, "High range"),
-                ] {
-                    if choice(ui, words, self.ranges == ranges).clicked() {
-                        self.ranges = ranges;
+            if !question {
+                let words = if status.capturing {
+                    "Record running capture"
+                } else {
+                    "Start recording"
+                };
+                if outline(ui, words, true).clicked() {
+                    if status.capturing {
+                        self.start(backend);
+                    } else {
+                        self.asking = Some(Question::Start);
                     }
                 }
-            });
-            ui.add(
-                egui::Label::new(
-                    text(
-                        Role::Body,
-                        match self.ranges {
-                            EnergyRanges::Auto => {
-                                "Reads currents down to tens of nA. Each switch to the low range \
-                                 dips the reading for about a millisecond."
-                            }
-                            EnergyRanges::High => {
-                                "Reads the target undisturbed, but currents under about 0.65 mA \
-                                 read unreliably and are marked under range."
-                            }
-                        },
-                    )
-                    .color(face.ink_2),
-                )
-                .wrap(),
-            );
-        }
-        let words = if status.capturing {
-            "Record running capture"
-        } else {
-            "Start recording"
-        };
-        if outline(ui, words, true).clicked() {
-            if status.capturing {
-                self.start(backend);
-            } else {
-                self.start_confirm = true;
             }
-        }
-        if status.capturing {
-            ui.add(
-                egui::Label::new(
-                    text(
-                        Role::Body,
-                        "A capture is running: recording it keeps its rate.",
+            if status.dio_reason.is_some() {
+                ui.add(
+                    egui::Label::new(
+                        text(
+                            Role::Body,
+                            "DIO is unavailable, so a recording holds no DIO pins.",
+                        )
+                        .color(face.ink_2),
                     )
-                    .color(face.ink_2),
-                )
-                .wrap(),
+                    .wrap(),
+                );
+            }
+        });
+        if question {
+            ui.add_space(space::S);
+            edged(
+                ui,
+                style::Status::Attention,
+                "Starting clears the probe's energy total. Calibration can cut the target's \
+                 power for about 0.2 s.",
             );
+            ui.add_space(space::S);
+            match answers(ui, "Start recording", Fill::ink(face), true) {
+                Some(true) => self.start(backend),
+                Some(false) => self.asking = None,
+                None => {}
+            }
         }
     }
 
     /// The visible window's readings and the selection's, side by side.
     fn measurements(&mut self, ui: &mut Ui) {
-        let (Some(answer), Some(channels)) = (self.answer_now(), self.channels.as_ref()) else {
+        let Some(answer) = self.answer_now() else {
+            return;
+        };
+        let edges = self.lane_edges(&answer);
+        let Some(channels) = self.channels.as_ref() else {
             return;
         };
         let face = style::face(ui.ctx());
@@ -1081,7 +1477,6 @@ impl Bench {
                 .get(1)
                 .filter(|statistics| statistics.interval == *selection)
         });
-        let extent = answer.extent.clone().unwrap_or(0..0);
         egui::Grid::new("bench-measurements")
             .num_columns(3)
             .spacing(vec2(space::M, space::XS))
@@ -1095,6 +1490,31 @@ impl Bench {
                 ui.end_row();
                 let columns: Vec<Option<&Statistics>> =
                     std::iter::once(window).chain(selection).collect();
+                // A recording of DIO edges alone: its duration, and each pin's edges.
+                if channels.i.is_none() {
+                    let (name, value) = READINGS[0];
+                    label(ui, &sentence_case(name));
+                    for column in &columns {
+                        let words = column.map_or_else(
+                            || "…".to_owned(),
+                            |statistics| value(&Reading::new(statistics, channels)),
+                        );
+                        ui.label(text(Role::Figures, words).color(face.ink));
+                    }
+                    ui.end_row();
+                    for (k, pin) in channels.pins.iter().enumerate() {
+                        label(ui, &format!("{pin} edges"));
+                        for counts in &edges {
+                            let words = counts
+                                .as_ref()
+                                .and_then(|counts| counts.get(k))
+                                .map_or_else(|| "…".to_owned(), ToString::to_string);
+                            ui.label(text(Role::Figures, words).color(face.ink));
+                        }
+                        ui.end_row();
+                    }
+                    return;
+                }
                 for (name, value) in READINGS {
                     label(ui, &sentence_case(name));
                     for column in &columns {
@@ -1110,7 +1530,10 @@ impl Bench {
                 for column in &columns {
                     let missing = column.and_then(|statistics| {
                         let current = Reading::new(statistics, channels).current?;
-                        let ticks = current.unmeasured(&statistics.interval, &extent);
+                        // Time outside the recording counts as unmeasured too: the duration
+                        // above is the whole interval.
+                        let interval = &statistics.interval;
+                        let ticks = current.unmeasured(interval, interval);
                         Some(ticks.as_f64() / channels.rate)
                     });
                     ui.label(match missing {
@@ -1123,26 +1546,75 @@ impl Bench {
             });
     }
 
-    /// The open capture's name and what can be done with it, under the graph.
+    /// Each lane's edges over the window and the selection, in a recording of DIO edges alone:
+    /// counted once for each interval, from a finished recording's index. A recording still being
+    /// written is not counted.
+    fn lane_edges(&mut self, answer: &Answer) -> Vec<Option<Vec<u64>>> {
+        let (Some(viewer), Some(channels)) = (self.viewer.clone(), self.channels.as_ref()) else {
+            return Vec::new();
+        };
+        if channels.i.is_some() || self.live.is_some() {
+            return Vec::new();
+        }
+        let lanes = channels.lanes.clone();
+        let mut intervals = vec![answer.window.clone()];
+        intervals.extend(self.state.selection.clone());
+        intervals
+            .into_iter()
+            .map(|interval| {
+                if let Some((_, counts)) = self.edges.iter().find(|(at, _)| *at == interval) {
+                    return Some(counts.clone());
+                }
+                let counts = viewer.recording(|r| {
+                    lanes
+                        .iter()
+                        .map(|&lane| {
+                            r.edge_count(
+                                lane,
+                                interval.start,
+                                interval.end,
+                                &AtomicBool::new(false),
+                            )
+                            .ok()
+                        })
+                        .collect::<Option<Vec<u64>>>()
+                })?;
+                // The window and the selection, and the ones before them.
+                if self.edges.len() >= 4 {
+                    self.edges.remove(0);
+                }
+                self.edges.push((interval, counts.clone()));
+                Some(counts)
+            })
+            .collect()
+    }
+
+    /// The open recording's name and what can be done with it, under the graph.
     fn files(&mut self, ui: &mut Ui) {
         let face = style::face(ui.ctx());
+        if let Some(Question::Discard(path)) = self.asking.clone() {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            edged(
+                ui,
+                style::Status::Attention,
+                &format!("Delete {name} from disk? It cannot be undone."),
+            );
+            ui.add_space(space::S);
+            match answers(ui, "Delete", Fill::ink(face), true) {
+                Some(true) => {
+                    self.asking = None;
+                    self.file(FileAction::Discard);
+                }
+                Some(false) => self.asking = None,
+                None => {}
+            }
+            return;
+        }
         let idle = self.io.is_none() && self.compactions.is_empty();
         let open = self.path.is_some() && self.viewer.is_some();
-        // A DIO-only recording has no pairs for the exports' columns.
-        let exportable =
-            open && !self.recording() && self.channels.as_ref().is_some_and(|c| c.i.is_some());
+        let pairs = self.channels.as_ref().is_some_and(|c| c.i.is_some());
+        let exportable = open && !self.recording() && pairs;
         ui.horizontal_wrapped(|ui| {
-            if let Some(path) = &self.path {
-                ui.label(
-                    text(
-                        Role::Code,
-                        path.file_name().unwrap_or_default().to_string_lossy(),
-                    )
-                    .color(face.ink_2),
-                )
-                .on_hover_text(path.display().to_string());
-                ui.add_space(space::S);
-            }
             if outline(ui, "Open…", idle).clicked() {
                 self.file(FileAction::Open);
             }
@@ -1150,29 +1622,61 @@ impl Bench {
                 self.file(FileAction::Save);
             }
             ui.add_space(space::S);
-            label(
-                ui,
-                if self.state.selection.is_some() {
-                    "Export selection"
+            // The label and its buttons wrap as one.
+            ui.horizontal(|ui| {
+                label(
+                    ui,
+                    if self.state.selection.is_some() {
+                        "Export selection"
+                    } else {
+                        "Export"
+                    },
+                )
+                .on_hover_text("Exports keep whole pairs at the selection's ends.");
+                let why = if open && !pairs {
+                    "This recording holds DIO edges only. CSV and sigrok exports need voltage and \
+                     current pairs."
+                } else if self.recording() {
+                    "Export once the recording stops."
                 } else {
-                    "Export"
-                },
-            )
-            .on_hover_text("Exports keep whole samples at the selection's edges.");
-            if outline(ui, "CSV…", idle && exportable).clicked() {
-                self.file(FileAction::Export(true));
-            }
-            if outline(ui, "sigrok…", idle && exportable).clicked() {
-                self.file(FileAction::Export(false));
-            }
+                    "Open a recording to export it."
+                };
+                for (words, csv) in [("CSV…", true), ("sigrok…", false)] {
+                    let response = outline(ui, words, idle && exportable);
+                    if response.clicked() {
+                        self.file(FileAction::Export(csv));
+                    }
+                    if idle {
+                        response.on_disabled_hover_text(why);
+                    }
+                }
+            });
             ui.add_space(space::S);
-            if outline(ui, "Discard…", idle && open && !self.recording()).clicked() {
-                self.file(FileAction::Discard);
+            if outline(ui, "Discard…", idle && open && !self.recording()).clicked()
+                && let Some(path) = self.path.clone()
+            {
+                self.asking = Some(Question::Discard(path));
+            }
+            // The name takes what is left of the line, and is cut short first.
+            if let Some(path) = &self.path {
+                ui.add_space(space::S);
+                ui.add(
+                    egui::Label::new(
+                        text(
+                            Role::Code,
+                            path.file_name().unwrap_or_default().to_string_lossy(),
+                        )
+                        .color(face.ink_2),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(path.display().to_string());
             }
         });
     }
 
-    /// Captures kept in the record directory, which a recording adds to until one is discarded.
+    /// Recordings kept in the record directory, which a recording adds to until one is
+    /// discarded.
     fn kept(&mut self, ui: &mut Ui) {
         if self.recovered.is_empty() {
             return;
@@ -1190,7 +1694,10 @@ impl Bench {
             .width(ui.available_width())
             .selected_text(text(
                 Role::Code,
-                format!("{} captures", self.recovered.len()),
+                match self.recovered.len() {
+                    1 => "1 recording".to_owned(),
+                    n => format!("{n} recordings"),
+                },
             ))
             .show_ui(ui, |ui| {
                 for path in self.recovered.clone() {
@@ -1207,101 +1714,22 @@ impl Bench {
             .labelled_by(name);
     }
 
-    fn dialogs(&mut self, ui: &mut Ui, backend: &mut dyn Backend) {
-        if self.start_confirm {
-            egui::Window::new("Start energy capture?")
-                .collapsible(false)
-                .resizable(false)
-                .show(ui.ctx(), |ui| {
-                    ui.label(text(
-                        Role::Body,
-                        "Starting clears the probe’s energy total. Calibration can interrupt \
-                         target power for about 0.2 seconds.",
-                    ));
-                    ui.horizontal(|ui| {
-                        if outline(ui, "Start capture", true).clicked() {
-                            self.start(backend);
-                        }
-                        if outline(ui, "Cancel", true).clicked() {
-                            self.start_confirm = false;
-                        }
-                    });
-                });
-        }
-        if let Some(status) = self.status.as_ref()
-            && let Some(change) = status.confirm_dio
-        {
-            let group = group_name(change.mask);
-            let pins = if change.mask.count_ones() == 1 {
-                "this pin"
-            } else {
-                "these pins"
-            };
-            let voltage = if status.board == Some(BoardKind::Plain) {
-                " J8 drives 3.3 V, which can damage a target that runs at a lower voltage."
-            } else {
-                ""
-            };
-            let warning = format!(
-                "Check that the target is not driving {pins}. The probe cannot detect \
-                 contention.{voltage}"
-            );
-            egui::Window::new(format!("Drive {group}?"))
-                .collapsible(false)
-                .resizable(false)
-                .show(ui.ctx(), |ui| {
-                    ui.label(text(Role::Body, warning));
-                    ui.horizontal(|ui| {
-                        if outline(ui, "Drive pins", true).clicked() {
-                            backend.send(Request::Bench(Command::Dio {
-                                change,
-                                confirmed: true,
-                            }));
-                        }
-                        if outline(ui, "Keep as inputs", true).clicked() {
-                            backend.send(Request::Bench(Command::CancelDio));
-                        }
-                    });
-                });
-        }
-        if self.off_confirm {
-            egui::Window::new("Turn off target supply?")
-                .collapsible(false)
-                .resizable(false)
-                .show(ui.ctx(), |ui| {
-                    ui.label(text(
-                        Role::Body,
-                        "A capture is running. Turning off the supply removes target power.",
-                    ));
-                    ui.horizontal(|ui| {
-                        if outline(ui, "Turn off supply", true).clicked() {
-                            backend.send(Request::Bench(Command::Supply {
-                                on: false,
-                                confirmed: true,
-                            }));
-                            self.off_confirm = false;
-                        }
-                        if outline(ui, "Keep supply on", true).clicked() {
-                            self.off_confirm = false;
-                            backend.send(Request::Bench(Command::CancelSupply));
-                        }
-                    });
-                });
-        }
-    }
-
     fn toolbar(&mut self, ui: &mut Ui) {
         let rate = self.channels.as_ref().map(|c| c.rate);
+        // A recording of DIO edges alone has no trace to choose.
+        let pairs = self.channels.as_ref().is_none_or(|c| c.i.is_some());
         ui.horizontal_wrapped(|ui| {
-            for quantity in [Quantity::Current, Quantity::Voltage, Quantity::Power] {
-                if choice(ui, quantity.word(), self.quantity == quantity).clicked()
-                    && self.quantity != quantity
-                {
-                    self.quantity = quantity;
-                    self.state.y = Y::Fit;
+            if pairs {
+                for quantity in [Quantity::Current, Quantity::Voltage, Quantity::Power] {
+                    if choice(ui, quantity.word(), self.quantity == quantity).clicked()
+                        && self.quantity != quantity
+                    {
+                        self.quantity = quantity;
+                        self.state.y = Y::Fit;
+                    }
                 }
+                ui.add_space(space::M);
             }
-            ui.add_space(space::M);
             for seconds in [1, 10, 60] {
                 let Some(rate) = rate else { break };
                 let width = (seconds as f64 * rate).round() as i64;
@@ -1354,15 +1782,15 @@ impl Bench {
                             text(
                                 Role::Body,
                                 if self.path.is_some() {
-                                    "Loading the capture…"
+                                    "Loading the recording…"
                                 } else if self
                                     .status
                                     .as_ref()
-                                    .is_some_and(|s| s.connected && !s.energy)
+                                    .is_some_and(|s| s.connected && (s.energy || s.dio_stream))
                                 {
-                                    "Open a capture."
+                                    "Start a recording, or open one."
                                 } else {
-                                    "Start a recording, or open a capture."
+                                    "Open a recording."
                                 },
                             )
                             .color(face.ink_2),
@@ -1384,12 +1812,15 @@ impl Bench {
         extras.marker_list = Some((self.marker_after, MARKER_PAGE));
         extras.successor_of = self.marker_selected;
         let top = ui.cursor().top();
-        let strip = if trace.is_some() {
+        // The overview strip goes before the trace drops under its least height.
+        let least = TRACE + lanes.len() as f32 * LANE + UNDER_TRACE;
+        let room = ui.available_height() - self.footer;
+        let strip = if trace.is_some() && room - STRIP - space::S >= least {
             STRIP + space::S
         } else {
             0.0
         };
-        let height = (ui.available_height() - self.footer - strip).max(160.0);
+        let height = (room - strip).max(160.0);
         let graph = match trace {
             Some(trace) => Graph::new(&viewer, &mut self.state, &palette, trace)
                 .flag(flag)
@@ -1403,7 +1834,7 @@ impl Bench {
         .height(height);
         let response = ui.add(graph);
         self.shown = Graph::shown(&response);
-        if trace.is_some() {
+        if strip > 0.0 {
             ui.add_space(space::S);
             ui.add(
                 Strip::new(&viewer, &mut self.state, &palette)
@@ -1424,7 +1855,7 @@ impl Bench {
         let (lost, dio_losses) = self.losses(&viewer, i, &lanes);
         if lost > 0 {
             ui.label(
-                text(Role::Body, format!("{lost} pairs lost in this capture"))
+                text(Role::Body, format!("{lost} pairs lost in this recording"))
                     .color(face.attention_ink),
             );
         }
@@ -1433,7 +1864,7 @@ impl Bench {
                 text(
                     Role::Body,
                     format!(
-                        "{dio_losses} DIO edge-loss {} in this capture",
+                        "{dio_losses} DIO edge-loss {} in this recording",
                         if dio_losses == 1 { "report" } else { "reports" }
                     ),
                 )
@@ -1470,37 +1901,41 @@ impl Bench {
         let interval = self.state.selection.clone();
         let (send, receive) = mpsc::channel();
         self.io = Some(receive);
+        let dialog = Arc::clone(&self.dialog);
+        // Set while the dialog is open, which a pending close waits for.
+        let asking = move |show: &dyn Fn() -> Option<PathBuf>| {
+            dialog.store(true, Ordering::Relaxed);
+            let chosen = show();
+            dialog.store(false, Ordering::Relaxed);
+            chosen
+        };
         std::thread::spawn(move || {
             let result = (|| -> anyhow::Result<FileResult> {
                 if matches!(action, FileAction::Open) {
-                    let selected = rfd::FileDialog::new()
-                        .add_filter("tickwave recording", &["tickwave"])
-                        .pick_file();
+                    let selected = asking(&|| {
+                        rfd::FileDialog::new()
+                            .add_filter("tickwave recording", &["tickwave"])
+                            .pick_file()
+                    });
                     return Ok(selected.map_or(FileResult::Cancelled, FileResult::Open));
                 }
-                let path = path.ok_or_else(|| anyhow::anyhow!("no capture is open"))?;
+                let path = path.ok_or_else(|| anyhow::anyhow!("no recording is open"))?;
+                // The panel has asked.
                 if matches!(action, FileAction::Discard) {
-                    let agree = rfd::MessageDialog::new()
-                        .set_title("Discard capture?")
-                        .set_description("This permanently deletes the opened capture from disk.")
-                        .set_buttons(rfd::MessageButtons::OkCancel)
-                        .show();
-                    if agree == rfd::MessageDialogResult::Ok {
-                        std::fs::remove_file(&path)?;
-                        return Ok(FileResult::Discarded(path));
-                    }
-                    return Ok(FileResult::Cancelled);
+                    std::fs::remove_file(&path)?;
+                    return Ok(FileResult::Discarded(path));
                 }
                 let (extension, title) = match action {
                     FileAction::Export(true) => ("csv", "Export CSV"),
                     FileAction::Export(false) => ("sr", "Export sigrok"),
-                    _ => ("tickwave", "Save capture"),
+                    _ => ("tickwave", "Save recording"),
                 };
-                let Some(destination) = rfd::FileDialog::new()
-                    .set_title(title)
-                    .add_filter(title, &[extension])
-                    .save_file()
-                else {
+                let Some(destination) = asking(&|| {
+                    rfd::FileDialog::new()
+                        .set_title(title)
+                        .add_filter(title, &[extension])
+                        .save_file()
+                }) else {
                     return Ok(FileResult::Cancelled);
                 };
                 match action {
@@ -1515,6 +1950,136 @@ impl Bench {
             .map_err(|error| format!("{error:#}"));
             let _ = send.send(result);
         });
+    }
+}
+
+/// The calibration points the probe's latest calibration left for each current range, as `verge
+/// energy calibration` shows them: each point's ADC code and the current it stands for.
+fn calibration(ui: &mut Ui, status: &Status) {
+    let Some(ranges) = &status.calibration else {
+        return;
+    };
+    let face = style::face(ui.ctx());
+    ui.add_space(space::S);
+    egui::CollapsingHeader::new(text(Role::Label, "Calibration").color(face.ink_2))
+        .id_salt("bench-calibration")
+        .show(ui, |ui| {
+            for (range, calibration) in ranges {
+                let name = match range {
+                    CalibrationRange::Low => "Low range",
+                    CalibrationRange::High => "High range",
+                };
+                let (points, failed) = match calibration {
+                    EnergyCalibration::Calibrated(points) => (points, false),
+                    EnergyCalibration::Failed(points) => (points, true),
+                    _ => continue,
+                };
+                label(ui, name);
+                if failed {
+                    let words = if points.is_empty() {
+                        "Not calibrated: the last calibration failed before its first point, or \
+                         none ran."
+                    } else {
+                        "The last calibration failed after these points."
+                    };
+                    ui.add(
+                        egui::Label::new(text(Role::Body, words).color(face.attention_ink)).wrap(),
+                    );
+                }
+                egui::Grid::new(("bench-calibration", *range as u8))
+                    .num_columns(2)
+                    .spacing(vec2(space::M, 0.0))
+                    .show(ui, |ui| {
+                        for point in points {
+                            ui.label(
+                                text(Role::Figures, format!("code {}", point.code)).color(face.ink),
+                            );
+                            ui.label(
+                                text(
+                                    Role::Figures,
+                                    si(f64::from(point.current_nanoamps) * 1e-9, "A"),
+                                )
+                                .color(face.ink),
+                            );
+                            ui.end_row();
+                        }
+                    });
+            }
+        });
+}
+
+/// Who a unit is, for Bench: its serial, or what is at its port, as the Units view names it.
+fn who(unit: &Unit) -> String {
+    let at = unit.device.location.as_deref().unwrap_or("?");
+    match (&unit.state, unit.serial()) {
+        (State::Bootloader, _) => format!("LPC55S69 bootloader at {at}"),
+        (State::MiniBootloader, _) => format!("MCU-Link mini bootloader at {at}"),
+        (_, Some(serial)) => serial.to_owned(),
+        (_, None) => format!("the unit at {at}"),
+    }
+}
+
+/// A unit's board and what it runs: "MCU-Link Pro, Verge 26ea505".
+fn what(unit: &Unit) -> String {
+    let what: Vec<String> = board_label(unit)
+        .into_iter()
+        .chain([firmware_label(unit)])
+        .collect();
+    what.join(", ")
+}
+
+/// A unit as the open unit list shows it: who it is, its board and what it runs.
+fn entry(unit: &Unit) -> String {
+    format!("{} · {}", who(unit), what(unit))
+}
+
+/// Why Bench can do nothing with `unit`, and whether an update under Units changes that. Every
+/// board Bench takes has DIO pins, so a unit without them is refused for that.
+fn refusal(unit: &Unit) -> Option<(String, bool)> {
+    let error = pro::validate(unit, pro::Feature::Dio).err()?;
+    if pro::validate(unit, pro::Feature::Energy).is_ok() {
+        return None;
+    }
+    let name = sentence_case(&who(unit));
+    Some(match &unit.state {
+        State::Bootloader => (
+            format!("{name} is a unit in ISP mode. Bench needs it running Verge."),
+            true,
+        ),
+        State::MiniBootloader => (
+            format!("{name} is an MCU-Link mini in ISP mode, which Bench does not support."),
+            false,
+        ),
+        State::SwdJumper {
+            firmware: Jumpered::Ours,
+        } => (
+            format!(
+                "{name} runs Verge with its SWD jumper fitted. Bench reaches a unit only without \
+                 it: unplug the unit, take the jumper off and plug it back in."
+            ),
+            false,
+        ),
+        State::Probe { .. } | State::SwdJumper { .. } if unit.verge().is_none() => (
+            format!(
+                "{name} runs {}, not Verge. Bench needs Verge.",
+                firmware_label(unit)
+            ),
+            true,
+        ),
+        _ => (sentence(&error.to_string()), false),
+    })
+}
+
+/// Pins by name, as "DIO2 and DIO3".
+fn pin_list(mask: u8) -> String {
+    let names: Vec<String> = (0..4)
+        .filter(|pin| mask >> pin & 1 != 0)
+        .map(|pin| format!("DIO{pin}"))
+        .collect();
+    match names.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 
@@ -1700,6 +2265,9 @@ const READINGS: [(&str, Value); 9] = [
 ];
 
 #[cfg(test)]
+pub(crate) use tests::write_for_pictures;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use egui_kittest::Harness;
@@ -1775,6 +2343,42 @@ mod tests {
             writer.ingest(message).unwrap();
         }
         writer.finish().unwrap();
+    }
+
+    /// Writes the recordings the pictures open: at `pairs`, 20 s at 1,000 pairs a second with DIO3
+    /// following the pulses, `markers`, and half a second of pairs lost at 12 s; at `dio_only`,
+    /// 2.1 s of DIO edges alone.
+    pub(crate) fn write_for_pictures(pairs: &Path, dio_only: &Path, markers: &[Marker]) {
+        let mut stream = messages(1000, 20_000, pulses, true, markers);
+        stream.retain(|message| {
+            !matches!(message, Message::Pairs(p) if (12_000..12_500).contains(&p.first_sequence))
+        });
+        write(pairs, &stream);
+        write(dio_only, &dio_edges());
+    }
+
+    /// 2.1 s of DIO edges alone, as `verge dio record` writes: DIO3 toggling every 50 ms.
+    fn dio_edges() -> Vec<Message> {
+        let header: DioHeader = serde_json::from_value(serde_json::json!({
+            "clock_hz": 150_000_000u64, "dio_mask": 15, "dio_levels": 0, "edge_resolution_ns": 7
+        }))
+        .unwrap();
+        let mut stream = vec![Message::DioHeader(header)];
+        for k in 1..=40u64 {
+            stream.push(Message::Edges(Edges::new(
+                0,
+                vec![Edge {
+                    time_ns: k * 50_000_000,
+                    levels: if k % 2 == 1 { 8 } else { 0 },
+                }],
+            )));
+        }
+        stream.push(Message::End(End {
+            reason: EndReason::Stopped,
+            last_sequence: 0,
+            time_ns: Some(2_100_000_000),
+        }));
+        stream
     }
     /// 20 s at 1,000 pairs a second, with a 30 ms pulse each second.
     fn pulses(i: u32) -> u16 {
@@ -1904,6 +2508,24 @@ mod tests {
             ))
             .is_some()
         );
+    }
+
+    /// A window that runs past the recording's end counts the time past it as unmeasured, so the
+    /// duration and the unmeasured time cover the same interval.
+    #[test]
+    fn time_outside_the_recording_reads_as_unmeasured() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = opened(dir.path(), &messages(1000, 20_000, pulses, false, &[]));
+        let window = seconds(&h, 17.0)..seconds(&h, 27.0);
+        h.state_mut().state.window = Window::At(window.clone());
+        until(&mut h, "the window's answer", |b| {
+            b.answer_now()
+                .is_some_and(|a| a.statistics.first().is_some_and(|s| s.interval == window))
+        });
+        h.step();
+        assert!(h.query_by_label("3000").is_some(), "the pairs reading");
+        assert!(h.query_by_label("10.00 s").is_some(), "the duration");
+        assert!(h.query_by_label("7.000 s").is_some(), "the time unmeasured");
     }
 
     #[test]
@@ -2107,32 +2729,76 @@ mod tests {
     #[test]
     fn a_dio_only_recording_draws_its_lanes_and_offers_no_export() {
         let dir = tempfile::tempdir().unwrap();
-        let clock = 150_000_000u64;
-        let header: DioHeader = serde_json::from_value(serde_json::json!({
-            "clock_hz": clock, "dio_mask": 15, "dio_levels": 0, "edge_resolution_ns": 7
-        }))
-        .unwrap();
-        let mut stream = vec![Message::DioHeader(header)];
-        for k in 1..=40u64 {
-            stream.push(Message::Edges(Edges::new(
-                0,
-                vec![Edge {
-                    time_ns: k * 50_000_000,
-                    levels: if k % 2 == 1 { 8 } else { 0 },
-                }],
-            )));
-        }
-        stream.push(Message::End(End {
-            reason: EndReason::Stopped,
-            last_sequence: 0,
-            time_ns: Some(2_100_000_000),
-        }));
-        let mut h = opened(dir.path(), &stream);
+        let mut h = opened(dir.path(), &dio_edges());
         let channels = h.state().channels.as_ref().unwrap();
         assert_eq!((channels.i, channels.lanes.len()), (None, 4));
         h.step();
         let csv = h.get_by_label("CSV…");
         assert!(csv.accesskit_node().is_disabled());
+        // Shorter than the span, it opens whole.
+        let answer = h.state().answer().unwrap();
+        assert_eq!(Some(answer.window.clone()), answer.extent);
+        // No pairs: no trace to choose, and no readings of them. Each pin's edges instead.
+        for absent in ["Current", "Voltage", "Power", "Pairs", "Mean", "Unmeasured"] {
+            assert!(h.query_by_label(absent).is_none(), "{absent}");
+        }
+        until(&mut h, "the edges", |b| !b.edges.is_empty());
+        h.step();
+        h.get_by_label("DIO3 edges");
+        h.get_by_label("40");
+        h.get_by_label("2.100 s");
+    }
+
+    /// The kept recordings are named as recordings, and Discard asks in the panel before it
+    /// deletes one.
+    #[test]
+    fn discard_asks_in_the_panel_then_deletes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = opened(dir.path(), &messages(1000, 3_000, pulses, false, &[]));
+        let path = dir.path().join("captures").join("demo.tickwave");
+        let kept = h
+            .get_all_by_label("Kept on disk")
+            .find(|n| n.accesskit_node().role() == egui::accesskit::Role::ComboBox)
+            .expect("the kept list");
+        assert_eq!(
+            kept.accesskit_node().value().as_deref(),
+            Some("1 recording")
+        );
+        // The graph leaves the question room on the frame after it opens.
+        click(&mut h, "Discard…");
+        h.run_steps(2);
+        h.get_by_label("Delete demo.tickwave from disk? It cannot be undone.");
+        assert!(path.exists());
+        click(&mut h, "Back");
+        h.run_steps(2);
+        assert!(h.query_by_label_contains("Delete demo").is_none());
+        click(&mut h, "Discard…");
+        h.run_steps(2);
+        click(&mut h, "Delete");
+        until(&mut h, "the deletion", |b| {
+            b.io.is_none() && b.path.is_none()
+        });
+        assert!(!path.exists());
+        h.step();
+        h.get_by_label("Recording discarded.");
+    }
+
+    /// A note that markers were lost sits above the marker that follows the loss.
+    #[test]
+    fn a_marker_loss_is_noted_above_its_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let markers: Vec<Marker> = (0..3)
+            .map(|n| Marker {
+                time_ns: 2_000_000_000 * (u64::from(n) + 1),
+                number: 40 + n,
+                label: format!("step {n}").into_bytes(),
+            })
+            .collect();
+        let mut h = opened(dir.path(), &messages(1000, 20_000, pulses, false, &markers));
+        h.step();
+        let note = h.get_by_label("Markers lost here").rect();
+        let marker = h.get_by_label("2.000000s · 40 · step 0").rect();
+        assert!(note.bottom() <= marker.top(), "{note:?} {marker:?}");
     }
     /// A status from the picked unit while it records to `path`, or once it has stopped.
     fn recording_status(instance: &str, path: &Path, slot: Option<Snapshots>) -> Status {
@@ -2192,7 +2858,7 @@ mod tests {
         h.step();
         assert!(h.get_by_label("CSV…").accesskit_node().is_disabled());
         assert!(
-            h.query_by_label("3 DIO edge-loss reports in this capture")
+            h.query_by_label("3 DIO edge-loss reports in this recording")
                 .is_some()
         );
         until(&mut h, "the marker list", |b| {
@@ -2512,7 +3178,7 @@ mod tests {
     fn switching_devices_clears_confirmations_and_a_failure_finishes_the_recording() {
         let dir = tempfile::tempdir().unwrap();
         let mut bench = Bench::new(dir.path());
-        bench.start_confirm = true;
+        bench.asking = Some(Question::Start);
         bench.off_confirm = true;
         bench.connection = Some("old".into());
         let unit = escapement_verge_probe::detect(
@@ -2521,7 +3187,7 @@ mod tests {
         .unwrap()
         .remove(0);
         bench.connect(&unit, &mut crate::worker::Manual::default());
-        assert!(!bench.start_confirm);
+        assert_eq!(bench.asking, None);
         assert!(!bench.off_confirm);
         let path = bench.directory.join("new.tickwave");
         std::fs::create_dir_all(&bench.directory).unwrap();
@@ -2535,13 +3201,13 @@ mod tests {
         assert_eq!(bench.path.as_ref(), Some(&path));
         assert!(writer.close().unwrap());
         // The worker failed and closed the recording: the panel finishes it as a stop.
-        bench.worker_failed("gone");
+        bench.worker_failed();
         assert!(!bench.recording());
         assert_eq!(bench.path.as_ref(), Some(&path));
         assert_eq!(bench.compactions.len(), 1);
     }
 
-    /// A pin the bench marker holds is not offered, and with all four held the panel says why.
+    /// A pin the bench marker holds is not offered, and the panel says which it holds.
     #[test]
     fn marker_held_pins_are_left_out() {
         use escapement_verge_probe::sim::SimBus;
@@ -2586,7 +3252,10 @@ mod tests {
                 .query_all_by_label_contains("command marker")
                 .next()
                 .is_some();
-            assert_eq!(told, pins == 0, "pins {pins:#x}");
+            assert_eq!(told, pins != 0x0f, "pins {pins:#x}");
+            if pins == 0x0a {
+                h.get_by_label_contains("DIO0 and DIO2 are held by a bench tool's command marker.");
+            }
         }
     }
 

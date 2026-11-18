@@ -5,8 +5,8 @@ use escapement_verge_probe::aux::Aux;
 use escapement_verge_probe::stream::{EndReason, Message};
 use escapement_verge_probe::tickwave::{Context as Recording, Recorder, Snapshots};
 use escapement_verge_probe::{
-    BoardKind, Bus, CommandError, DioState, EnergyCaptureSample, EnergyError, Refused, Unit,
-    VergeControl,
+    BoardKind, Bus, CalibrationRange, CommandError, DioState, EnergyCalibration,
+    EnergyCaptureSample, EnergyError, EnergyTotal, Refused, Unit, VergeControl,
 };
 use escapement_verge_probe::{EnergyRanges, pro};
 use std::path::PathBuf;
@@ -38,8 +38,16 @@ pub enum Command {
         ranges: EnergyRanges,
         path: PathBuf,
     },
+    /// Records the DIO pins alone, on a board without energy capture.
+    StartDio {
+        path: PathBuf,
+    },
     Stop,
 }
+
+/// What the window says when the probe ends a capture on an acquisition fault, in the CLI's words.
+pub const CAPTURE_FAILED: &str =
+    "The capture failed: the ADC overran, its DMA failed or the probe fell behind reading it.";
 
 /// A direction group's name: its pin, or its first and last pins when they run in order.
 pub fn group_name(mask: u8) -> String {
@@ -55,6 +63,32 @@ pub fn group_name(mask: u8) -> String {
             .collect::<Vec<_>>()
             .join(", "),
     }
+}
+
+/// Whether opening a unit failed for what it runs or is, which reconnecting cannot change.
+pub fn refused(error: &anyhow::Error) -> Option<Refusal> {
+    match error.downcast_ref::<pro::ProError>()? {
+        pro::ProError::NotVerge { .. }
+        | pro::ProError::Predates { .. }
+        | pro::ProError::NoAux { .. }
+        | pro::ProError::NoAuxDio { .. } => Some(Refusal::Update),
+        pro::ProError::SwdJumper { .. }
+        | pro::ProError::NotPro { .. }
+        | pro::ProError::NoDio { .. }
+        | pro::ProError::NotFitted { .. }
+        | pro::ProError::DioDisabled { .. } => Some(Refusal::Board),
+        // The unit may answer once another program lets go of it, or once it is back.
+        _ => None,
+    }
+}
+
+/// What changes a refusal, where reconnecting cannot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// An update: the unit runs something other than Verge, or a build too old.
+    Update,
+    /// A jumper or the board itself.
+    Board,
 }
 
 #[derive(Clone, Debug)]
@@ -113,6 +147,17 @@ pub struct Status {
     pub edge_losses: u64,
     /// Marker-loss reports in the recording under way.
     pub marker_losses: u64,
+    /// The probe's energy total, where it keeps one.
+    pub total: Option<EnergyTotal>,
+    /// The rate of a capture another program started, which recording it keeps.
+    pub running_rate: Option<u32>,
+    /// The unit records its DIO pins alone: a board with the pins and no energy capture.
+    pub dio_stream: bool,
+    /// The connection was refused for what the unit runs or is, which reconnecting cannot change.
+    pub refused: Option<Refusal>,
+    /// The calibration points the probe's latest calibration left for each current range, as
+    /// `verge energy calibration` reads them; `None` where the firmware gives none.
+    pub calibration: Option<Vec<(CalibrationRange, EnergyCalibration)>>,
     /// The recording under way's latest snapshot, for the view to take.
     pub snapshots: Option<Snapshots>,
 }
@@ -130,6 +175,10 @@ pub struct Session<L: escapement_verge_probe::aux::AuxLink> {
     stream_levels: u8,
     /// The firmware's version, which a recording names.
     software: Option<String>,
+    /// The recording under way is of the DIO pins alone.
+    dio_only: bool,
+    /// A capture started since the calibration points were read, which calibrates again.
+    calibration_stale: bool,
 }
 
 impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
@@ -160,6 +209,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 target_power,
                 energy,
                 board: unit.verge().and_then(|ours| ours.board),
+                dio_stream: !energy && unit.verge().is_some_and(|ours| ours.supports_dio_stream()),
                 ..Status::default()
             },
             recorder: None,
@@ -171,6 +221,8 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
             stream_mask: 0,
             stream_levels: 0,
             software: unit.verge().map(|ours| ours.firmware.clone()),
+            dio_only: false,
+            calibration_stale: true,
         };
         // Opening a standalone unit's Aux has checked DIO already.
         if pro_board {
@@ -197,6 +249,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
             self.status.supply = control.read_target_power()?;
         }
         if self.status.energy {
+            let was_capturing = self.status.capturing;
             match control.latest_energy_sample() {
                 Ok(EnergyCaptureSample::Sample(sample)) => {
                     self.status.capturing = true;
@@ -212,6 +265,29 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 }
                 Err(error) => return Err(error.into()),
                 _ => bail!("unsupported capture state"),
+            }
+            // A capture calibrates as it starts: read the points once its first calibrated pair
+            // shows the calibration is done, or while nothing captures.
+            self.calibration_stale |= self.status.capturing && !was_capturing;
+            if self.calibration_stale
+                && (!self.status.capturing || self.status.millivolts.is_some())
+            {
+                self.calibration_stale = false;
+                self.status.calibration = [CalibrationRange::Low, CalibrationRange::High]
+                    .into_iter()
+                    .map(|range| Some((range, control.read_energy_calibration(range).ok()?)))
+                    .collect();
+            }
+            // A firmware without the total, or without capture identities, leaves these unread.
+            self.status.total = control.read_energy_accumulator().ok();
+            if !self.status.capturing || self.recorder.is_some() {
+                self.status.running_rate = None;
+            } else if self.status.running_rate.is_none() {
+                self.status.running_rate = control
+                    .energy_capture_status()
+                    .ok()
+                    .filter(|status| status.running)
+                    .map(|status| status.actual_rate_pairs_per_second);
             }
         }
         if self.status.dio_reason.is_none() {
@@ -330,6 +406,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 }
                 self.capture_id = started.expect("start/attach succeeded");
                 self.owned = !self.status.capturing;
+                self.calibration_stale |= self.owned;
                 self.status.snapshots = Some(recorder.snapshots());
                 self.recorder = Some(recorder);
                 self.status.path = Some(path);
@@ -340,6 +417,54 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 self.status.marker_losses = 0;
                 self.status.rate = None;
                 self.status.capturing = true;
+            }
+            Command::StartDio { path } => {
+                if self.recording() {
+                    bail!("a recording is already running");
+                }
+                if !self.status.dio_stream {
+                    bail!("this unit records its DIO pins beside its energy capture");
+                }
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                // The probe answers before the file is made, so a refused start leaves none.
+                VergeControl::new(&mut self.aux).start_dio_stream(0x0f)?;
+                let instrument = match self.status.board {
+                    Some(BoardKind::Pro) => "MCU-Link Pro",
+                    _ => "MCU-Link",
+                };
+                let recorder = match Recorder::create(
+                    &path,
+                    Recording {
+                        instrument: Some(instrument.into()),
+                        software: self.software.clone(),
+                        started_utc: Some(
+                            humantime::format_rfc3339_millis(std::time::SystemTime::now())
+                                .to_string(),
+                        ),
+                    },
+                ) {
+                    Ok(recorder) => recorder,
+                    Err(error) => {
+                        if let Err(ended) = VergeControl::new(&mut self.aux).end_dio_stream() {
+                            tracing::warn!("ending the DIO stream: {ended}");
+                        }
+                        return Err(error.into());
+                    }
+                };
+                self.dio_only = true;
+                self.owned = false;
+                self.capture_id = None;
+                self.status.snapshots = Some(recorder.snapshots());
+                self.recorder = Some(recorder);
+                self.status.path = Some(path);
+                self.status.recording = true;
+                self.synced = false;
+                self.stream_mask = 0;
+                self.status.edge_losses = 0;
+                self.status.marker_losses = 0;
+                self.status.rate = None;
             }
             Command::Stop => self.ask_stop()?,
             Command::CancelSupply => self.status.confirm_off = false,
@@ -358,6 +483,11 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
         }
         self.tick()?;
         if !self.recording() {
+            return Ok(());
+        }
+        if self.dio_only {
+            VergeControl::new(&mut self.aux).end_dio_stream()?;
+            self.stopping = Some(Instant::now());
             return Ok(());
         }
         let header_until = Instant::now() + Duration::from_secs(2);
@@ -408,6 +538,13 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                     self.update_levels();
                     changed = true;
                 }
+                if let Message::DioHeader(header) = &message {
+                    self.synced = true;
+                    self.stream_mask = header.dio_mask;
+                    self.stream_levels = header.dio_levels;
+                    self.update_levels();
+                    changed = true;
+                }
                 if let Message::DioLost(lost) = &message {
                     self.status.edge_losses += 1;
                     self.stream_levels = lost.levels;
@@ -444,12 +581,12 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                     self.owned = false;
                     self.capture_id = None;
                     self.stopping = None;
+                    self.dio_only = false;
                     self.status.recording = false;
                     self.status.snapshots = None;
                     self.recorder.take().expect("recorder").close()?;
                     if matches!(reason, EndReason::Failed) {
-                        self.status.error =
-                            Some("Capture failed: ADC overrun or DMA error.".into());
+                        self.status.error = Some(CAPTURE_FAILED.into());
                     }
                     self.poll()?;
                     changed = true;
@@ -505,7 +642,9 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
         self.status.snapshots = None;
         // The probe first: a disk that failed may also be slow to let the writer finish.
         let mut control = VergeControl::new(&mut self.aux);
+        let dio_only = std::mem::take(&mut self.dio_only);
         let cleanup = match self.capture_id.take() {
+            _ if dio_only && self.recorder.is_some() => control.end_dio_stream(),
             Some(id) if owned => control.stop_energy_capture_if(id),
             Some(id) => control.end_energy_stream_if(id),
             None => Ok(()),
@@ -553,6 +692,18 @@ mod tests {
         let unit = detect(&bus).unwrap().remove(0);
         let session = Session::open(&bus, &unit).unwrap();
         (bus, session)
+    }
+    /// A unit refused for its board or a jumper gets no update offer, and one refused for what it
+    /// runs gets one: reconnecting changes neither.
+    #[test]
+    fn a_refusal_names_what_changes_it() {
+        let open = |name: &str| {
+            let bus = SimBus::scenario(name).unwrap();
+            let unit = detect(&bus).unwrap().remove(0);
+            refused(&Session::open(&bus, &unit).err().expect("refused"))
+        };
+        assert_eq!(open("swd-jumper"), Some(Refusal::Board));
+        assert_eq!(open("ours"), Some(Refusal::Update));
     }
     #[test]
     fn supply_requires_confirmation_only_during_capture() {
@@ -736,6 +887,8 @@ mod tests {
                 stream_mask: 0,
                 stream_levels: 0,
                 software: None,
+                dio_only: false,
+                calibration_stale: true,
             };
             let dir = tempfile::tempdir().unwrap();
             assert!(s.command(Command::Start {

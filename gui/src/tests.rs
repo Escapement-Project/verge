@@ -19,10 +19,11 @@ use escapement_verge_probe::sim::{SimBus, SimFirmware, firmware_srecord};
 use escapement_verge_probe::update::Outcome;
 use escapement_verge_probe::version::StockVersion;
 
-use crate::app::{Config, VergeApp};
+use crate::app::{Config, STOCK, VergeApp};
 use crate::log::Log;
 use crate::style;
 use crate::worker::{BatchEvent, Event, InstallEvent, Manual, ProgressEvent, Shared, Worker};
+use escapement_verge_probe::board::Board;
 
 fn repo() -> Repo {
     "someone/mculink-verge".parse().unwrap()
@@ -174,10 +175,12 @@ fn press_as(h: &mut Harness<'_, VergeApp>, role: Role, label: &str) {
 }
 
 #[test]
-fn the_licences_give_the_fonts_and_the_icon() {
+fn about_gives_the_version_and_the_licences() {
     let mut h = harness(sim_app(SimBus::scenario("bench").unwrap(), vec![]));
     until(&mut h, "Update to v0.3.0");
-    press(&mut h, "Licences");
+    press(&mut h, "About");
+    h.get_by_label(&format!("Verge {} (verge-gui)", env!("CARGO_PKG_VERSION")));
+    h.get_by_label_contains("THIRD-PARTY-LICENSES.html");
     h.get_by_label_contains("SIL Open Font License 1.1");
     h.get_by_label("Verge's icon");
     h.get_by_label_contains("Creative Commons Attribution 4.0 International Public License");
@@ -209,7 +212,7 @@ fn an_update_is_confirmed_runs_and_reports_the_unit_back() {
     assert!(!h.state().busy());
     press(&mut h, "Back");
     // The rescan after the update finds the unit by its port and selects it again.
-    until(&mut h, "Verge v0.3.0 · 1-1");
+    until(&mut h, &format!("Verge v0.3.0 · {} · 1-1", Board::McuLink));
 }
 
 /// The second of two units, updated, comes back as a new enumeration with a new serial; the
@@ -301,11 +304,11 @@ fn going_back_to_stock_uses_the_install_on_disk() {
         vec![dir.clone()],
     ));
     until(&mut h, "Update to v0.3.0");
-    press(&mut h, "Stock");
-    press(&mut h, "Install stock V3.172");
+    press(&mut h, STOCK);
+    press(&mut h, &format!("Install {STOCK} V3.172"));
     press(&mut h, "Confirm");
     until(&mut h, "Done");
-    h.get_by_label_contains("runs stock V3.172");
+    h.get_by_label_contains("runs NXP's firmware V3.172");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -448,7 +451,10 @@ fn a_release_lookup_that_fails_says_so() {
         .click();
     h.step();
     h.step();
-    until(&mut h, "Stock V3.172 · 1-2");
+    until(
+        &mut h,
+        &format!("{STOCK} V3.172 · {} · 1-2", Board::McuLink),
+    );
 }
 
 #[test]
@@ -549,10 +555,10 @@ fn pictures() {
     until(&mut d, "Install v0.3.0");
     shoot(&mut d, "02b-daplink-rs-selected");
     // The interaction layer: the pointer on one choice, the focus on the chosen one.
-    d.get_by_label("Stock").hover();
+    d.get_by_label(STOCK).hover();
     d.get_by_label("Release").focus();
     shoot(&mut d, "02c-hover-and-focus");
-    press(&mut d, "Licences");
+    press(&mut d, "About");
     shoot(&mut d, "02d-licences");
     d.get_by_label("Verge's icon").scroll_to_me();
     d.run_steps(20);
@@ -630,14 +636,18 @@ fn pictures() {
         .lock()
         .unwrap()
         .queued
-        .push_back(Event::Install(InstallEvent::Finished(Err(crate::worker::JobError {
+        .push_back(Event::Install(InstallEvent::Finished(Err(
+        crate::worker::JobError {
             message: "the bootloader: unexpected status code: 10203 (0x27DB) MemoryCumulativeWrite"
                 .into(),
             advice: Some(
-                "The unit may be in ISP mode with a partial image. Flashing it again recovers it.",
+                "The unit may be in ISP mode with a partial image. Flashing it again recovers it."
+                    .into(),
             ),
             left_in_isp: true,
-        }))));
+            stopped: None,
+        },
+    ))));
     shoot(&mut h, "07-failed");
 
     // The batch view: set up, running, and done.
@@ -655,7 +665,7 @@ fn pictures() {
         let mut manual = backend.lock().unwrap();
         manual.queued.push_back(Event::Batch(BatchEvent::Armed{
             name: "release v0.3.0 (mculink-verge-v0.3.0.s19)".into(),
-            filter: "every full MCU-Link running stock or Verge older than the image, attached from now on".into(),
+            filter: "every standalone MCU-Link running NXP's firmware or Verge older than the image, attached from now on".into(),
         }));
         let record = |port: &str,
                       serial: &str,
@@ -678,7 +688,7 @@ fn pictures() {
         manual.queued.push_back(record(
             "1-1",
             "QK7RM2VTX8D41",
-            "stock V3.172",
+            "NXP's firmware V3.172",
             Some("Verge, build v0.3.0"),
             escapement_verge_probe::batch::Settled::Updated,
             None,
@@ -691,7 +701,7 @@ fn pictures() {
             escapement_verge_probe::batch::Settled::Current,
             None,
         ));
-        manual.queued.push_back(record("1-4", "QK7RM2VTX8D45", "stock V3.108", None, escapement_verge_probe::batch::Settled::Skipped, Some("needs the ISP jumper. Stock V3.108 has no jumper-free update. NXP added it in V3.122.")));
+        manual.queued.push_back(record("1-4", "QK7RM2VTX8D45", "NXP's firmware V3.108", None, escapement_verge_probe::batch::Settled::Skipped, Some("needs the ISP jumper. NXP's firmware V3.108 has no jumper-free update. NXP added it in V3.122.")));
         manual
             .queued
             .push_back(Event::Batch(BatchEvent::Starting("1-2".into())));
@@ -722,7 +732,7 @@ fn pictures() {
     backend.lock().unwrap().queued.push_back(Event::Batch(BatchEvent::State(crate::worker::BatchState {
         tally: escapement_verge_probe::batch::Tally { updated: 1, current: 1, skipped: 1, failed: 1, waiting: 1 },
         waiting: vec![("1-5".into(), Some("CJ3E7AE717".into()))],
-        paused: Some("The unit at 1-2, a full MCU-Link, failed and is in ISP mode, maybe with a partial image. The batch waits until it is unplugged. In ISP mode the tool cannot tell its board, so flash it again with the batch's image, which is built for it: `verge isp flash --release v0.3.0`.".into()),
+        paused: Some(format!("The unit at 1-2, {}, failed and is in ISP mode, maybe with a partial image. The batch waits until it is unplugged. To flash it again with the batch's image, stop the batch, then pick the unit in ISP mode under Units and flash it with release v0.3.0.", Board::McuLink.a())),
     })));
     shoot(&mut h, "15-batch-paused");
 
@@ -816,6 +826,7 @@ fn pictures() {
         ("stock-old", "08-old-stock-jumper"),
         ("two-isp", "09-two-in-isp"),
         ("busy", "10-busy"),
+        ("ours-pro-debugger", "10b-held-by-a-debugger"),
         ("isp-jumper", "11-isp-mode"),
     ] {
         let mut h = rendered(sim_app(SimBus::scenario(scenario).unwrap(), vec![]));
@@ -853,9 +864,9 @@ fn pictures() {
     until(&mut h, "Record running capture");
     shoot(&mut h, "16-bench-connected");
     press(&mut h, "DIO0–2 output");
-    until(&mut h, "Drive pins");
+    until(&mut h, "Drive DIO0–2");
     shoot(&mut h, "18-bench-drive-confirmation");
-    press(&mut h, "Drive pins");
+    press(&mut h, "Drive DIO0–2");
     for _ in 0..40 {
         h.step();
         std::thread::sleep(Duration::from_millis(5));
@@ -902,8 +913,9 @@ fn pictures() {
     press(&mut h, "Turn on");
     until(&mut h, "Turn off");
     press(&mut h, "Start recording");
-    until(&mut h, "Start capture");
-    press(&mut h, "Start capture");
+    until_contains(&mut h, "Starting clears the probe's energy total.");
+    shoot(&mut h, "20b-bench-start-question");
+    press(&mut h, "Start recording");
     until(&mut h, "Stop recording");
     for _ in 0..200 {
         h.step();
@@ -937,9 +949,9 @@ fn pictures() {
     until(&mut h, "DIO3 output");
     shoot(&mut h, "24-bench-standalone");
     press(&mut h, "DIO1 output");
-    until(&mut h, "Drive pins");
+    until(&mut h, "Drive DIO1");
     shoot(&mut h, "25-bench-standalone-drive-confirmation");
-    press(&mut h, "Drive pins");
+    press(&mut h, "Drive DIO1");
     until(&mut h, "Set high");
     shoot(&mut h, "26-bench-standalone-output");
 
@@ -966,6 +978,495 @@ fn pictures() {
     until(&mut h, "DIO0–2 output");
     until(&mut h, "Turn on");
     shoot(&mut h, "27-bench-pro-without-energy");
+    // Its pins recorded alone, as `verge dio record` does.
+    press(&mut h, "Start recording");
+    until(&mut h, "Stop recording");
+    for _ in 0..60 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    shoot(&mut h, "27b-bench-pro-without-energy-recording");
+    press(&mut h, "Stop recording");
+    until_contains(&mut h, "DIO3 edges");
+    h.run_steps(20);
+    shoot(&mut h, "27c-bench-dio-recording-opened");
+
+    pictures_of_the_fix_round(&dir, &shoot);
+}
+
+/// A window at `size` on the bench `app` drives, rendered.
+fn rendered_at(app: VergeApp, size: egui::Vec2) -> Harness<'static, VergeApp> {
+    Harness::builder()
+        .with_size(size)
+        .with_context_setup(still)
+        .wgpu()
+        .build_ui_state(|ui, app: &mut VergeApp| app.show(ui), app)
+}
+
+/// A window on `bus` recording into `record_dir`, as a release build draws it where `release`:
+/// no simulated badge, and the project's own repository.
+fn window_on(bus: SimBus, record_dir: PathBuf, release: bool) -> VergeApp {
+    window_logging(bus, record_dir, release, Log::default())
+}
+
+/// [`window_on`], logging to `log`.
+fn window_logging(bus: SimBus, record_dir: PathBuf, release: bool, log: Log) -> VergeApp {
+    let repo = if release {
+        escapement_verge_probe::release::DEFAULT_REPO
+            .parse()
+            .unwrap()
+    } else {
+        repo()
+    };
+    let http = SimHttp::new(repo.clone());
+    http.publish_ours("v0.3.0");
+    let key = http.public_key();
+    let worker = Worker::spawn(
+        bus,
+        GitHub::new(http, repo.clone(), None).with_key(Some(key)),
+        || {},
+    );
+    VergeApp::new(
+        Box::new(worker),
+        log,
+        Config {
+            repo,
+            simulated: (!release).then(|| "test".into()),
+            stock_dirs: vec![],
+            record_dir,
+            cache: None,
+        },
+    )
+}
+
+/// The states the interface fix round of 2026-11-18 changed, each in both faces.
+fn pictures_of_the_fix_round(
+    dir: &std::path::Path,
+    shoot: &dyn Fn(&mut Harness<'_, VergeApp>, &str),
+) {
+    let steps = |h: &mut Harness<'_, VergeApp>, n: usize| {
+        for _ in 0..n {
+            h.step();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let work = |name: &str| {
+        let at = dir.join("work").join(name);
+        let _ = std::fs::remove_dir_all(&at);
+        std::fs::create_dir_all(&at).unwrap();
+        at
+    };
+    let size = vec2(1080.0, 700.0);
+    let small = vec2(860.0, 640.0);
+
+    // The strip as a release build draws it, at the smallest size, the default and the largest.
+    for (at, name) in [
+        (small, "40a-units-860x640"),
+        (size, "40b-units-1080x700"),
+        (vec2(2560.0, 1440.0), "40c-units-2560x1440"),
+    ] {
+        let mut h = rendered_at(
+            window_on(
+                SimBus::scenario("ours-pro-and-plain").unwrap(),
+                work("units"),
+                true,
+            ),
+            at,
+        );
+        until(&mut h, "Update to v0.3.0");
+        shoot(&mut h, name);
+    }
+    // The hover on a unit row, and the log open with its times.
+    let log = Log::default();
+    log.push(
+        tracing::Level::INFO,
+        "installing release v0.3.0 (mculink-verge-v0.3.0.s19)".into(),
+    );
+    log.push(
+        tracing::Level::WARN,
+        "paused. An MCU-Link mini is in ISP mode at 1-2. The batch waits until it is unplugged."
+            .into(),
+    );
+    log.push(
+        tracing::Level::ERROR,
+        "the bootloader: unexpected status code: 10203 (0x27DB) MemoryCumulativeWrite".into(),
+    );
+    let mut h = rendered_at(
+        window_logging(SimBus::scenario("bench").unwrap(), work("hover"), true, log),
+        size,
+    );
+    until(&mut h, "Update to v0.3.0");
+    h.get_by_role_and_label(Role::ListBoxOption, "QK7RM2VTX8D41")
+        .hover();
+    steps(&mut h, 60);
+    h.render()
+        .unwrap()
+        .save(dir.join("40d-unit-row-hover-night.png"))
+        .unwrap();
+    press(&mut h, "Show");
+    shoot(&mut h, "40e-log-open");
+
+    // A unit the system will not let the user open.
+    let mut h = rendered_at(
+        window_on(SimBus::scenario("denied").unwrap(), work("denied"), false),
+        size,
+    );
+    until_contains(&mut h, "Your user may not open it");
+    shoot(&mut h, "41-unit-the-user-may-not-open");
+    // NXP's firmware too old to ask.
+    let mut h = rendered_at(
+        window_on(SimBus::scenario("stock-hid").unwrap(), work("hid"), false),
+        size,
+    );
+    until_contains(&mut h, "Too old to ask");
+    shoot(&mut h, "42-nxps-firmware-too-old-to-ask");
+    // A unit in ISP mode, with the reset that leaves it; and the release picked by its tag.
+    let mut h = rendered_at(
+        window_on(SimBus::scenario("isp-ours").unwrap(), work("isp"), false),
+        size,
+    );
+    until(&mut h, "Reset out of ISP mode");
+    h.get_by_label(RESET_LABEL).scroll_to_me();
+    steps(&mut h, 5);
+    shoot(&mut h, "43a-isp-mode-reset-offered");
+    h.get_by_label("Tag").click();
+    h.step();
+    h.get_by_role(Role::TextInput).type_text("v0.2.0");
+    h.step();
+    press(&mut h, "Look up");
+    steps(&mut h, 40);
+    shoot(&mut h, "43b-release-tag-not-found");
+
+    // The question takes the focus, and the view scrolls to it.
+    let (app, backend) = manual_app("ours", true);
+    let mut h = rendered_at(app, size);
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Batch");
+    press(&mut h, "Arm batch");
+    steps(&mut h, 3);
+    shoot(&mut h, "44a-batch-question-in-sight");
+    press(&mut h, "Back");
+    press_as(&mut h, Role::CheckBox, STOCK);
+    press_as(&mut h, Role::CheckBox, "Verge");
+    shoot(&mut h, "44b-batch-cannot-arm-under-its-field");
+    press_as(&mut h, Role::CheckBox, STOCK);
+    press_as(&mut h, Role::CheckBox, "Verge");
+    press(&mut h, "Arm batch");
+    press(&mut h, "Confirm");
+    {
+        let mut m = backend.lock().unwrap();
+        m.queued.push_back(Event::Batch(BatchEvent::Armed {
+            name: "release v0.3.0 (mculink-verge-v0.3.0.s19)".into(),
+            filter: format!(
+                "every {} running NXP's firmware or Verge older than the image, attached from now on",
+                Board::McuLink
+            ),
+        }));
+        for k in 0..12 {
+            m.queued.push_back(Event::Batch(BatchEvent::Record(Box::new(
+                escapement_verge_probe::batch::Record {
+                    time: "2026-10-20T14:26:08Z".into(),
+                    port: format!("1-{}", k + 1),
+                    serial_before: Some(format!("QK7RM2VTX8D{k:02}")),
+                    firmware_before: "NXP's firmware V3.172".into(),
+                    serial_after: Some(format!("CJ3E7A91{k:02}")),
+                    firmware_after: Some("Verge, build v0.3.0".into()),
+                    result: escapement_verge_probe::batch::Settled::Updated,
+                    reason: None,
+                    seconds: Some(4.7),
+                },
+            ))));
+        }
+    }
+    steps(&mut h, 5);
+    shoot(&mut h, "44c-batch-running-stop-in-the-slab");
+    press(&mut h, "Stop");
+    shoot(&mut h, "44d-batch-stopping-no-unit-under-way");
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::Batch(BatchEvent::Ended(Ok(
+            escapement_verge_probe::batch::Tally {
+                updated: 12,
+                ..Default::default()
+            },
+        ))));
+    steps(&mut h, 3);
+    shoot(&mut h, "44e-batch-ended");
+    let (app, backend) = manual_app("ours", true);
+    let mut h = rendered_at(app, size);
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Batch");
+    press(&mut h, "Arm batch");
+    press(&mut h, "Confirm");
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::Batch(BatchEvent::Ended(Err(
+        "making the record file's directory /nonexistent/verge: Permission denied (os error 13)"
+            .into(),
+    ))));
+    steps(&mut h, 3);
+    shoot(&mut h, "44f-batch-not-armed");
+
+    // The USB worker stopped, on each view; a failed look at USB.
+    let (app, backend) = manual_app("ours-pro", true);
+    let mut h = rendered_at(app, size);
+    until(&mut h, "Update to v0.3.0");
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::WorkerFailed(crate::worker::JobError {
+            message: "the USB worker stopped: no message".into(),
+            advice: Some(
+                "Quit and start Verge again. If a flash was under way, flash the unit again."
+                    .into(),
+            ),
+            left_in_isp: true,
+            stopped: None,
+        }));
+    steps(&mut h, 3);
+    shoot(&mut h, "45a-worker-stopped-units");
+    press(&mut h, "Batch");
+    shoot(&mut h, "45b-worker-stopped-batch");
+    press(&mut h, "Bench");
+    steps(&mut h, 3);
+    shoot(&mut h, "45c-worker-stopped-bench");
+    let (app, backend) = manual_app("ours", true);
+    let mut h = rendered_at(app, size);
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Rescan");
+    backend.lock().unwrap().queued.push_back(Event::Units(Err(
+        "could not list USB devices: libusb: access denied (insufficient permissions)".into(),
+    )));
+    steps(&mut h, 3);
+    shoot(&mut h, "45d-scan-failed");
+
+    // Results: a real refused write, a refusal before USB, the jumper still fitted, a dropped
+    // file during the update.
+    let mut h = rendered_at(
+        window_on(
+            SimBus::scenario("fails-writes").unwrap(),
+            work("fails"),
+            false,
+        ),
+        size,
+    );
+    until(&mut h, "Install v0.3.0");
+    press(&mut h, "Install v0.3.0");
+    press(&mut h, "Confirm");
+    until(&mut h, "Failed");
+    shoot(&mut h, "46a-failed-write");
+    let mut h = rendered_at(
+        window_on(SimBus::scenario("pro").unwrap(), work("pro"), false),
+        size,
+    );
+    until(&mut h, "Install v0.3.0");
+    press(&mut h, "Install v0.3.0");
+    press(&mut h, "Confirm");
+    until(&mut h, "Failed");
+    shoot(&mut h, "46b-failed-nothing-flashed");
+    let (app, backend) = manual_app("ours", true);
+    let mut h = rendered_at(app, size);
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Update to v0.3.0");
+    press(&mut h, "Confirm");
+    {
+        use escapement_verge_probe::progress::Step;
+        let mut m = backend.lock().unwrap();
+        m.queued.push_back(Event::Progress(ProgressEvent::Start {
+            step: Step::Write,
+            total: 235_520,
+        }));
+        m.queued
+            .push_back(Event::Progress(ProgressEvent::Advance(98_304)));
+    }
+    steps(&mut h, 3);
+    drop_file(&mut h, &dir.join("dropped.s19"));
+    shoot(&mut h, "46c-dropped-during-update");
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::Install(InstallEvent::Finished(Ok(
+            Outcome::JumperStillFitted,
+        ))));
+    steps(&mut h, 3);
+    shoot(&mut h, "46d-flashed-jumper-still-fitted");
+
+    // Bench: refusals, the old build, the worker's questions inline, the restart, marked pins.
+    let bench = |scenario: &str, wait: &str| {
+        let bus = SimBus::scenario(scenario).unwrap().paced(1.0);
+        let mut h = rendered_at(window_on(bus, work(scenario), false), size);
+        steps(&mut h, 40);
+        press(&mut h, "Bench");
+        until_contains(&mut h, wait);
+        steps(&mut h, 20);
+        h
+    };
+    let mut h = bench("stock", "not Verge");
+    shoot(&mut h, "47a-bench-not-running-verge");
+    let mut h = bench("isp", "ISP mode");
+    shoot(&mut h, "47b-bench-isp-mode");
+    let mut h = bench("ours", "Verge Aux");
+    shoot(&mut h, "47c-bench-build-without-aux");
+    let mut h = bench("ours-pro-j15", "J15");
+    shoot(&mut h, "47d-bench-dio-unavailable");
+    let mut h = bench("ours-pro-energy-failed", "The last capture failed");
+    shoot(&mut h, "47e-bench-capture-failed");
+    let mut h = bench("ours-pro-energy", "Running at");
+    if h.query_by_label("Turn on").is_some() {
+        press(&mut h, "Turn on");
+        until(&mut h, "Turn off");
+    }
+    press(&mut h, "Turn off");
+    until_contains(&mut h, "Turn off the target supply?");
+    shoot(&mut h, "47f-bench-supply-off-question");
+    let mut h = bench("ours-plain", "DIO3 output");
+    press(&mut h, "Restart");
+    shoot(&mut h, "47g-bench-restart-question");
+    let bus = SimBus::scenario("ours-plain").unwrap();
+    bus.mark_dio(0, 0x0C);
+    let mut h = rendered_at(window_on(bus, work("marked"), false), size);
+    steps(&mut h, 40);
+    press(&mut h, "Bench");
+    until_contains(&mut h, "held by a bench tool's command marker");
+    shoot(&mut h, "47h-bench-two-pins-marked");
+    let mut h = bench("ours-pro-and-plain", "Turn");
+    h.get_by_role(Role::ComboBox).click();
+    steps(&mut h, 5);
+    h.render()
+        .unwrap()
+        .save(dir.join("47i-bench-unit-list-open-night.png"))
+        .unwrap();
+    let mut h = rendered_at(window_on(SimBus::default(), work("nothing"), false), size);
+    steps(&mut h, 20);
+    press(&mut h, "Bench");
+    steps(&mut h, 20);
+    shoot(&mut h, "47j-bench-nothing-attached");
+
+    // Bench recording at the smallest size, then closing while it is saved.
+    let bus = SimBus::scenario("ours-pro-energy").unwrap().paced(1.0);
+    let mut h = rendered_at(window_on(bus, work("small"), false), small);
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until(&mut h, "Record running capture");
+    press(&mut h, "Record running capture");
+    until(&mut h, "Stop recording");
+    for _ in 0..150 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    shoot(&mut h, "48a-bench-recording-860x640");
+    request_close(&mut h);
+    for k in 0..40 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+        if k == 5 {
+            h.render()
+                .unwrap()
+                .save(dir.join("48b-bench-closing-night.png"))
+                .unwrap();
+        }
+    }
+
+    // Recordings opened from Kept on disk: one with markers and a window past its end, one of DIO
+    // edges alone; and the inline Discard.
+    let files = work("files");
+    let captures = files.join("captures");
+    std::fs::create_dir_all(&captures).unwrap();
+    let markers: Vec<escapement_verge_probe::stream::Marker> = (0..14)
+        .map(|n| escapement_verge_probe::stream::Marker {
+            time_ns: 1_000_000_000 * (u64::from(n) + 1) + 400_000_000,
+            number: 40 + n,
+            label: format!("step {n}").into_bytes(),
+        })
+        .collect();
+    crate::bench::write_for_pictures(
+        &captures.join("capture-2026-11-18T09-00-00.000Z.tickwave"),
+        &captures.join("dio-only.tickwave"),
+        &markers,
+    );
+    let mut h = rendered_at(window_on(SimBus::default(), files, false), size);
+    steps(&mut h, 20);
+    press(&mut h, "Bench");
+    steps(&mut h, 20);
+    open_kept(&mut h, "dio-only.tickwave");
+    steps(&mut h, 80);
+    shoot(&mut h, "49d-bench-dio-only-file");
+    open_kept(&mut h, "capture-2026-11-18T09-00-00.000Z.tickwave");
+    until(&mut h, "Measurements");
+    steps(&mut h, 60);
+    shoot(&mut h, "49a-bench-file-opened");
+    h.get_by_label_contains("step 3").scroll_to_me();
+    steps(&mut h, 20);
+    h.get_by_label_contains("step 3").click();
+    steps(&mut h, 30);
+    press(&mut h, "Select to next marker");
+    steps(&mut h, 60);
+    h.get_by_label("Unmeasured").scroll_to_me();
+    steps(&mut h, 20);
+    shoot(&mut h, "49b-bench-file-measurements");
+    press(&mut h, "Discard…");
+    steps(&mut h, 3);
+    shoot(&mut h, "49c-bench-discard-question");
+
+    // Entering ISP mode: the question, the unit waiting there, and a Pro that may not enter it
+    // with a release chosen.
+    let mut h = rendered_at(
+        window_on(SimBus::scenario("ours").unwrap(), work("enter"), false),
+        size,
+    );
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Enter ISP mode");
+    shoot(&mut h, "50a-enter-isp-question");
+    press(&mut h, "Enter ISP mode");
+    until(&mut h, "In ISP mode");
+    shoot(&mut h, "50b-in-isp-mode");
+    let mut h = rendered_at(
+        window_on(
+            SimBus::scenario("ours-pro").unwrap(),
+            work("enter-pro"),
+            false,
+        ),
+        size,
+    );
+    until(&mut h, "Update to v0.3.0");
+    h.get_by_label("Enter ISP mode").scroll_to_me();
+    steps(&mut h, 5);
+    h.get_by_label("Enter ISP mode").hover();
+    steps(&mut h, 60);
+    h.render()
+        .unwrap()
+        .save(dir.join("50c-enter-isp-refused-pro-night.png"))
+        .unwrap();
+
+    // The Pro's calibration points.
+    let bus = SimBus::scenario("ours-pro-energy").unwrap().paced(1.0);
+    let mut h = rendered_at(window_on(bus, work("calibration"), false), size);
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until(&mut h, "Calibration");
+    press(&mut h, "Calibration");
+    h.get_by_label("High range").scroll_to_me();
+    steps(&mut h, 5);
+    shoot(&mut h, "51-bench-calibration");
+}
+
+/// The label of the button that resets a unit out of ISP mode.
+const RESET_LABEL: &str = "Reset out of ISP mode";
+
+/// Opens `name` from the Kept on disk list.
+fn open_kept(h: &mut Harness<'_, VergeApp>, name: &str) {
+    until_contains(h, "Kept on disk");
+    h.get_by_role_and_label(Role::ComboBox, "Kept on disk")
+        .click();
+    h.run_steps(5);
+    h.get_by_label(name).click();
+    h.run_steps(5);
 }
 
 /// A directory of its own for a test's batch record.
@@ -1004,7 +1505,7 @@ fn a_batch_updates_units_as_they_arrive_and_records_each() {
     press(&mut h, "Arm batch");
     h.get_by_label_contains(DOWNLOAD);
     h.get_by_label_contains(
-        " KiB), and flash it onto every full MCU-Link running stock or Verge older than the image, attached from now on?",
+        " KiB), and flash it onto every standalone MCU-Link running NXP's firmware or Verge older than the image, attached from now on?",
     );
     assert!(
         h.query_by_label_contains("cannot tell an MCU-Link")
@@ -1119,7 +1620,7 @@ fn a_batch_that_takes_units_in_isp_mode_says_it_may_not_be_flashing_an_mculink()
         "The tool cannot tell an MCU-Link from any other LPC55S69 board in ISP mode. {DOWNLOAD}"
     ));
     h.get_by_label_contains(
-        "and flash it onto every full MCU-Link running stock or Verge older than the image or in ISP mode",
+        "and flash it onto every standalone MCU-Link running NXP's firmware or Verge older than the image or in ISP mode",
     );
 }
 
@@ -1129,13 +1630,18 @@ fn a_batch_needs_something_to_take() {
     let mut h = harness(app);
     until(&mut h, "Update to v0.3.0");
     press(&mut h, "Batch");
-    h.get_by_role_and_label(Role::CheckBox, "Stock").click();
+    h.get_by_role_and_label(Role::CheckBox, STOCK).click();
     h.step();
     h.get_by_role_and_label(Role::CheckBox, "Verge").click();
     h.step();
     h.step();
     h.get_by_label("Cannot arm");
-    h.get_by_label_contains("Tick at least one kind of unit");
+    // Under the field it is about, and at the foot.
+    assert_eq!(
+        h.query_all_by_label_contains("Tick at least one kind of unit")
+            .count(),
+        2
+    );
 }
 
 /// A worker failure ends a batch as well as a single-unit update.
@@ -1151,11 +1657,21 @@ fn a_worker_failure_during_discovery_is_reported() {
                 message: "discovery worker failed".into(),
                 advice: None,
                 left_in_isp: false,
+                stopped: None,
             }));
     }
     let mut h = harness(app);
     h.step();
-    h.get_by_label_contains("Could not list USB devices: discovery worker failed");
+    // Once, in the strip: the listing did not fail, the worker did.
+    assert_eq!(
+        h.query_all_by_label_contains("Discovery worker failed.")
+            .count(),
+        1
+    );
+    assert!(
+        h.query_by_label_contains("Could not list USB devices")
+            .is_none()
+    );
     assert!(!h.state().busy());
 }
 
@@ -1174,6 +1690,7 @@ fn a_worker_failure_during_installation_finishes_the_job() {
             message: "install worker failed".into(),
             advice: None,
             left_in_isp: true,
+            stopped: None,
         }));
     until(&mut h, "Failed");
     assert!(!h.state().busy());
@@ -1196,6 +1713,7 @@ fn a_worker_failure_withdraws_an_open_install_question() {
             message: "the USB worker stopped unexpectedly: boom".into(),
             advice: None,
             left_in_isp: false,
+            stopped: None,
         }));
     until(&mut h, "Worker stopped");
     assert!(h.query_by_label("Confirm").is_none());
@@ -1294,6 +1812,7 @@ fn a_worker_that_dies_during_a_batch_lets_the_window_close() {
             message: "the USB worker stopped unexpectedly: boom".into(),
             advice: None,
             left_in_isp: true,
+            stopped: None,
         }));
     for _ in 0..5 {
         h.step();
@@ -1435,9 +1954,9 @@ fn ours_goes_on_a_pro_only_where_its_image_declares_it() {
     press(&mut h, "Confirm");
     until(&mut h, "Failed");
     h.get_by_label_contains(
-        "the unit is an MCU-Link Pro, and this image is built for the full MCU-Link only",
+        "the unit is an MCU-Link Pro, and the image declares no boards, so verge takes it as a Verge image for the standalone MCU-Link only",
     );
-    h.get_by_label_contains("Pick Stock");
+    h.get_by_label_contains("Pick NXP's firmware instead");
     assert!(!bus.log().iter().any(|l| l.contains("DAP 8101")));
     press(&mut h, "Back");
 
@@ -1523,6 +2042,18 @@ fn a_batch_adds_to_an_existing_record_file() {
     assert_eq!(lines.len(), 3, "{text}");
 }
 
+/// A unit a debugger holds is offered no update until the debugger closes, not the ISP jumper.
+#[test]
+fn a_unit_a_debugger_holds_waits_for_it() {
+    let mut h = harness(sim_app(
+        SimBus::scenario("ours-pro-debugger").unwrap(),
+        vec![],
+    ));
+    until_contains(&mut h, "Close the debugger first.");
+    assert!(h.query_by_label("Needs the jumper").is_none());
+    assert!(h.query_all_by_label_contains("ISP jumper").next().is_none());
+}
+
 /// Cancel while a single update's image is still downloading ends it at once, with nothing
 /// flashed.
 #[test]
@@ -1536,8 +2067,11 @@ fn cancel_ends_an_update_still_loading_its_image() {
     h.run_steps(5);
     assert!(h.state().busy());
     press(&mut h, "Cancel");
-    until(&mut h, "Failed");
-    h.get_by_label_contains("cancelled before anything was flashed");
+    // A cancel, not a failure: the headline says nothing was changed.
+    until(&mut h, "Stopped");
+    h.get_by_label("Nothing was changed");
+    h.get_by_label_contains("stopped before anything was sent to the unit, so nothing was changed");
+    assert!(h.query_by_label("Failed").is_none());
     assert!(!h.state().busy());
 }
 
@@ -1621,10 +2155,13 @@ fn a_batch_that_cannot_date_ours_cannot_arm() {
     ));
     until(&mut h, "Batch");
     press(&mut h, "Batch");
-    press_as(&mut h, Role::Button, "Stock");
+    press_as(&mut h, Role::Button, STOCK);
     until(&mut h, "Cannot arm");
-    h.get_by_label_contains("The image carries no Verge version");
-    h.get_by_label_contains("Tick \"of any build\"");
+    assert_eq!(
+        h.query_all_by_label_contains("The image carries no Verge version")
+            .count(),
+        2
+    );
     press(&mut h, "of any build, not only those older than the image");
     until(&mut h, "Arm batch");
     std::fs::remove_dir_all(&dir).unwrap();
@@ -1643,7 +2180,7 @@ fn a_batch_for_the_pro_does_not_arm_with_an_image_not_built_for_it() {
     press(&mut h, "Confirm");
     until(&mut h, "Not armed");
     h.get_by_label_contains(
-        "The batch takes the MCU-Link Pro, and the image is built for the full MCU-Link only.",
+        "The batch takes the MCU-Link Pro, and the image declares no boards, so verge takes it as a Verge image for the standalone MCU-Link only.",
     );
     assert!(!h.state().busy());
 }
@@ -1655,7 +2192,7 @@ fn the_jumper_advice_names_the_board_and_the_image() {
     let mut h = harness(sim_app(SimBus::scenario("pro-old").unwrap(), vec![]));
     until(&mut h, "Needs the jumper");
     h.get_by_label_contains(
-        "This unit is an MCU-Link Pro. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it with Stock, or with a file built for an MCU-Link Pro.",
+        "This unit is an MCU-Link Pro. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it with NXP's firmware, or with a file built for an MCU-Link Pro.",
     );
     let dir = record_dir("jumper-files");
     let ours = SimFirmware::Ours {
@@ -1782,14 +2319,16 @@ fn the_question_names_the_boards_of_the_file_it_flashes() {
     drop_file(&mut h, &plain);
     h.run();
     let wrong = h
-        .query_by_label_contains("The image is built for the full MCU-Link only. Flash pro.s19")
+        .query_by_label_contains(
+            "The image is built for the standalone MCU-Link only. Flash pro.s19",
+        )
         .is_some();
     let confirm = h.query_by_label("Confirm").is_some();
     let offered = h.query_by_label("Flash plain.s19").is_some();
     std::fs::remove_dir_all(&dir).unwrap();
     assert!(
         !wrong,
-        "the question says the full MCU-Link only, and Confirm flashes pro.s19, built for the Pro only"
+        "the question says the standalone MCU-Link only, and Confirm flashes pro.s19, built for the Pro only"
     );
     assert!(!confirm && offered, "confirm {confirm}, offered {offered}");
 }
@@ -1801,7 +2340,7 @@ fn the_jumper_advice_does_not_vouch_for_a_release() {
     let mut h = harness(sim_app(SimBus::scenario("stock-old").unwrap(), vec![]));
     until(&mut h, "Needs the jumper");
     h.get_by_label_contains(
-        "This unit is a full MCU-Link. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it then with release v0.3.0 only if it is built for a full MCU-Link.",
+        "This unit is a standalone MCU-Link. In ISP mode the tool cannot tell its board, and a release says which boards it is for only once it is downloaded: flash it then with release v0.3.0 only if it is built for a standalone MCU-Link.",
     );
     assert!(h.query_by_label_contains("which is built for it").is_none());
 }
@@ -1885,7 +2424,7 @@ fn a_release_in_the_cache_is_not_asked_about_again() {
 
     press(&mut h, "Batch");
     press(&mut h, "Arm batch");
-    h.get_by_label_contains("Flash release v0.3.0 onto every full MCU-Link");
+    h.get_by_label_contains("Flash release v0.3.0 onto every standalone MCU-Link");
     assert!(h.query_by_label_contains("Download release").is_none());
     std::fs::remove_dir_all(cache.root()).unwrap();
 }
@@ -1969,11 +2508,14 @@ fn another_image_closes_the_arming_question() {
     until(&mut h, "Arm batch");
     press(&mut h, "Arm batch");
     h.get_by_label_contains(DOWNLOAD);
-    press_as(&mut h, Role::Button, "Stock");
+    press_as(&mut h, Role::Button, STOCK);
     assert!(h.query_by_label_contains("Download release").is_none());
     assert!(h.query_by_label("Confirm").is_none());
     press(&mut h, "Arm batch");
-    h.get_by_label_contains("Flash stock V3.172 onto every full MCU-Link");
+    h.get_by_label_contains(&format!(
+        "Flash {STOCK} V3.172 onto every {}",
+        Board::McuLink
+    ));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -2095,7 +2637,7 @@ fn a_batch_of_a_release_published_again_is_asked_about_after_try_again() {
     switched.store(true, std::sync::atomic::Ordering::SeqCst);
     press(&mut h, "Batch");
     press(&mut h, "Arm batch");
-    h.get_by_label_contains("Flash release v0.3.0 onto every full MCU-Link");
+    h.get_by_label_contains("Flash release v0.3.0 onto every standalone MCU-Link");
     press(&mut h, "Confirm");
     until(&mut h, "Not armed");
     h.get_by_label_contains("would have to be downloaded, and that was not asked");
@@ -2119,10 +2661,10 @@ fn a_batch_release_gone_from_the_cache_since_its_question_is_not_downloaded() {
     press(&mut h, "Batch");
     until(&mut h, "Arm batch");
     press(&mut h, "Arm batch");
-    h.get_by_label_contains("Flash release v0.3.0 onto every full MCU-Link");
+    h.get_by_label_contains("Flash release v0.3.0 onto every standalone MCU-Link");
     std::fs::remove_dir_all(cache.root()).unwrap();
     h.run_steps(2);
-    h.get_by_label_contains("Flash release v0.3.0 onto every full MCU-Link");
+    h.get_by_label_contains("Flash release v0.3.0 onto every standalone MCU-Link");
     assert!(h.query_by_label_contains("Download release").is_none());
     press(&mut h, "Confirm");
     until(&mut h, "Not armed");
@@ -2223,16 +2765,19 @@ fn bench_supply_controls_use_aux_and_confirm_during_capture() {
         until(&mut h, "Turn off");
     }
     press(&mut h, "Turn off");
-    until(&mut h, "Turn off target supply?");
-    press(&mut h, "Keep supply on");
+    until_contains(&mut h, "Turn off the target supply?");
+    press(&mut h, "Back");
     for _ in 0..10 {
         h.step();
     }
-    assert!(h.query_by_label("Turn off target supply?").is_none());
+    assert!(
+        h.query_by_label_contains("Turn off the target supply?")
+            .is_none()
+    );
     assert!(h.query_by_label("Turn off").is_some());
     press(&mut h, "Turn off");
-    until(&mut h, "Turn off supply");
-    press(&mut h, "Turn off supply");
+    until_contains(&mut h, "Turn off the target supply?");
+    press(&mut h, "Turn off");
     until(&mut h, "Turn on");
     press(&mut h, "Turn on");
     until(&mut h, "Turn off");
@@ -2267,7 +2812,7 @@ fn bench_dio_explains_each_unavailable_state() {
 }
 
 /// A standalone MCU-Link connects for its DIO pins alone. Each pin turns on its own, after the same
-/// question, and the bench neither reads nor offers a supply or a recording.
+/// question. The bench offers no supply, and records the pins alone.
 #[test]
 fn bench_drives_a_standalone_units_dio_pins() {
     let bus = SimBus::scenario("ours-plain").unwrap();
@@ -2281,16 +2826,17 @@ fn bench_drives_a_standalone_units_dio_pins() {
     for absent in [
         "Turn on",
         "Turn off",
-        "Start recording",
         "Record running capture",
+        "Auto range",
     ] {
         assert!(h.query_by_label(absent).is_none(), "{absent}");
     }
+    h.get_by_label("Start recording");
     press(&mut h, "DIO1 output");
-    until(&mut h, "Drive DIO1?");
+    until_contains(&mut h, "Drive DIO1? ");
     until_contains(&mut h, "driving this pin. ");
     until_contains(&mut h, "J8 drives 3.3 V");
-    press(&mut h, "Drive pins");
+    press(&mut h, "Drive DIO1");
     for _ in 0..400 {
         h.step();
         if h.query_all_by_label("Set high").count() == 1 {
@@ -2362,17 +2908,19 @@ fn bench_drives_a_pro_without_its_energy_circuits_supply_and_dio_pins() {
     until(&mut h, "DIO0–2 output");
     until_contains(&mut h, "no energy measurement circuit fitted");
     for absent in [
-        "Start recording",
         "Record running capture",
         "No reading without a capture",
+        "Auto range",
     ] {
         assert!(h.query_by_label(absent).is_none(), "{absent}");
     }
+    // Its pins alone, as `verge dio record` records them.
+    h.get_by_label("Start recording");
     until(&mut h, "Turn off");
     press(&mut h, "Turn off");
     until(&mut h, "Turn on");
     press(&mut h, "DIO0–2 output");
-    until(&mut h, "Drive DIO0–2?");
+    until_contains(&mut h, "Drive DIO0–2? ");
     until_contains(&mut h, "driving these pins. ");
     assert!(h.query_all_by_label_contains("J8").next().is_none());
 }
@@ -2386,19 +2934,19 @@ fn bench_dio_asks_before_driving_and_keeps_inputs_on_cancel() {
     until(&mut h, "DIO0–2 output");
     h.get_by_label("high");
     press(&mut h, "DIO0–2 output");
-    until(&mut h, "Drive DIO0–2?");
+    until_contains(&mut h, "Drive DIO0–2? ");
     until_contains(&mut h, "driving these pins. ");
     assert!(h.query_all_by_label_contains("J8").next().is_none());
     assert!(!bus.log().iter().any(|s| s.contains("AUX 8e0707")));
-    press(&mut h, "Keep as inputs");
+    press(&mut h, "Back");
     for _ in 0..10 {
         h.step();
     }
-    assert!(h.query_by_label("Drive DIO0–2?").is_none());
+    assert!(h.query_by_label_contains("Drive DIO0–2? ").is_none());
     assert!(!bus.log().iter().any(|s| s.contains("AUX 8e0707")));
     press(&mut h, "DIO0–2 output");
-    until(&mut h, "Drive pins");
-    press(&mut h, "Drive pins");
+    until(&mut h, "Drive DIO0–2");
+    press(&mut h, "Drive DIO0–2");
     for _ in 0..400 {
         h.step();
         if h.query_all_by_label("Set high").count() == 3 {
@@ -2413,7 +2961,7 @@ fn bench_dio_asks_before_driving_and_keeps_inputs_on_cancel() {
         h.step();
         std::thread::sleep(Duration::from_millis(2));
     }
-    assert!(h.query_by_label("Drive DIO0–2?").is_none());
+    assert!(h.query_by_label_contains("Drive DIO0–2? ").is_none());
     assert_eq!(h.query_all_by_label("Set high").count(), 0);
 }
 
@@ -2472,6 +3020,7 @@ fn a_worker_failure_during_recording_unlocks_the_window() {
             message: "USB worker failed".into(),
             advice: None,
             left_in_isp: false,
+            stopped: None,
         }));
     h.step();
     assert!(!h.state().busy());
@@ -2634,7 +3183,1174 @@ fn the_focused_widget_has_an_ink_ring_outside_it() {
 #[test]
 #[ignore = "reads the desktop's portal"]
 fn reads_the_desktops_motion_setting() {
-    let setting = crate::portal_reduced_motion().expect("the portal answers");
+    let connection = zbus::blocking::Connection::session().expect("a session bus");
+    let setting = crate::portal_reduced_motion(&connection).expect("the portal answers");
     assert!(setting <= 1, "reduced-motion is 0 or 1, not {setting}");
     println!("reduced-motion: {setting}");
+}
+
+/// On Linux, an empty list says where the udev rules are, since a unit the user may not open can
+/// be missing from it.
+#[cfg(target_os = "linux")]
+#[test]
+fn nothing_attached_points_at_the_udev_rules() {
+    let mut h = harness(sim_app(SimBus::default(), vec![]));
+    until(&mut h, "Plug in an MCU-Link");
+    h.get_by_label_contains("Plugged in already? On Linux your user needs the udev rules");
+    h.get_by_label("Getting started: USB permissions on Linux");
+}
+
+/// A unit Linux will not let the user open is sent to the udev rules, not to the ISP jumper:
+/// the bootloader needs the same rules.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_unit_the_user_may_not_open_points_at_the_udev_rules() {
+    let mut h = harness(sim_app(SimBus::scenario("denied").unwrap(), vec![]));
+    until_contains(&mut h, "Your user may not open it");
+    h.get_by_label_contains("The system does not let your user open this unit.");
+    h.get_by_label_contains("Your user needs the udev rules");
+    h.get_by_label("Getting started: USB permissions on Linux");
+    assert!(
+        h.get_by_label("Cannot update")
+            .accesskit_node()
+            .is_disabled()
+    );
+    for absent in ["Needs the jumper", "Release"] {
+        assert!(h.query_by_label(absent).is_none(), "{absent}");
+    }
+}
+
+/// The list and the slab name each unit's board, and Bench's unit list too, where it greys out a
+/// unit it can do nothing with.
+#[test]
+fn every_unit_is_named_with_its_board() {
+    let mut h = harness(sim_app(
+        SimBus::scenario("ours-pro-and-plain").unwrap(),
+        vec![],
+    ));
+    until_contains(&mut h, "Verge 26ea505 · MCU-Link Pro · 1-1");
+    h.get_by_label_contains(&format!("Verge 26ea505 · {} · 1-2", Board::McuLink));
+    h.get_by_label_contains("MCU-Link Pro · Updates without the jumper");
+    press(&mut h, "Bench");
+    until(&mut h, "Turn on");
+    h.get_by_role(Role::ComboBox).click();
+    h.run_steps(3);
+    h.get_by_label("CJ3E7A91C2 · MCU-Link Pro, Verge 26ea505");
+    h.get_by_label_contains(&format!("· {}, Verge 26ea505", Board::McuLink));
+
+    let mut h = harness(sim_app(SimBus::scenario("bench").unwrap(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    h.get_by_role(Role::ComboBox).click();
+    h.run_steps(3);
+    let entry = format!("QK7RM2VTX8D41 · {}, {STOCK} V3.172", Board::McuLink);
+    assert!(
+        h.get_by_label_contains(&entry)
+            .accesskit_node()
+            .is_disabled()
+    );
+}
+
+/// While a question is open, Confirm has the keyboard's focus, so it is in sight and Enter
+/// answers it; Escape answers Back.
+#[test]
+fn a_question_takes_the_focus_and_escape_answers_back() {
+    let (app, _backend) = manual_app("ours", true);
+    let mut h = harness(app);
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Batch");
+    press(&mut h, "Arm batch");
+    h.step();
+    assert!(h.get_by_label("Confirm").is_focused());
+    h.key_press(egui::Key::Escape);
+    h.step();
+    assert!(h.query_by_label("Confirm").is_none());
+    h.get_by_label("Arm batch");
+
+    press(&mut h, "Units");
+    press(&mut h, "Update to v0.3.0");
+    h.step();
+    assert!(h.get_by_label("Confirm").is_focused());
+    h.key_press(egui::Key::Escape);
+    h.step();
+    assert!(h.query_by_label("Confirm").is_none());
+}
+
+/// A running batch keeps its Stop in its slab, above the records that pile up under it.
+#[test]
+fn a_running_batch_keeps_stop_above_its_records() {
+    let (app, backend) = manual_app("ours", true);
+    let mut h = harness(app);
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Batch");
+    press(&mut h, "Arm batch");
+    press(&mut h, "Confirm");
+    {
+        let mut m = backend.lock().unwrap();
+        m.queued.push_back(Event::Batch(BatchEvent::Armed {
+            name: "release v0.3.0 (mculink-verge-v0.3.0.s19)".into(),
+            filter: "every unit".into(),
+        }));
+        for k in 0..12 {
+            m.queued.push_back(Event::Batch(BatchEvent::Record(Box::new(
+                escapement_verge_probe::batch::Record {
+                    time: "2026-10-20T14:26:08Z".into(),
+                    port: format!("1-{}", k + 1),
+                    serial_before: Some(format!("QK7RM2VTX8D{k:02}")),
+                    firmware_before: "NXP's firmware V3.172".into(),
+                    serial_after: None,
+                    firmware_after: None,
+                    result: escapement_verge_probe::batch::Settled::Current,
+                    reason: None,
+                    seconds: None,
+                },
+            ))));
+        }
+    }
+    h.run_steps(3);
+    let stop = h.get_by_label("Stop").rect();
+    let first = h.get_by_label("1-12").rect();
+    assert!(stop.bottom() < first.top(), "{stop:?} {first:?}");
+    assert!(stop.bottom() < 700.0, "in sight: {stop:?}");
+}
+
+/// When the USB worker stops, the strip says so once on every view, and Bench does not wait for a
+/// connection that cannot come.
+#[test]
+fn a_stopped_worker_is_reported_once_on_every_view() {
+    let (app, backend) = manual_app("ours-pro", true);
+    let mut h = harness(app);
+    until(&mut h, "Update to v0.3.0");
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::WorkerFailed(crate::worker::JobError {
+            message: "the USB worker stopped: boom".into(),
+            advice: Some(
+                "Quit and start Verge again. If a flash was under way, flash the unit again."
+                    .into(),
+            ),
+            left_in_isp: true,
+            stopped: None,
+        }));
+    h.step();
+    let notice = "The USB worker stopped: boom. Quit and start Verge again. If a flash was under way, flash the unit again.";
+    for view in ["Units", "Batch", "Bench"] {
+        press(&mut h, view);
+        h.run_steps(3);
+        assert_eq!(h.query_all_by_label(notice).count(), 1, "{view}");
+        assert!(
+            h.query_by_label_contains("Could not list USB devices")
+                .is_none(),
+            "{view}"
+        );
+    }
+    h.get_by_label("Not connected: the USB worker stopped.");
+    assert!(h.query_by_label("Connecting…").is_none());
+}
+
+/// After a failed look at USB, the units listed may have changed, so nothing is offered for them
+/// until a look succeeds.
+#[test]
+fn a_failed_scan_offers_no_update() {
+    let (app, backend) = manual_app("ours", true);
+    let mut h = harness(app);
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Rescan");
+    backend.lock().unwrap().queued.push_back(Event::Units(Err(
+        "could not list USB devices: access denied".into(),
+    )));
+    h.run_steps(3);
+    h.get_by_label("Could not list USB devices: access denied.");
+    h.get_by_label("As of the last look at USB");
+    assert!(h.query_by_label("Update to v0.3.0").is_none());
+    assert!(
+        h.get_by_label("Cannot update")
+            .accesskit_node()
+            .is_disabled()
+    );
+    h.get_by_label("The last look at USB failed. Rescan to try again.");
+    assert!(h.query_by_label("Enter ISP mode").is_none());
+}
+
+/// A batch paused on a unit that failed in ISP mode says how to flash it from the window, not
+/// with a command.
+#[test]
+fn a_batch_paused_on_a_failed_unit_says_how_the_window_flashes_it() {
+    use crate::worker::{Backend, Request};
+    use escapement_verge_probe::batch::{Board as BatchBoard, Filter, OursFilter, StockFilter};
+    use escapement_verge_probe::{Cancel, Source};
+
+    let bus = SimBus::default();
+    let unit = bus.plug_in_later(
+        Duration::from_secs(1),
+        SimFirmware::Stock {
+            version: StockVersion::parse("3.172").unwrap(),
+        },
+    );
+    bus.set_fail_writes(unit, true);
+    let http = SimHttp::new(repo());
+    http.publish_ours("v0.3.0");
+    let key = http.public_key();
+    let mut worker = Worker::spawn(
+        bus,
+        GitHub::new(http, repo(), None).with_key(Some(key)),
+        || {},
+    );
+    let stop = Cancel::new();
+    worker.send(Request::Batch {
+        source: Source::Release(Some("v0.3.0".into())),
+        filter: Filter {
+            board: BatchBoard::McuLink,
+            stock: StockFilter::Any,
+            ours: OursFilter::Any,
+            bootloaders: false,
+            attached: false,
+        },
+        download: Download::Agreed,
+        limit: None,
+        record: record_dir("paused-failed").join("record.jsonl"),
+        stop: stop.clone(),
+        cancel: Cancel::new(),
+    });
+    for _ in 0..800 {
+        while let Some(event) = worker.try_recv() {
+            if let Event::Batch(BatchEvent::State(state)) = event
+                && let Some(paused) = state.paused
+            {
+                stop.cancel();
+                assert!(
+                    paused.contains(
+                        "stop the batch, then pick the unit in ISP mode under Units and flash it with release v0.3.0."
+                    ),
+                    "{paused}"
+                );
+                assert!(!paused.contains("verge isp flash"), "{paused}");
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    stop.cancel();
+    panic!("the batch did not pause on the failed unit");
+}
+
+/// Bench restarts a unit running Verge after asking, as `verge restart` does, and gives a
+/// bench marker's pins back to DIO.
+#[test]
+fn bench_restarts_a_unit_after_asking() {
+    let bus = SimBus::scenario("ours-plain").unwrap();
+    bus.mark_dio(0, 0x0F);
+    let mut h = harness(sim_app(bus.clone(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until_contains(&mut h, "Restart the unit to give them back.");
+    press(&mut h, "Restart");
+    h.get_by_label_contains("Restart CJ3E7A91C2? Its DIO pins go back to inputs");
+    assert!(!bus.log().iter().any(|l| l.contains("control 0x40 0x03")));
+    // The confirm, named after the button.
+    let confirm = h
+        .get_all_by_label("Restart")
+        .find(|n| n.is_focused())
+        .expect("the confirm has the focus");
+    confirm.click();
+    h.step();
+    until(&mut h, "DIO3 output");
+    assert!(
+        bus.log()
+            .iter()
+            .any(|l| l.contains("control 0x40 0x03 wValue 0"))
+    );
+}
+
+/// The release picked by its tag, as `verge update --release` takes one.
+#[test]
+fn a_release_can_be_picked_by_its_tag() {
+    let http = SimHttp::new(repo());
+    http.publish_ours("v0.2.0");
+    http.publish_ours("v0.3.0");
+    let key = http.public_key();
+    let mut h = harness(app_on(
+        SimBus::scenario("ours").unwrap(),
+        GitHub::new(http, repo(), None).with_key(Some(key)),
+        vec![],
+    ));
+    until(&mut h, "Update to v0.3.0");
+    h.get_by_label_contains("latest v0.3.0 ·");
+    h.get_by_label("Tag").click();
+    h.step();
+    h.get_by_role(Role::TextInput).type_text("v0.2.0");
+    h.step();
+    press(&mut h, "Look up");
+    until(&mut h, "Update to v0.2.0");
+    h.get_by_label_contains("release v0.2.0 ·");
+}
+
+/// A unit in ISP mode can leave it without being flashed, as `verge isp reset` does; and an update
+/// that left the unit there with its jumper fitted offers the same.
+#[test]
+fn a_unit_in_isp_mode_is_reset_out_of_it() {
+    let mut h = harness(sim_app(SimBus::scenario("isp-ours").unwrap(), vec![]));
+    until(&mut h, "Reset out of ISP mode");
+    press(&mut h, "Reset out of ISP mode");
+    until(&mut h, "Done");
+    h.get_by_label_contains("runs Verge, build v0.3.0");
+
+    let (app, backend) = manual_app("ours", true);
+    let mut h = harness(app);
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Update to v0.3.0");
+    press(&mut h, "Confirm");
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::Install(InstallEvent::Finished(Ok(
+            Outcome::JumperStillFitted,
+        ))));
+    until(&mut h, "Reset out of ISP mode");
+    h.get_by_label_contains("take it off, then reset it out of ISP mode");
+    press(&mut h, "Reset out of ISP mode");
+    assert_eq!(
+        backend.lock().unwrap().sent.last().unwrap(),
+        "reset Some(\"1-1\")"
+    );
+}
+
+/// Bench shows the probe's energy total, and a capture that failed before the window connected,
+/// with what it measured.
+#[test]
+fn bench_shows_the_energy_total_and_a_failed_capture() {
+    let mut h = harness(sim_app(
+        SimBus::scenario("ours-pro-energy").unwrap(),
+        vec![],
+    ));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until_contains(&mut h, "total ");
+    h.get_by_label_contains(" pairs since");
+
+    let mut h = harness(sim_app(
+        SimBus::scenario("ours-pro-energy-failed").unwrap(),
+        vec![],
+    ));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until_contains(&mut h, "The last capture failed after ");
+    h.get_by_label_contains(
+        "the ADC overran, its DMA failed or the probe fell behind reading it. Starting a capture clears it.",
+    );
+}
+
+/// Closing while Bench finishes a recording says what it waits for: the recording's save, or a
+/// file dialog only while one is open.
+#[test]
+fn closing_says_what_bench_waits_for() {
+    let (app, _backend) = manual_app("ours-pro", true);
+    let mut h = harness(app);
+    until(&mut h, "Update to v0.3.0");
+    h.state_mut()
+        .bench_mut()
+        .hold(false, Some(std::env::temp_dir().join("held.tickwave")));
+    request_close(&mut h);
+    h.step();
+    h.get_by_label("Closing once the recording is saved.");
+    assert!(h.query_by_label_contains("file dialog").is_none());
+
+    let (app, _backend) = manual_app("ours-pro", true);
+    let mut h = harness(app);
+    until(&mut h, "Update to v0.3.0");
+    h.state_mut().bench_mut().hold(true, None);
+    request_close(&mut h);
+    h.step();
+    h.get_by_label("Closing once the file dialog is closed. Close it to continue.");
+}
+
+/// The step under way when an update failed is marked failed, not done, and the headline says
+/// what the failure left: nothing flashed before the bootloader was reached, a unit that did not
+/// come back after.
+#[test]
+fn a_failure_marks_its_step_and_says_what_it_left() {
+    use escapement_verge_probe::progress::Step;
+    let failed = |steps: &[Step], message: &str| {
+        let (app, backend) = manual_app("ours", true);
+        let mut h = harness(app);
+        until(&mut h, "Update to v0.3.0");
+        press(&mut h, "Update to v0.3.0");
+        press(&mut h, "Confirm");
+        {
+            let mut m = backend.lock().unwrap();
+            for &step in steps {
+                m.queued
+                    .push_back(Event::Progress(ProgressEvent::Start { step, total: 0 }));
+            }
+            m.queued
+                .push_back(Event::Install(InstallEvent::Finished(Err(
+                    crate::worker::JobError {
+                        message: message.into(),
+                        advice: None,
+                        left_in_isp: false,
+                        stopped: None,
+                    },
+                ))));
+        }
+        until(&mut h, "Failed");
+        h
+    };
+    let h = failed(&[Step::Download], "the release is built for another board");
+    h.get_by_label("Nothing was flashed");
+    h.get_by_label("Download the release: failed");
+
+    let h = failed(
+        &[
+            Step::EnterBootloader,
+            Step::WaitForBootloader,
+            Step::Connect,
+            Step::Erase,
+            Step::Write,
+            Step::Verify,
+            Step::Reset,
+            Step::WaitForFirmware,
+        ],
+        "the unit did not come back within 10 s",
+    );
+    h.get_by_label("The unit did not come back");
+    h.get_by_label("Wait for the firmware: failed");
+    // The steps before it are done.
+    assert!(h.query_by_label("Write: failed").is_none());
+}
+
+/// Bench asks before starting a capture in its own panel, with the rest of the panel held until
+/// the answer; Escape answers Back.
+#[test]
+fn bench_asks_inline_and_holds_the_panel() {
+    let mut h = harness(sim_app(SimBus::scenario("ours-pro").unwrap(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until(&mut h, "Start recording");
+    press(&mut h, "Start recording");
+    h.get_by_label_contains("Starting clears the probe's energy total.");
+    let confirm = h.get_by_label("Start recording");
+    assert!(confirm.is_focused());
+    for held in ["High range", "Turn on", "DIO3 output", "Restart"] {
+        assert!(
+            h.get_by_label(held).accesskit_node().is_disabled(),
+            "{held}"
+        );
+    }
+    h.key_press(egui::Key::Escape);
+    h.step();
+    assert!(h.query_by_label_contains("Starting clears").is_none());
+    assert!(!h.get_by_label("High range").accesskit_node().is_disabled());
+}
+
+/// A capture another program runs is recorded at its own rate, which Bench shows in place of a
+/// rate to choose.
+#[test]
+fn bench_shows_the_rate_of_a_capture_started_elsewhere() {
+    let mut h = harness(sim_app(
+        SimBus::scenario("ours-pro-energy").unwrap(),
+        vec![],
+    ));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until(&mut h, "Record running capture");
+    until_contains(&mut h, "Running at ");
+    h.get_by_label_contains(" pairs/s, started elsewhere");
+    for absent in ["25k", "Auto range"] {
+        assert!(h.query_by_label(absent).is_none(), "{absent}");
+    }
+}
+
+/// A unit not running Verge is refused once, in the window's words, with the way to update it.
+#[test]
+fn bench_refuses_a_unit_not_running_verge_once() {
+    let mut h = harness(sim_app(SimBus::scenario("stock").unwrap(), vec![]));
+    until(&mut h, "Install v0.3.0");
+    press(&mut h, "Bench");
+    h.step();
+    let refusal = format!("QK7RM2VTX8D41 runs {STOCK} V3.172, not Verge. Bench needs Verge.");
+    assert_eq!(h.query_all_by_label(&refusal).count(), 1);
+    assert!(h.query_by_label_contains("energy measurement").is_none());
+    assert!(h.query_by_label_contains("DIO pins").is_none());
+    press(&mut h, "Update under Units");
+    until(&mut h, "Install v0.3.0");
+
+    let mut h = harness(sim_app(SimBus::scenario("isp").unwrap(), vec![]));
+    until(&mut h, "Install v0.3.0");
+    press(&mut h, "Bench");
+    h.step();
+    h.get_by_label(
+        "LPC55S69 bootloader at 1-1 is a unit in ISP mode. Bench needs it running Verge.",
+    );
+}
+
+/// A Verge build without Verge Aux is refused for what it runs: reconnecting cannot help, so Bench
+/// offers the update and says why once.
+#[test]
+fn bench_offers_an_update_not_a_reconnect_for_a_build_without_aux() {
+    let mut h = harness(sim_app(SimBus::scenario("ours").unwrap(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until(&mut h, "Update under Units");
+    assert!(h.query_by_label("Reconnect").is_none());
+    assert_eq!(h.query_all_by_label_contains("has no Verge Aux").count(), 1);
+}
+
+/// The batch's slab says what it did: no image or record for a batch that never armed, and a
+/// clock that stops when it ends.
+#[test]
+fn an_ended_batch_says_what_it_did() {
+    let (app, backend) = manual_app("ours", true);
+    let mut h = harness(app);
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Batch");
+    press(&mut h, "Arm batch");
+    press(&mut h, "Confirm");
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::Batch(BatchEvent::Ended(Err(
+            "making the record file's directory: denied".into(),
+        ))));
+    until(&mut h, "Not armed");
+    h.get_by_label("record file: nothing was recorded");
+    assert!(h.query_by_label_contains("loading the image").is_none());
+    // The facts line: no image, the units it would have taken and its seconds.
+    let facts = |h: &Harness<'_, VergeApp>| {
+        let node = h.get_by_label_contains("from now on · ");
+        let node = node.accesskit_node();
+        node.label().or_else(|| node.value()).map(|l| l.to_string())
+    };
+    let before = facts(&h);
+    assert!(
+        before.as_deref().is_some_and(|f| f.starts_with("every ")),
+        "{before:?}"
+    );
+    for _ in 0..90 {
+        h.step();
+    }
+    assert_eq!(facts(&h), before, "the clock stopped");
+}
+
+/// After Stop, with no unit under way, there is nothing to cancel.
+#[test]
+fn stopping_between_units_offers_no_cancel() {
+    let (app, backend) = manual_app("ours", true);
+    let mut h = harness(app);
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Batch");
+    press(&mut h, "Arm batch");
+    press(&mut h, "Confirm");
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::Batch(BatchEvent::Armed {
+            name: "release v0.3.0 (mculink-verge-v0.3.0.s19)".into(),
+            filter: "every unit".into(),
+        }));
+    h.step();
+    press(&mut h, "Stop");
+    h.get_by_label("Stopping: no unit under way.");
+    assert!(h.query_by_label("Cancel the unit under way").is_none());
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::Batch(BatchEvent::Starting("1-1".into())));
+    h.step();
+    h.get_by_label("Cancel the unit under way");
+}
+
+/// Bench offers what the selected unit allows: no recording to start where it cannot record,
+/// and its DIO pins are connecting rather than missing while it connects.
+#[test]
+fn bench_placeholders_offer_what_the_unit_allows() {
+    let mut h = harness(sim_app(SimBus::default(), vec![]));
+    until(&mut h, "Plug in an MCU-Link");
+    press(&mut h, "Bench");
+    h.get_by_label("Open a recording.");
+    assert!(h.query_by_label_contains("Start a recording").is_none());
+
+    let (app, _backend) = manual_app("ours-pro", true);
+    let mut h = harness(app);
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    // The hand-driven worker never answers the connection.
+    h.run_steps(3);
+    assert_eq!(h.query_all_by_label("Connecting…").count(), 2);
+    assert!(
+        h.query_by_label_contains("Select a Pro or standalone")
+            .is_none()
+    );
+}
+
+/// NXP's firmware too old to ask is named as what its USB strings say it is.
+#[test]
+fn nxps_firmware_too_old_to_ask_is_named() {
+    let mut h = harness(sim_app(SimBus::scenario("stock-hid").unwrap(), vec![]));
+    until_contains(
+        &mut h,
+        "Too old to ask: NXP's firmware V2.x speaks HID only",
+    );
+    h.get_by_role_and_label(Role::Label, STOCK);
+    h.get_by_label("V2.245");
+    assert!(h.query_by_label("Unknown").is_none());
+}
+
+/// A unit another program holds is looked at again with Rescan, which the window names.
+#[test]
+fn a_busy_unit_is_looked_at_again_with_rescan() {
+    let mut h = harness(sim_app(SimBus::scenario("busy").unwrap(), vec![]));
+    until_contains(&mut h, "then press Rescan");
+    assert!(h.query_by_label_contains("look again").is_none());
+}
+
+/// A file dropped while an update runs is answered in the Working view, and not after.
+#[test]
+fn a_file_dropped_during_an_update_is_answered_at_once() {
+    let (app, backend) = manual_app("ours", true);
+    let mut h = harness(app);
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Update to v0.3.0");
+    press(&mut h, "Confirm");
+    drop_file(&mut h, &std::env::temp_dir().join("dropped.s19"));
+    h.get_by_label_contains("dropped.s19 arrived while an update was running, and was ignored.");
+    backend
+        .lock()
+        .unwrap()
+        .queued
+        .push_back(Event::Install(InstallEvent::Finished(Ok(
+            Outcome::JumperStillFitted,
+        ))));
+    until(&mut h, "Flashed");
+    press(&mut h, "Back");
+    assert!(h.query_by_label_contains("arrived while").is_none());
+}
+
+/// On a wide window the Units view keeps its column short enough to read.
+#[test]
+fn the_units_column_stays_readable_on_a_wide_window() {
+    let mut h = Harness::builder()
+        .with_size(vec2(2560.0, 1440.0))
+        .with_context_setup(still)
+        .build_ui_state(
+            |ui, app: &mut VergeApp| app.show(ui),
+            sim_app(SimBus::scenario("bench").unwrap(), vec![]),
+        );
+    until(&mut h, "Update to v0.3.0");
+    // The release's line is long enough to fill any column it is given.
+    let release = h.get_by_label_contains("signed in").rect();
+    assert!(release.right() < 300.0 + 24.0 + 960.0 + 1.0, "{release:?}");
+}
+
+/// Held still, the window's own animations finish at once as well as the mark's.
+#[test]
+fn reduced_motion_stops_egui_animating_too() {
+    let ctx = egui::Context::default();
+    crate::mark::set_motion(&ctx, false);
+    for theme in [egui::Theme::Dark, egui::Theme::Light] {
+        assert_eq!(ctx.style_of(theme).animation_time, 0.0);
+    }
+    crate::mark::set_motion(&ctx, true);
+    assert!(ctx.global_style().animation_time > 0.0);
+}
+
+/// Each log line has its time, and Copy takes every line the log keeps.
+#[test]
+fn the_log_has_times_and_copies_whole() {
+    let log = Log::default();
+    log.push(tracing::Level::INFO, "first".into());
+    log.push(tracing::Level::ERROR, "second".into());
+    let text = log.text();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2);
+    for (line, words) in lines.iter().zip(["INFO  first", "ERROR second"]) {
+        let (time, rest) = line.split_once(' ').unwrap();
+        assert!(
+            time.len() == 8 && time.as_bytes()[2] == b':' && time.as_bytes()[5] == b':',
+            "{line}"
+        );
+        assert_eq!(rest, words);
+    }
+    let worker = Worker::spawn(
+        SimBus::default(),
+        GitHub::new(SimHttp::new(repo()), repo(), None),
+        || {},
+    );
+    let app = VergeApp::new(
+        Box::new(worker),
+        log,
+        Config {
+            repo: repo(),
+            simulated: None,
+            stock_dirs: vec![],
+            record_dir: std::env::temp_dir(),
+            cache: None,
+        },
+    );
+    // What each frame copies, kept: a click's frame is not the last of the step that makes it.
+    let mut h = Harness::builder()
+        .with_size(vec2(1080.0, 700.0))
+        .with_context_setup(still)
+        .build_ui_state(
+            |ui, (app, copied): &mut (VergeApp, Vec<String>)| {
+                app.show(ui);
+                copied.extend(ui.ctx().output(|o| {
+                    o.commands
+                        .iter()
+                        .filter_map(|command| match command {
+                            egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                }));
+            },
+            (app, Vec::new()),
+        );
+    h.step();
+    h.get_by_label("Show").click();
+    h.run_steps(2);
+    h.get_by_label("Copy").click();
+    h.run_steps(2);
+    assert_eq!(h.state().1, [text]);
+}
+
+/// A unit row's hover text says what the row leaves out: how the unit updates.
+#[test]
+fn a_unit_rows_hover_says_how_it_updates() {
+    let mut h = harness(sim_app(SimBus::scenario("bench").unwrap(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    h.get_by_role_and_label(Role::ListBoxOption, "QK7RM2VTX8D41")
+        .hover();
+    h.run_steps(60);
+    // Not the state the row already gives.
+    let unit = escapement_verge_probe::detect(&SimBus::scenario("bench").unwrap())
+        .unwrap()
+        .remove(1);
+    assert_eq!(unit.serial(), Some("QK7RM2VTX8D41"));
+    assert!(h.query_by_label(&unit.state.to_string()).is_none());
+    assert_eq!(
+        h.query_all_by_label("Updates without the jumper").count(),
+        1,
+        "the hover alone: the selected unit's slab names its board too"
+    );
+}
+
+/// Tab goes through the strip in the order it shows, then the view, then the log.
+#[test]
+fn tab_goes_through_the_window_in_order() {
+    let mut h = harness(sim_app(SimBus::scenario("bench").unwrap(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    let mut order = Vec::new();
+    for _ in 0..40 {
+        h.key_press(egui::Key::Tab);
+        h.run_steps(2);
+        let focused = h
+            .query_all(egui_kittest::kittest::by())
+            .find(|n| n.is_focused())
+            .and_then(|n| n.accesskit_node().label().map(|l| l.to_string()));
+        if let Some(label) = focused {
+            if order.first() == Some(&label) {
+                break;
+            }
+            order.push(label);
+        }
+    }
+    let at = |label: &str| {
+        order
+            .iter()
+            .position(|l| l == label)
+            .unwrap_or_else(|| panic!("{label} in {order:?}"))
+    };
+    assert_eq!(&order[..5], ["Units", "Batch", "Bench", "Rescan", "About"]);
+    assert!(at("Update to v0.3.0") < at("Show"), "{order:?}");
+    assert_eq!(order.last().map(String::as_str), Some("Show"), "{order:?}");
+    assert!(!order.iter().any(|l| l == "Resize panel"), "{order:?}");
+}
+
+/// Escape closes About.
+#[test]
+fn escape_closes_about() {
+    let mut h = harness(sim_app(SimBus::scenario("bench").unwrap(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "About");
+    h.get_by_label("Verge's icon");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(h.query_by_label("Verge's icon").is_none());
+}
+
+/// Where DIO is unavailable, Bench says a recording holds no DIO pins.
+#[test]
+fn a_recording_without_dio_says_so() {
+    let mut h = harness(sim_app(SimBus::scenario("ours-pro-j15").unwrap(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until_contains(&mut h, "remove J15");
+    h.get_by_label("DIO is unavailable, so a recording holds no DIO pins.");
+}
+
+/// A standalone MCU-Link records its DIO pins alone, as `verge dio record` does.
+#[test]
+fn bench_records_a_standalone_units_dio_pins() {
+    let dir = record_dir("dio-record");
+    let worker = Worker::spawn(
+        SimBus::scenario("ours-plain").unwrap(),
+        GitHub::new(SimHttp::new(repo()), repo(), None),
+        || {},
+    );
+    let app = VergeApp::new(
+        Box::new(worker),
+        Log::default(),
+        Config {
+            repo: repo(),
+            simulated: Some("test".into()),
+            stock_dirs: vec![],
+            record_dir: dir.clone(),
+            cache: None,
+        },
+    );
+    let mut h = harness(app);
+    until(&mut h, "Bench");
+    press(&mut h, "Bench");
+    until(&mut h, "Start recording");
+    press(&mut h, "Start recording");
+    until(&mut h, "Stop recording");
+    for _ in 0..40 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    press(&mut h, "Stop recording");
+    until(&mut h, "Start recording");
+    until_contains(&mut h, "DIO3 edges");
+    let kept: Vec<_> = std::fs::read_dir(dir.join("captures"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A unit running a firmware the tool asked enters ISP mode after asking, as `verge isp enter`
+/// puts it there, and waits there for a flash or a reset.
+#[test]
+fn a_unit_enters_isp_mode_after_asking() {
+    let bus = SimBus::scenario("ours").unwrap();
+    let mut h = harness(sim_app(bus.clone(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Enter ISP mode");
+    h.get_by_label_contains("Restart CJ3E7A91C2 at 1-1 into ISP mode?");
+    assert!(h.query_by_label("Update to v0.3.0").is_none());
+    let confirm = h.get_by_label("Enter ISP mode");
+    assert!(confirm.is_focused());
+    confirm.click();
+    h.step();
+    until(&mut h, "In ISP mode");
+    h.get_by_label_contains(&format!(
+        "In ISP mode the tool cannot tell the unit's board: flash it with an image built for {}.",
+        Board::McuLink.a()
+    ));
+    press(&mut h, "Back");
+    until(&mut h, "Reset out of ISP mode");
+    h.get_by_label_contains("LPC55S69 bootloader");
+}
+
+/// The window enters ISP mode by the rules `verge isp enter` refuses by: a board other than the
+/// standalone MCU-Link only for NXP's firmware, only by a jumper-free path, and only for a unit
+/// running a firmware it could ask.
+#[test]
+fn entering_isp_mode_follows_the_rules_isp_enter_refuses_by() {
+    let dir = record_dir("enter-stock");
+    std::fs::write(
+        dir.join("MCU-LINK_CMSIS-DAP_V3_172.s19"),
+        firmware_srecord(&SimFirmware::Stock {
+            version: StockVersion::parse("3.172").unwrap(),
+        }),
+    )
+    .unwrap();
+    let (app, _backend) = manual_app("ours-pro", true);
+    let mut h = harness(app);
+    until(&mut h, "Update to v0.3.0");
+    assert!(
+        h.get_by_label("Enter ISP mode")
+            .accesskit_node()
+            .is_disabled(),
+        "a Pro, with a release chosen"
+    );
+    // With NXP's firmware chosen, which goes on any board.
+    let units: Vec<Unit> =
+        escapement_verge_probe::detect(&SimBus::scenario("ours-pro").unwrap()).unwrap();
+    let instance = units[0].device.instance.clone();
+    let mut manual = Manual::default();
+    manual.queued.push_back(Event::Units(Ok(units)));
+    let backend: Shared = Arc::new(Mutex::new(manual));
+    let app = VergeApp::new(
+        Box::new(backend.clone()),
+        Log::default(),
+        Config {
+            repo: repo(),
+            simulated: None,
+            stock_dirs: vec![dir.clone()],
+            record_dir: std::env::temp_dir(),
+            cache: None,
+        },
+    );
+    let mut h = harness(app);
+    until_contains(&mut h, "MCU-Link Pro");
+    press(&mut h, STOCK);
+    press(&mut h, "Enter ISP mode");
+    let entered = |backend: &Shared| {
+        backend
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .filter(|s| s.starts_with("enter"))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert!(entered(&backend).is_empty(), "nothing before the answer");
+    press(&mut h, "Enter ISP mode");
+    assert_eq!(entered(&backend), [format!("enter {instance} stock true")]);
+
+    // No jumper-free path into its bootloader.
+    let mut h = harness(sim_app(SimBus::scenario("stock-old").unwrap(), vec![]));
+    until(&mut h, "Needs the jumper");
+    assert!(
+        h.get_by_label("Enter ISP mode")
+            .accesskit_node()
+            .is_disabled()
+    );
+    // Held by a debugger: not a firmware the tool could ask over CMSIS-DAP.
+    let mut h = harness(sim_app(
+        SimBus::scenario("ours-pro-debugger").unwrap(),
+        vec![],
+    ));
+    until_contains(&mut h, "Close the debugger first.");
+    assert!(h.query_by_label("Enter ISP mode").is_none());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Bench shows a Pro's calibration points, as `verge energy calibration` reads them.
+#[test]
+fn bench_shows_the_calibration_points() {
+    let mut h = harness(sim_app(
+        SimBus::scenario("ours-pro-energy").unwrap(),
+        vec![],
+    ));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until(&mut h, "Calibration");
+    press(&mut h, "Calibration");
+    for label in ["Low range", "High range", "code 31200", "code 49600"] {
+        h.get_by_label(label);
+    }
+    // Without the energy circuit there is nothing calibrated.
+    let mut h = harness(sim_app(
+        SimBus::scenario("ours-pro-unfitted").unwrap(),
+        vec![],
+    ));
+    until(&mut h, "Update to v0.3.0");
+    press(&mut h, "Bench");
+    until(&mut h, "Turn on");
+    assert!(h.query_by_label("Calibration").is_none());
+}
+
+/// For a unit the tool could not ask, the window gives its own notes from the unit's state: the
+/// way to look again is Rescan, offered only where asking again can find a jumper-free path.
+#[test]
+fn the_window_builds_the_notes_of_a_unit_it_could_not_ask() {
+    let mut h = harness(sim_app(SimBus::scenario("busy").unwrap(), vec![]));
+    until_contains(&mut h, "then press Rescan");
+    h.get_by_label("The tool could not ask this unit what it runs: another program has it open.");
+    h.get_by_label(
+        "Close whatever has it open, then press Rescan to look for the jumper-free path again.",
+    );
+    let mut h = harness(sim_app(SimBus::scenario("stock-hid").unwrap(), vec![]));
+    until_contains(&mut h, "The tool could not ask this unit what it runs");
+    assert!(h.query_by_label_contains("press Rescan").is_none());
+}
+
+/// The question before flashing a unit in ISP mode says what a file is for as `verge isp flash`
+/// does: nothing for NXP's own file, which goes on any board, and what verge takes a file that
+/// declares no boards to be.
+#[test]
+fn the_question_says_what_a_file_is_for_as_the_command_line_does() {
+    let dir = record_dir("question-files");
+    let nxp = dir.join("MCU-LINK_CMSIS-DAP_V3_172.s19");
+    std::fs::write(
+        &nxp,
+        firmware_srecord(&SimFirmware::Stock {
+            version: StockVersion::parse("3.172").unwrap(),
+        }),
+    )
+    .unwrap();
+    let plain = dir.join("plain.s19");
+    std::fs::write(
+        &plain,
+        firmware_srecord(&SimFirmware::Ours {
+            build: "v0.3.0".into(),
+        }),
+    )
+    .unwrap();
+    let mut h = harness(sim_app(SimBus::scenario("isp").unwrap(), vec![]));
+    until(&mut h, "Install v0.3.0");
+    drop_file(&mut h, &nxp);
+    until(&mut h, "Flash MCU-LINK_CMSIS-DAP_V3_172.s19");
+    press(&mut h, "Flash MCU-LINK_CMSIS-DAP_V3_172.s19");
+    h.get_by_label_contains("in ISP mode. Flash MCU-LINK_CMSIS-DAP_V3_172.s19 onto");
+    assert!(h.query_by_label_contains("The image").is_none());
+    press(&mut h, "Back");
+    drop_file(&mut h, &plain);
+    until(&mut h, "Flash plain.s19");
+    press(&mut h, "Flash plain.s19");
+    h.get_by_label_contains(&format!(
+        "The image declares no boards, so verge takes it as a Verge image for the {} only. Flash plain.s19",
+        Board::McuLink
+    ));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The release's line names its signature and checksum files without claiming a check made
+/// before the download.
+#[test]
+fn the_release_line_claims_no_check() {
+    let mut h = harness(sim_app(SimBus::scenario("ours").unwrap(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    h.get_by_label_contains(
+        "signed in mculink-verge-v0.3.0.s19.minisig, checksum in mculink-verge-v0.3.0.s19.sha256",
+    );
+    assert!(h.query_by_label_contains("checked against").is_none());
+}
+
+/// NXP's own LinkServer file, picked as a file, goes on any board as NXP's firmware does: on a Pro
+/// the window offers to flash it, and a batch for the Pro arms with it, as the command line does.
+#[test]
+fn nxps_own_file_goes_on_a_pro() {
+    let dir = record_dir("nxp-file-on-a-pro");
+    let file = dir.join("MCU-LINK_CMSIS-DAP_V3_172.s19");
+    std::fs::write(
+        &file,
+        firmware_srecord(&SimFirmware::Stock {
+            version: StockVersion::parse("3.172").unwrap(),
+        }),
+    )
+    .unwrap();
+    let mut h = harness(sim_app(SimBus::scenario("ours-pro").unwrap(), vec![]));
+    until(&mut h, "Update to v0.3.0");
+    drop_file(&mut h, &file);
+    until(&mut h, "Flash MCU-LINK_CMSIS-DAP_V3_172.s19");
+    assert!(h.query_by_label("Not for this board").is_none());
+
+    press(&mut h, "Batch");
+    press(&mut h, "MCU-Link Pro");
+    // Only units running NXP's firmware, which a file of NXP's firmware dates.
+    press_as(&mut h, Role::CheckBox, "Verge");
+    until(&mut h, "Arm batch");
+    assert!(h.query_by_label("Cannot arm").is_none());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A cancel's headline says what it left on the unit, as the message under it does: never that
+/// the unit did not come back, or that it is still in ISP mode, when it is restarting. The step it
+/// stopped is not marked failed.
+#[test]
+fn a_cancel_is_headlined_by_what_it_left() {
+    use crate::worker::Stopped;
+    use escapement_verge_probe::progress::{Left, Step};
+    for (stopped, words) in [
+        (Stopped::Unchanged, "Nothing was changed"),
+        (
+            Stopped::Left(Left::Flashed),
+            "Restarting into the new image",
+        ),
+        (
+            Stopped::Left(Left::Reset),
+            "Restarting into the image it holds",
+        ),
+        (
+            Stopped::Left(Left::InIsp),
+            "In ISP mode, with the image it held",
+        ),
+        (
+            Stopped::Left(Left::Partial),
+            "In ISP mode, with a partial image",
+        ),
+    ] {
+        let (app, backend) = manual_app("ours", true);
+        let mut h = harness(app);
+        until(&mut h, "Update to v0.3.0");
+        press(&mut h, "Update to v0.3.0");
+        press(&mut h, "Confirm");
+        {
+            let mut m = backend.lock().unwrap();
+            m.queued.push_back(Event::Progress(ProgressEvent::Start {
+                step: Step::Write,
+                total: 0,
+            }));
+            m.queued
+                .push_back(Event::Install(InstallEvent::Finished(Err(
+                    crate::worker::JobError {
+                        message: "stopped".into(),
+                        advice: None,
+                        left_in_isp: false,
+                        stopped: Some(stopped),
+                    },
+                ))));
+        }
+        until(&mut h, "Stopped");
+        h.get_by_label(words);
+        for wrong in [
+            "Failed",
+            "The unit did not come back",
+            "The update did not finish",
+        ] {
+            assert!(h.query_by_label(wrong).is_none(), "{stopped:?}: {wrong}");
+        }
+        assert!(
+            h.query_by_label_contains(": failed").is_none(),
+            "{stopped:?}: the stopped step is marked failed"
+        );
+    }
+}
+
+/// A reset with no unit in ISP mode is not reported as leaving one there.
+#[test]
+fn a_reset_with_nothing_in_isp_mode_leaves_nothing_in_it() {
+    use crate::worker::{Backend, Request};
+    use escapement_verge_probe::Cancel;
+    let mut worker = Worker::spawn(
+        SimBus::default(),
+        GitHub::new(SimHttp::new(repo()), repo(), None),
+        || {},
+    );
+    worker.send(Request::Reset {
+        port: None,
+        cancel: Cancel::new(),
+    });
+    for _ in 0..800 {
+        while let Some(event) = worker.try_recv() {
+            if let Event::Install(InstallEvent::Finished(result)) = event {
+                let error = result.expect_err("nothing to reset");
+                assert!(!error.left_in_isp, "{error:?}");
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the reset did not finish");
+}
+
+/// Bench offers a restart to a unit running Verge that another program holds, as `verge restart`
+/// sends one: the request goes to the unit's USB core, past the program holding CMSIS-DAP.
+#[test]
+fn bench_offers_a_restart_to_a_unit_another_program_holds() {
+    let mut h = harness(sim_app(SimBus::scenario("busy").unwrap(), vec![]));
+    until_contains(&mut h, "then press Rescan");
+    press(&mut h, "Bench");
+    until(&mut h, "Restart");
 }

@@ -6,8 +6,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::energy::record::Writer;
-use crate::output::outputln;
+use crate::energy::record::{Format, Writer};
+use crate::progress::Spinner;
+use crate::question::say;
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use escapement_verge_probe::aux::{Aux, AuxLink};
@@ -18,7 +19,7 @@ use escapement_verge_probe::{BoardKind, Bus, Cancel, VergeControl};
 
 #[derive(Args)]
 pub struct RecordArgs {
-    /// The tickwave recording to write.
+    /// The tickwave recording to write. A .sr or .csv name is refused.
     #[arg(long, value_name = "FILE")]
     out: PathBuf,
     /// Stop after this long. Without it, Ctrl-C ends the recording.
@@ -40,10 +41,27 @@ pub fn record<B: Bus>(
     serial: Option<&str>,
     cancel: &Cancel,
 ) -> Result<()> {
+    // Before any unit is touched. It writes only tickwave, which a name may not contradict.
+    match Format::named_by(&args.out) {
+        Some(Format::Tickwave) | None if !crate::energy::record::is_stdout(&args.out) => {}
+        Some(named) => bail!(
+            "{} names {}, and `dio record` writes a tickwave recording: name it .tickwave",
+            args.out.display(),
+            named.name()
+        ),
+        None => bail!(
+            "`dio record` writes a tickwave recording, which cannot go to stdout: name a file"
+        ),
+    }
     // A Pro that measures energy records its pins with it, so it is no pick here.
-    let unit = crate::energy::find_pro_where(bus, serial, Feature::Dio, |unit| {
-        unit.verge().is_some_and(|ours| ours.supports_dio_stream())
-    })?;
+    let unit = crate::energy::find_pro_where(
+        bus,
+        serial,
+        Feature::Dio,
+        |unit| unit.verge().is_some_and(|ours| ours.supports_dio_stream()),
+        "records its DIO pins on their own",
+        "`verge dio record` needs a standalone MCU-Link, or a Pro without its energy circuit, running Verge.",
+    )?;
     let name = unit.serial().unwrap_or("the unit");
     let mut aux = pro::open_aux(bus, &unit, Feature::Dio)?;
     let mut probe = VergeControl::new(&mut aux);
@@ -93,9 +111,7 @@ pub fn record<B: Bus>(
         }
     };
     let board = info.board;
-    let streamed = stream(
-        bus, name, board, &mut probe, &writer, asked, args.limit, cancel,
-    );
+    let streamed = stream(bus, name, board, &mut probe, &writer, asked, args, cancel);
     let written = writer
         .finish()
         .with_context(|| format!("writing {}", args.out.display()));
@@ -112,26 +128,30 @@ pub fn record<B: Bus>(
         .filter(|k| recorded.pins & (1 << k) != 0)
         .map(|k| format!("DIO{k} {}", count(recorded.edges[k], "edge")))
         .collect();
-    outputln!(
-        "{name}: {} over {:.3} s to {}.",
+    let format = match Format::named_by(&args.out) {
+        None => " (a tickwave recording)",
+        Some(_) => "",
+    };
+    say(&format!(
+        "{name}: {} over {:.3} s to {}{format}.",
         pins.join(", "),
         recorded.seconds,
         args.out.display()
-    );
+    ));
     if recorded.losses > 0 {
-        outputln!(
+        say(&format!(
             "The probe lost edges {}: the recording marks those spans unknown.",
             count(recorded.losses, "time")
-        );
+        ));
     }
     if recorded.reason != EndReason::Asked {
-        outputln!("The stream ended before this side asked: another program restarted it.");
+        say("The stream ended before this side asked: another program restarted it.");
     }
     Ok(())
 }
 
 fn count(n: u64, what: &str) -> String {
-    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
+    crate::count(usize::try_from(n).unwrap_or(usize::MAX), what)
 }
 
 struct Recorded {
@@ -153,11 +173,13 @@ fn stream<B: Bus, L: AuxLink>(
     probe: &mut VergeControl<'_, Aux<L>>,
     writer: &Writer,
     asked: u8,
-    limit: Option<Duration>,
+    args: &RecordArgs,
     cancel: &Cancel,
 ) -> Result<Recorded> {
+    let limit = args.limit;
     let began = bus.now();
     let deadline = limit.map(|limit| began + limit);
+    let mut spinner: Option<Spinner> = None;
     let mut header = None;
     let mut asked_at = None;
     let (mut levels, mut edges, mut losses) = (0u8, [0u64; 4], 0u64);
@@ -217,6 +239,19 @@ fn stream<B: Bus, L: AuxLink>(
             }
             levels = started.dio_levels;
             header = Some(*started);
+            let ends = match limit {
+                Some(limit) => format!(
+                    ", for {}. Ctrl-C ends it sooner",
+                    humantime::format_duration(limit)
+                ),
+                None => ". Ctrl-C ends it".to_owned(),
+            };
+            say(&format!(
+                "Recording {name}'s {} to {}{ends}.",
+                crate::dio_names(started.dio_mask),
+                args.out.display()
+            ));
+            spinner = Some(Spinner::new("recording"));
         }
         writer.message(&message)?;
         match message {
@@ -229,6 +264,13 @@ fn stream<B: Bus, L: AuxLink>(
                         *count += u64::from(moved >> pin & 1);
                     }
                     levels = edge.levels;
+                }
+                if let Some(spinner) = &spinner {
+                    let counts: Vec<String> = (0..4)
+                        .filter(|pin| mask >> pin & 1 != 0)
+                        .map(|pin| format!("DIO{pin} {}", count(edges[pin], "edge")))
+                        .collect();
+                    spinner.set(&format!("recording  {}", counts.join("  ")));
                 }
             }
             Message::DioLost(lost) => {
