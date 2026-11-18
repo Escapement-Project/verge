@@ -144,7 +144,8 @@ fn answered<T>(on_its_line: bool, start: impl FnOnce() -> dialoguer::Result<T>) 
     ASKING.store(true, Ordering::Relaxed);
     match start() {
         Err(dialoguer::Error::IO(error)) if error.kind() == io::ErrorKind::Interrupted => {
-            // ASKING stays set, so the signal the key also raises ends nothing else.
+            // The key's own signal is raised on this thread, which blocks it. ASKING stays set,
+            // so one sent from elsewhere ends nothing else either.
             let _ = Term::stderr().show_cursor();
             let stopped = "Stopped at the question. Nothing was changed.";
             Err(Ended::new(

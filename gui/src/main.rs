@@ -18,7 +18,7 @@ mod tests;
 mod tokens;
 mod worker;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use clap::Parser;
 use escapement_verge_probe::cache::Cache;
@@ -126,6 +126,13 @@ fn record_dir() -> std::path::PathBuf {
 /// is the same with '-' for '_', which Apple does not allow.
 const APP_ID: &str = "io.github.escapement_project.Verge";
 
+/// The exit status when a signal ends the run before the window opens: the command line's for
+/// Ctrl-C.
+const STOPPED: i32 = 130;
+
+/// The window, once it is up, for the signal handler to close.
+static WINDOW: OnceLock<egui::Context> = OnceLock::new();
+
 /// Verge's app icon, the design tokens' 512 px rendering.
 fn icon() -> egui::IconData {
     eframe::icon_data::from_png_bytes(include_bytes!("../icons/verge-512.png"))
@@ -171,6 +178,17 @@ fn main() -> eframe::Result {
             .with_icon(Arc::new(icon())),
         ..Default::default()
     };
+    // A signal closes the window the way its close button does, so the guard against closing
+    // mid-flash holds for it too. Before the window is up it ends the program, as it would
+    // without a handler.
+    let handler = ctrlc::set_handler(|| match WINDOW.get() {
+        Some(ctx) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+        None => std::process::exit(STOPPED),
+    });
+    match handler {
+        Ok(()) => escapement_verge_probe::hid::block_stop_signals(),
+        Err(error) => tracing::debug!("no signal handler: {error}"),
+    }
     eframe::run_native(
         "verge",
         options,
@@ -200,14 +218,7 @@ fn main() -> eframe::Result {
                     repaint,
                 ),
             };
-            // A signal closes the window the way its close button does, so the guard against
-            // closing mid-flash holds for it too.
-            let signal_ctx = ctx.clone();
-            if let Err(error) = ctrlc::set_handler(move || {
-                signal_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }) {
-                tracing::debug!("no signal handler: {error}");
-            }
+            let _ = WINDOW.set(ctx);
             Ok(Box::new(VergeApp::new(Box::new(worker), log, config)))
         }),
     )

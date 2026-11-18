@@ -550,8 +550,9 @@ fn main() -> ExitCode {
             }
         })
     };
-    if let Err(error) = handler {
-        tracing::debug!("no Ctrl-C handler: {error}");
+    match handler {
+        Ok(()) => escapement_verge_probe::hid::block_stop_signals(),
+        Err(error) => tracing::debug!("no Ctrl-C handler: {error}"),
     }
 
     let repo = match cli.repo() {

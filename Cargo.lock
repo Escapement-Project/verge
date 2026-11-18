@@ -1969,6 +1969,7 @@ dependencies = [
  "humantime",
  "minisign",
  "minisign-verify",
+ "nix 0.32.0",
  "nusb",
  "object 0.40.0",
  "probe-rs",
@@ -3482,6 +3483,18 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "memoffset",
+]
+
+[[package]]
+name = "nix"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77730ed34f01f4990cb2ea67fec715ecebc6fab9a6396cf83c5529b13f581bdc"
+dependencies = [
+ "bitflags 2.13.2",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]
