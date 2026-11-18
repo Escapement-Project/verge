@@ -25,16 +25,18 @@ while a debugger has the probe open.
 
 ## Starting and stopping
 
-```
-verge energy start --rate 10000   # start a capture at 10,000 pairs a second
-verge energy latest               # the newest pair
-verge energy total                # the energy since the start
-verge energy stop                 # stop it, and show the total
+```text
+verge energy start --rate 10k   # capture 10,000 pairs a second
+verge energy latest             # the newest pair
+verge energy total              # the energy since the start
+verge energy stop               # stop it, and show the total
 ```
 
-`start` takes 25,000 pairs a second unless `--rate` says otherwise. A start clears the total. It can
+`start` takes 25,000 pairs a second unless `--rate` says otherwise, as `10000` or `10k`. A start
+clears the total, and replaces a capture that runs: it says so, with that capture's total. It can
 calibrate first, which disconnects J9 from the target for about 0.2 s: a target powered through J9
-loses its supply for that time.
+loses its supply for that time. `verge power off` says when a capture runs on without the supply,
+and `verge restart` when it ends a capture.
 
 The total counts only the time the probe converts. It leaves out the moments the probe holds its
 conversions, as when it times a new debug connection at a fast clock. A stopped capture keeps its
@@ -106,24 +108,41 @@ terminal, it prints a line for each read instead.
 
 ## Recording to a file
 
-```
-verge energy record --out run.sr --for 10s
+```text
+verge energy record --out run.tickwave --for 10s
 ```
 
 `record` saves every pair of a capture. Like `watch`, it starts a capture if none runs, and stops
 only a capture it started. It records until Ctrl-C, or for as long as `--for` says. It reads the
-pairs through Verge Aux, so it works while a debugger holds the probe.
+pairs through Verge Aux, so it works while a debugger holds the probe. As it starts, it says where
+it records and at what rate. On a terminal, a line then counts the pairs and the energy as they
+come. Its own lines go to stderr.
+
+The file's name picks the format:
+
+- `.tickwave` writes a tickwave recording, which tickwave opens.
+- `.sr` writes a sigrok session, which PulseView opens.
+- `.csv` writes CSV.
+
+A name with none of these writes a tickwave recording, or what `--csv` or `--tickwave` asks for.
+verge refuses a flag that the name contradicts, such as `--csv` with `run.sr`.
 
 `--dio` records the edges of the Pro's DIO pins too: `--dio 0,3`, `dio0` to `dio3`, or `all`.
 
 The low range lowers the target's supply by up to about 90 mV, so a target can draw a little
 differently on each range.
 
+### A tickwave recording
+
+A tickwave recording holds the voltage, the current and the power, each pair's current range and
+its under-range mark, each DIO pin recorded, and the markers. verge closes a block of the file at
+least every second, so a crash loses at most that. Once recording ends, it rewrites the file with
+full-size blocks.
+
 ### A sigrok session
 
-By default the file is a sigrok session, which PulseView opens. It has two analog channels: `V` in
-volts and `mA` in milliamps. A session file stores no units, so sigrok shows both as volts; the
-channel names give the units.
+A sigrok session has two analog channels: `V` in volts and `mA` in milliamps. A session file stores
+no units, so sigrok shows both as volts; the channel names give the units.
 
 The probe measures nothing for a moment while it reads the target's supply, or while it measures how
 quickly the target answers a debugger. There the last pair repeats and a logic channel, `GAP`, is
@@ -137,12 +156,15 @@ and a logic channel `DIO_GAP` is high.
 
 ### CSV
 
-`--csv` writes one line per pair instead: its sequence number, its time in ns since the capture
-started, millivolts, nanoamps, and the current range it was read on: `low`, `high`, or `under` for a
-pair marked under range. Then come the levels of the DIO pins recorded, and `dio_gap`. Each edge of
+CSV has one line per pair: its sequence number, its time in ns since the capture started,
+millivolts, nanoamps, and the current range it was read on: `low`, `high`, or `under` for a pair
+marked under range. Then come the levels of the DIO pins recorded, and `dio_gap`. Each edge of
 those pins is a line of its own, in time order, with its time and the levels after it. Where the
 probe lost DIO edges, `dio_gap` is 1 and the levels are empty; a line at each end of the loss marks
 where it starts and where the levels are known again.
+
+`--out - --csv` writes the CSV to stdout, for a pipe. verge's own lines go to stderr, so stdout holds
+the CSV and nothing else.
 
 ### Markers
 

@@ -19,7 +19,20 @@ Pro needs no serial. `list` and `release` show only the probe `--serial` names.
 | `--serial SERIAL` | the probe to act on, as above |
 | `-v`, `--verbose` | say more about what is happening; twice for USB-level detail |
 | `--repo OWNER/NAME` | the GitHub repository Verge releases come from; `VERGE_REPO` too. The default is `Escapement-Project/mculink-verge` |
-| `--github-token TOKEN` | a GitHub token, for a private repository; `GITHUB_TOKEN` too |
+| `--github-token TOKEN` | a GitHub token, for a private repository; `GITHUB_TOKEN` too. Public releases need none, and a token GitHub refuses stops the lookup |
+
+## Exit status
+
+| status | what it means |
+| --- | --- |
+| 0 | it worked |
+| 1 | it failed, or the answer to its question was no |
+| 2 | verge could not read the command line |
+| 3 | the probe came back in ISP mode after a flash or a reset, so it does not run an image yet; the message says what to do |
+| 130 | Ctrl-C stopped an update or a question |
+
+Ctrl-C is also how a recording, a watch or a batch ends. Ended that way, it exits with the status
+that run gives.
 
 ## Commands
 
@@ -50,11 +63,12 @@ pins go back to inputs, a Pro's target supply turns off and an energy capture en
 
 ## `dio record`
 
-```
+```text
 verge dio record --out FILE [--for DURATION] [--pins PINS]
 ```
 
-Records a standalone MCU-Link's DIO pins to a tickwave recording, which tickwave opens. Each pin
+Records a standalone MCU-Link's DIO pins to a tickwave recording, which tickwave opens. Name the
+file `.tickwave`; a `.sr` or `.csv` name is refused, since the file holds neither. Each pin
 `--pins` names is a digital channel, all four unless you name some. The probe stamps an edge as
 its interrupt takes it, a little after the edge itself, to 7 ns. There are no energy readings. A
 Pro without its energy measurement circuit records the same way. Any other Pro records its pins
@@ -69,15 +83,16 @@ full-size blocks.
 
 ## `release`
 
-```
+```text
 verge release [TAG]
 ```
 
 Shows a Verge release, the latest unless you give a tag, and how each attached probe compares to it.
+A tag works with or without its `v`.
 
 ## `inspect`
 
-```
+```text
 verge inspect FILE
 ```
 
@@ -87,9 +102,9 @@ declaration](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/READM
 
 ## `read`
 
-```
-verge read --chip CHIP [--protocol swd|jtag|cjtag] [--cjtag-format FORMAT] [--speed KHZ] [--time]
-           WIDTH ADDRESS WORDS
+```text
+verge read --chip CHIP [--protocol swd|jtag|cjtag] [--speed KHZ]
+           [--cjtag-format FORMAT] [--time] WIDTH ADDRESS WORDS
 ```
 
 Reads target memory through a probe over SWD, JTAG or cJTAG, as probe-rs's `read` does. It prints

@@ -50,8 +50,8 @@ mculink-verge's README under "Releases".
   as the `+armwire` reference build, cannot be published beside the plain build.
 - The J-Link firmware that LinkServer ships for the MCU-Link. The tool does not recognise a unit
   running it.
-- Stock V2.x, which speaks HID only. Its USB product string has not been recorded from a real
-  unit. The simulator's is a guess, and so is the version the tool reads from it.
+- NXP's firmware V2.x, which speaks HID only. Its USB product string has not been recorded from a
+  real unit. The simulator's is a guess, and so is the version the tool reads from it.
 
 ## Licence
 

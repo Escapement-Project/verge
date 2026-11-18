@@ -37,10 +37,11 @@ portal it shows night.
 Verge's mark moves in two places: once at launch in the window's top strip, and in a loop above
 "Nothing" and "Plug in an MCU-Link" while nothing is attached. `gui/src/mark.rs` only draws it:
 its timing, shape and lines are `gui/src/tokens.rs`'s `mark` module, generated from the site's
-design tokens and marks with the landing page's, so the two cannot drift apart. The window reads
-the desktop's reduced-motion setting at start and holds the mark still if the desktop asks for
-that: the XDG portal's on Linux, the animation effects setting on Windows and "Reduce motion" on
-macOS. The tests hold it still, so their pictures do not depend on when they are taken.
+design tokens and marks with the landing page's, so the two cannot drift apart. The window follows
+the desktop's reduced-motion setting while it runs: the XDG portal's on Linux, the animation
+effects setting on Windows and "Reduce motion" on macOS. While the desktop asks for reduced motion,
+the mark holds still and egui's own animations finish at once. The tests hold it still, so their
+pictures do not depend on when they are taken.
 
 ## Testing
 
@@ -48,7 +49,7 @@ macOS. The tests hold it still, so their pictures do not depend on when they are
 cargo test --workspace
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo clippy --workspace -- -D warnings
-cargo fmt --all -- --check
+cargo fmt -- --check
 ```
 
 `.github/workflows/check.yml` runs these on every push and pull request, with a check that a
@@ -68,7 +69,9 @@ The tool trusts that key in place of `RELEASE_KEY`. No secret key is stored. A s
 verifies a signature made by the minisign CLI, taken from `minisign-verify`'s documentation.
 
 Use `--simulate` to run the CLI against the same simulator. Simulated releases are not cached
-because each run generates a new signing key. Every download therefore needs confirmation:
+because each run generates a new signing key. Every download therefore needs confirmation.
+`verge read` drives real probes through probe-rs, which the simulator does not model, so it
+refuses under `--simulate`:
 
 ```
 cargo run -p escapement-verge --features simulate -- --simulate bench
@@ -82,18 +85,19 @@ The scenarios are `bench`, `ours`, `stock`, `stock-old`, `stock-hid`, `daplink-r
 `ours-pro-debugger`, `ours-pro-aux-taken`, `ours-pro-energy`, `ours-pro-energy-failed`,
 `ours-pro-and-plain`, `ours-pro-held`, `ours-pro-unfitted`, `ours-pro-unfitted-j15`, `ours-plain`,
 `ours-plain-marked`, `ours-plain-busy`, `ours-plain-edge-loss`, `pro-old`, `fails-writes`,
-`unnamed-board`, `swd-jumper`, `pro-swd-jumper` and `stock-swd-jumper`. In `arrivals`, five units
-are plugged in over the first eight seconds. In `pro`, the one unit is an MCU-Link Pro; in
-`pro-old`, a Pro on stock V3.108, which needs the jumper. In `ours-pro-energy`, a Pro running Verge
-has its target supply on and has captured for 10 s; its target sleeps at 20 µA and wakes at 5 mA for
-10 ms in every 100 ms. In `ours-pro-energy-failed`, that capture has stopped with an acquisition
-fault. In `ours-pro-debugger`, another program holds a Pro's CMSIS-DAP interface, as a debugger
-would; in `ours-pro-aux-taken`, another program holds its Verge Aux. In `fails-writes`, the
-bootloader refuses every write. In `unnamed-board`, the unit's product string names no board. In
+`unnamed-board`, `swd-jumper`, `pro-swd-jumper`, `stock-swd-jumper` and `denied`. In `arrivals`,
+five units are plugged in over the first eight seconds. In `pro`, the one unit is an MCU-Link Pro;
+in `pro-old`, a Pro on NXP's firmware V3.108, which needs the jumper. In `ours-pro-energy`, a Pro
+running Verge has its target supply on and has captured for 10 s; its target sleeps at 20 µA and
+wakes at 5 mA for 10 ms in every 100 ms. In `ours-pro-energy-failed`, that capture has stopped with
+an acquisition fault. In `ours-pro-debugger`, another program holds a Pro's CMSIS-DAP interface, as
+a debugger would; in `ours-pro-aux-taken`, another program holds its Verge Aux. In `fails-writes`,
+the bootloader refuses every write. In `unnamed-board`, the unit's product string names no board. In
 `swd-jumper` and `pro-swd-jumper`, a standalone MCU-Link and a Pro run Verge with the SWD jumper
-fitted; in `stock-swd-jumper`, a standalone MCU-Link runs stock with it. A simulated unit boots only
-the simulator's own images. A real image flashed there, such as stock from your LinkServer install,
-leaves the unit silent.
+fitted; in `stock-swd-jumper`, a standalone MCU-Link runs NXP's firmware with it. In `denied`, the
+system does not let this user open the one unit, as Linux does without the udev rules. A simulated
+unit boots only the simulator's own images. A real image flashed there, such as NXP's firmware from
+your LinkServer install, leaves the unit silent.
 
 GUI tests run headlessly through `egui_kittest` against the same simulator. A separate test
 renders each state to PNG, in the day face and the night face, and requires a GPU:

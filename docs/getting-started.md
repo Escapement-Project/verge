@@ -30,10 +30,11 @@ Each verge release has one archive per system:
 Each archive holds both programs: `verge`, and the desktop app `verge-gui` (`Verge.app` on macOS).
 Each also holds `LICENSE` and `THIRD-PARTY-LICENSES.html`, the licence of every crate inside.
 Beside each archive are a `.sha256` checksum and a minisign signature, made with the same key that
-signs the firmware. To check an archive before you unpack it:
+signs the firmware. To check an archive before you unpack it, put that public key in place of
+`KEY`:
 
 ```
-minisign -V -P <the public key> -m verge-v0.1.0-x86_64-linux.tar.gz
+minisign -V -P KEY -m verge-v0.1.0-x86_64-linux.tar.gz
 ```
 
 To build verge from source instead, see [Building](../README.md#building) in its README.
@@ -77,12 +78,12 @@ already use probe-rs, its udev rules cover the first line.
 ## See what is attached
 
 ```
-verge
+verge list
 ```
 
-On its own, `verge` lists every MCU-Link attached: its USB port and serial number, the firmware it
-runs, its board, and how verge can update it. `-v` adds what the firmware says about itself. Nothing
-changes on the probe.
+`verge list` lists every MCU-Link attached: its USB port and serial number, the firmware it runs,
+its board, and how verge can update it. `verge` on its own does the same. `-v` adds what the
+firmware says about itself. Nothing changes on the probe.
 
 ## Put Verge on the probe
 
@@ -108,7 +109,7 @@ At a terminal, verge asks which one instead.
 
 ## Check it
 
-Run `verge` again. The probe now lists as running Verge, with its build, such as `Verge, build
+Run `verge list` again. The probe now lists as running Verge, with its build, such as `Verge, build
 v0.3.0`.
 
 Any CMSIS-DAP host can use the probe. Verge keeps the USB vendor and product IDs NXP's firmware

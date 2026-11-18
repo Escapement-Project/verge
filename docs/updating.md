@@ -16,24 +16,28 @@ four ways:
 - Anything else needs the ISP jumper. Fit it before you plug the probe in: the bootloader reads the
   pin as it starts.
 
+verge does not update a probe a debugger holds. Close the debugger first: `verge list` then shows
+the probe's way to update again.
+
 daplink-rs uses Arm's DAPLink USB ID, which other DAPLink probes share. verge recognises
 daplink-rs's MCU-Link build by its USB strings and leaves every other device with that ID alone.
 
 verge does not recognise a probe running the J-Link firmware that LinkServer ships for the
 MCU-Link. A probe running NXP's V2.x firmware, which speaks HID only, verge cannot ask what it
-runs: it lists the probe as probably stock, and a batch leaves it out.
+runs: it lists the probe as probably running NXP's firmware, and a batch leaves it out.
 
 `verge` on its own lists each attached probe with the way verge would update it.
 
 ## Choosing the image
 
-```
+```text
 verge update                    # the latest Verge release
 verge update --release v0.3.0   # a release by its tag
-verge update --file IMAGE       # an ELF or S-record file, such as your own build
-verge update --stock            # NXP's firmware, from your LinkServer install
+verge update --file IMAGE       # an ELF or S-record file
+verge update --stock            # NXP's firmware, from LinkServer
 ```
 
+`--file` takes any image file, such as your own build. A release tag works with or without its `v`.
 `update` refuses a release the probe already runs, or one older than it. `--force` installs it
 anyway.
 
@@ -58,10 +62,15 @@ and local files against the probe's board. It refuses a board the image does not
 board it does not know, such as an MCU-Link MR. NXP's firmware goes on any board NXP's firmware
 supports.
 
+verge knows LinkServer's files by their names. `--file` with an `MCU-LINK_CMSIS-DAP_V*.s19` file
+installs NXP's firmware, which goes on any board, as `--stock` does. An `MCU-MINI_` file is the
+MCU-Link mini's, and verge refuses it.
+
 A probe in ISP mode cannot say which board it is. `verge isp flash` lists the image's boards when it
 asks you to confirm, but cannot check the probe against them. So `verge isp enter` sends a known
-board other than the standalone MCU-Link to ISP mode only with `--stock`, for NXP's firmware. `verge isp flash --stock` then flashes it. To put Verge on such a board, use
-`verge update --file IMAGE`, which checks the board before the probe enters ISP mode.
+board other than the standalone MCU-Link to ISP mode only with `--stock`, for NXP's firmware.
+`verge isp flash --stock` then flashes it. To put Verge on such a board, use `verge update --file
+IMAGE`, which checks the board before the probe enters ISP mode.
 
 A running probe that does not report its board needs you to confirm the board at a terminal. `--yes`
 does not skip that question.
@@ -84,7 +93,8 @@ ISP jumper either way. A batch skips probes with the SWD jumper fitted.
 
 ## When an update needs your hands
 
-For an image that does not start, the ISP jumper is the way back. Fit it before you plug the probe in, run `verge isp flash`, then take the jumper off and run `verge isp reset`.
+For an image that does not start, the ISP jumper is the way back. Fit it before you plug the probe
+in, run `verge isp flash`, then take the jumper off and run `verge isp reset`.
 
 When an update needs the ISP jumper, or stops partway, verge prints the command that finishes it.
 The command names the board, where verge knows it, and the image: a release tag, a file, or
@@ -94,23 +104,27 @@ The command names the board, where verge knows it, and the image: a release tag,
 
 `verge isp` works with the bootloader directly:
 
+```text
+verge isp enter   # send a running probe into ISP mode, no jumper
+verge isp flash   # write an image to the probe in ISP mode
+verge isp reset   # start the image the probe holds
+verge isp info    # report the bootloader's version
 ```
-verge isp enter      # send a running probe into ISP mode, without the jumper
-verge isp flash      # write an image to the probe in ISP mode
-verge isp reset      # start the image the probe holds, without writing anything
-verge isp info       # report the bootloader's version
-```
+
+`reset` and `info` write nothing.
 
 `flash` takes the same image options as `update`, `--release`, `--file` and `--stock`, and asks the
 same questions.
 
 Every LPC55S69 bootloader has the same USB identity, so verge cannot tell an MCU-Link in ISP mode
 from another LPC55S69 board. It says so before it flashes a probe that was already in ISP mode. By
-default, `flash`, `reset` and `info` need exactly one probe in ISP mode. On Linux, `--port` picks
-one of several by the USB port `verge` lists. Windows and macOS cannot pick a bootloader by its
-port, so unplug all but one there. `flash` also refuses while an MCU-Link mini is in ISP mode, even
-with `--port`. On Linux, `enter` works with another probe already in ISP mode, and names the port to
-flash. `update` and batches wait until that probe is flashed or unplugged.
+default, `flash`, `reset` and `info` need exactly one probe in ISP mode. With none, they name a
+running probe that `enter` can send there. On Linux, `--port` picks one of several by the USB port
+`verge` lists. Windows and macOS cannot pick a bootloader by its port, so unplug all but one there.
+verge does not work with the MCU-Link mini. While a mini is in ISP mode, `flash` refuses, even with
+`--port`, and `reset` and `info` refuse unless `--port` picks the other probe. On Linux, `enter`
+works with another probe already in ISP mode, and names the port to flash. `update` and batches
+wait until that probe is flashed or unplugged.
 
 Use `flash` once the probe is in ISP mode, by the jumper or by `enter`. The bootloader can take a
 few seconds to answer.
@@ -123,22 +137,32 @@ exactly one new device has to appear; if two do, verge stops with an error.
 If the probe comes back in ISP mode after a flash, something still holds its ISP pin low. Check the
 ISP jumper, and any probe attached to its debug connector: an MCU-Link's target connector carries
 ISP on pin 7, wired to the NXP board's ISP pin. Take the jumper off or disconnect the other probe,
-then run `verge isp reset`.
+then run `verge isp reset`. verge exits with status 3 here: the flash went in, but the probe does
+not run it yet.
 
-If `reset` brings a probe back to ISP mode without a flash before it, the probe may hold no image that starts.
+If `reset` brings a probe back to ISP mode without a flash before it, the probe may hold no image
+that starts. That exits with status 3 too.
 
 ### If the bootloader does not restart
 
 If the bootloader does not restart after a flash, Linux and macOS report that it never left the bus.
 The image is written and checked; unplug the probe and plug it in again to start it. Windows cannot
 tell this from a quick restart with the ISP jumper fitted: unplug the probe, take the jumper off if
-it is fitted, and plug it in again. Either way, verge does not count the probe as updated.
+it is fitted, and plug it in again. Either way, verge does not count the probe as updated, and exits
+with status 3.
 
 ### Stopping
 
-Ctrl-C stops at the next safe point. Before the probe enters its bootloader, it is left as it was.
-During the write, it is left in ISP mode: run `verge isp flash` again with the same image, as the
-recovery command says.
+Ctrl-C stops at the next safe point, and verge says what it left on the probe:
+
+- Before the probe is asked for its bootloader, nothing has changed.
+- Once the probe is in ISP mode, and before anything is written, it holds its old image. `verge isp
+  reset` starts that image, and the command verge prints installs the new one.
+- During the erase, the write or the verify, the probe is in ISP mode with an image that is partial
+  or not checked. The command verge prints flashes it again.
+- After the flash is verified, the probe is restarting into the new image, and needs nothing.
+
+A second Ctrl-C quits at once. verge exits with status 130.
 
 ## Updating many probes
 
@@ -147,7 +171,7 @@ kinds of probe once, answer one question, then plug probes in one at a time or s
 Each one that qualifies updates without another question. The question includes any release
 download.
 
-```
+```text
 # The latest release, onto NXP's firmware and older Verge builds
 verge batch
 # Only NXP's firmware older than V3.172
@@ -185,8 +209,10 @@ attached too. As with a single update, the batch waits a second before it identi
 probe. If opening it fails, the batch tries again for a few polls before it skips it.
 
 Updates run one at a time, in the order the probes arrived. The batch pauses while another device is
-in ISP mode: an MCU-Link mini, a second probe, or a probe it left out. It says why, and carries on
-once that device is unplugged.
+in ISP mode: an MCU-Link mini, a second probe, or a probe it left out. It says why on a line that
+starts `Paused.`, and prints `Resumed.` once that device is unplugged. On a terminal, the bar names
+the probe under way by its port and serial, and a line shows the batch waiting for probes, with its
+tally so far.
 
 The batch handles each probe once per connection, whatever happened: updated, failed, skipped or
 left in ISP mode. A failure does not stop it. A probe left in ISP mode pauses it until you unplug
@@ -202,12 +228,12 @@ A finished probe blinks its LEDs until you unplug it or the batch ends, and the 
 port. The last one is listed without blinking, because the batch has ended. Each probe gets a result
 line, and a tally ends the batch:
 
-```
-1-1      QK7RM2VTX8D41 -> CJ3E7A91C2  stock V3.172 -> Verge, build v0.3.0  UPDATED in 4.7 s
+```text
+1-1      QK7RM2VTX8D41 -> CJ3E7A91C2  NXP's firmware V3.172 -> Verge, build v0.3.0  UPDATED in 4.7 s
 1-1      blinking: unplug it when you like
-1-3      CJ3E7AC4F5  Verge, build v0.3.0  CURRENT
+1-3      CJ3E7AC4F5      Verge, build v0.3.0  CURRENT
 1-3      blinking: unplug it when you like
-1-4      QK7RM2VTX8D45  stock V3.108  SKIPPED: needs the ISP jumper. Stock V3.108 has no jumper-free update. NXP added it in V3.122.
+1-4      QK7RM2VTX8D45   NXP's firmware V3.108  SKIPPED: needs the ISP jumper. NXP's firmware V3.108 has no jumper-free update. NXP added it in V3.122.
 Batch done: 1 updated, 1 current, 1 skipped, 0 failed, 0 waiting.
 ```
 
@@ -220,8 +246,10 @@ identity, so unplugging and plugging back between two looks counts as one connec
 
 Ctrl-C stops taking new probes and lets the update under way finish. A second Ctrl-C stops that
 update at its next safe point; a third leaves at once. `--count N` stops after N successful updates;
-N has to be at least 1. The batch exits with an error if any probe failed. Probes still waiting when
-it stops get a record line too.
+N has to be at least 1. The batch prints its tally as it ends: `Batch done` at its count,
+`Batch stopped` after Ctrl-C. It exits with an error if any probe failed. Probes still waiting when
+it stops get a record line too. A probe the second Ctrl-C stopped gets one that says what that left
+on it, as [Stopping](#stopping) lists, with the command that flashes it again where it needs one.
 
 ### The record
 
@@ -230,8 +258,8 @@ The batch writes one JSON object per line, to the file `--record` names, or by d
 flushing the record fails, the update under way finishes, the batch stops, and the error is
 reported. A record line:
 
-```
-{"time":"2026-10-20T14:34:58Z","port":"1-1","serial_before":"QK7RM2VTX8D41","firmware_before":"stock V3.172","serial_after":"CJ3E7A91C2","firmware_after":"Verge, build v0.3.0","result":"updated","reason":null,"seconds":4.6795}
+```text
+{"time":"2026-10-20T14:34:58Z","port":"1-1","serial_before":"QK7RM2VTX8D41","firmware_before":"NXP's firmware V3.172","serial_after":"CJ3E7A91C2","firmware_after":"Verge, build v0.3.0","result":"updated","reason":null,"seconds":4.6795}
 ```
 
 `result` is one of `updated`, `jumper-fitted`, `not-restarted`, `current`, `skipped`, `failed` and
@@ -242,13 +270,14 @@ every event, so one probe can have several lines; the tally counts it once.
 
 verge takes Verge releases from `Escapement-Project/mculink-verge` on GitHub. `--repo OWNER/NAME`,
 or `VERGE_REPO`, names another repository. Public releases need no token; for a private repository,
-set `GITHUB_TOKEN`.
+set `GITHUB_TOKEN`. A token GitHub refuses stops the lookup, so unset a stale `GITHUB_TOKEN` that
+another tool left.
 
 verge allows 15 seconds to connect, 30 seconds for GitHub to answer and 60 seconds to download a
 file. A timeout says which of them ran out.
 
-verge's release key is not set yet, so verge refuses every release for now. Local files and
-NXP's firmware still install.
+verge's release key is not set yet, so verge refuses every release for now, and `verge release`
+says so. Local files and NXP's firmware still install.
 
 ### The cache
 
