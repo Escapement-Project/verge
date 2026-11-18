@@ -4,7 +4,8 @@ Verge is open CMSIS-DAP firmware for NXP's MCU-Link and MCU-Link Pro debug probe
 standalone boards. It does not run on an MCU-Link built into an evaluation board.
 
 You install it with verge, a command-line tool. verge also updates Verge, puts NXP's firmware back,
-and drives the Pro's extras. Its desktop app, verge-gui, does the same in a window.
+and drives the DIO pins of both probes. On a Pro it also switches the target supply and measures
+energy. Its desktop app, verge-gui, does the same in a window.
 
 Verge has no release yet. Until the first, there are no archives to download, and verge refuses
 every release because its release key isn't set. Build both yourself instead: verge as
@@ -109,7 +110,7 @@ At a terminal, verge asks which one instead.
 
 ## Check it
 
-Run `verge list` again. The probe now lists as running Verge, with its build, such as `Verge, build
+Run `verge list` again. The probe lists as running Verge, with its build, such as `Verge, build
 v0.3.0`.
 
 Any CMSIS-DAP host can use the probe. Verge keeps the USB vendor and product IDs NXP's firmware
@@ -132,7 +133,7 @@ directory you name instead, and `--file` takes any image file.
 ## Where next
 
 - [The verge command](command.md): every command, and the doc for each.
-- [The desktop app](desktop-app.md): updates and the Pro's bench, in a window.
+- [The desktop app](desktop-app.md): updates and the bench, in a window.
 - [Probes and
   jumpers](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/probes.md): what each
   probe has, and what each jumper turns off.

@@ -45,7 +45,7 @@ that run gives.
 | `release` | shows a Verge release, and how each attached probe compares to it | [below](#release) |
 | `inspect` | says what an image file puts into flash | [below](#inspect) |
 | `read` | reads target memory over SWD, JTAG or cJTAG | [below](#read) |
-| `dio` | drives and reads the DIO pins of an MCU-Link or MCU-Link Pro running Verge; `dio record` records a standalone MCU-Link's | [below](#dio-record), [Probes and jumpers](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/probes.md#the-mcu-links-dio-pins), [The Pro](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/pro.md#dio-pins) |
+| `dio` | drives and reads the DIO pins of an MCU-Link or MCU-Link Pro running Verge; `dio record` records a standalone MCU-Link's | [below](#dio-record), [Probes and jumpers](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/probes.md#the-standalone-mcu-links-dio-pins), [The Pro](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/pro.md#dio-pins) |
 | `restart` | restarts a probe running Verge, even one a debugger holds or whose CMSIS-DAP has stopped answering | [below](#restart) |
 | `power` | reads or switches the target supply of an MCU-Link Pro running Verge | [The Pro](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/pro.md#target-supply) |
 | `energy` | measures a target's voltage, current and energy through an MCU-Link Pro running Verge | [Energy capture](energy.md) |

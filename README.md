@@ -30,7 +30,7 @@ The CLI is `target/release/verge`; the GUI is `target/release/verge-gui`.
 On Linux, building needs the libudev headers (`libudev-dev` on Debian and Ubuntu,
 `systemd-devel` on Fedora). The HID library that talks to the bootloader uses them.
 
-### Releases of verge
+## Releases of verge
 
 `.github/workflows/release.yml` builds verge and verge-gui when a tag `v<version>` is pushed, the
 version matching the workspace version in `Cargo.toml`. It makes one archive per platform, with a
@@ -47,16 +47,16 @@ mculink-verge's README under "Releases".
 ## Not done yet
 
 - Variant releases. A release carries one image, so a firmware build with a variant suffix, such
-  as the `+armwire` reference build, cannot be published beside the plain build.
-- The J-Link firmware that LinkServer ships for the MCU-Link. The tool does not recognise a unit
+  as the `+armwire` reference build, cannot be published beside the build without one.
+- The J-Link firmware that LinkServer ships for the MCU-Link. The tool does not recognise a probe
   running it.
 - NXP's firmware V2.x, which speaks HID only. Its USB product string has not been recorded from a
-  real unit. The simulator's is a guess, and so is the version the tool reads from it.
+  real probe. The simulator's is a guess, and so is the version the tool reads from it.
 
 ## Licence
 
 Apache-2.0, in `LICENSE`. The fonts in `gui/fonts/` are under the SIL Open Font License, with
-their licence texts beside them. The GUI's Licences button displays the texts too.
+their licence texts beside them. The GUI's About window shows the texts too.
 
 Verge's icon in `gui/icons/` is one of the Escapement Project's marks, under CC BY 4.0 in
 `gui/icons/CC-BY-4.0.txt`. Credit the Escapement Project. Use the marks to refer to the project or

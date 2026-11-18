@@ -18,7 +18,7 @@ site's web fonts, these are not subset.
 
 All three families are under the SIL Open Font License 1.1, with no Reserved Font Name. Each
 family's licence text sits beside its files: `saira-OFL.txt`, `hanken-grotesk-OFL.txt` and
-`martian-mono-OFL.txt`. The window's Licences button shows them too.
+`martian-mono-OFL.txt`. verge-gui's About window shows them too.
 
 `src/tokens.rs` and the icons in `icons/` are copies from the same build. To check every copy
 against it, run this from the site repository:

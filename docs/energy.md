@@ -10,12 +10,12 @@ The probe measures the current that flows from J9 pin 1 to pin 3, whatever suppl
 voltage on the target's side. `verge power` switches the Pro's own target supply ([The
 Pro](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/pro.md#target-supply)).
 
-The probe takes voltage and current together, as a pair. A capture takes pairs at a steady rate, 1
-to 100,000 a second, and adds each pair's energy to the total. Each pair is read on one of two
-current ranges ([below](#the-two-current-ranges)).
+The probe reads voltage and current together, as one sample. A capture takes samples at a steady
+rate, 1 to 100,000 a second, and adds each sample's energy to the total. Each sample is read on one
+of two current ranges ([below](#the-two-current-ranges)).
 
 The probe's calibration is checked in both of the Pro's current settings, 350 mA and 50 mA, which
-J16 to J18 select. Alongside the calibrated voltage and current, the probe keeps each pair's
+J16 to J18 select. Alongside the calibrated voltage and current, the probe keeps each sample's
 raw ADC codes.
 
 A capture runs in the probe, not in verge. It goes on from `start` until `stop`, the next start or a
@@ -26,13 +26,13 @@ while a debugger has the probe open.
 ## Starting and stopping
 
 ```text
-verge energy start --rate 10k   # capture 10,000 pairs a second
-verge energy latest             # the newest pair
+verge energy start --rate 10k   # capture 10,000 samples a second
+verge energy latest             # the newest sample
 verge energy total              # the energy since the start
 verge energy stop               # stop it, and show the total
 ```
 
-`start` takes 25,000 pairs a second unless `--rate` says otherwise, as `10000` or `10k`. A start
+`start` takes 25,000 samples a second unless `--rate` says otherwise, as `10000` or `10k`. A start
 clears the total, and replaces a capture that runs: it says so, with that capture's total. It can
 calibrate first, which disconnects J9 from the target for about 0.2 s: a target powered through J9
 loses its supply for that time. `verge power off` says when a capture runs on without the supply,
@@ -78,8 +78,8 @@ target draws. But the high range reads small currents unreliably: under about 0.
 setting, as the Pro measured reads it, and under about 90 µA in the 50 mA setting, scaled to its
 sense resistor and not measured.
 
-Either way, a pair read on the high range under that limit is marked under range. An `auto` capture
-marks the ones it reads after the current falls, before it switches down.
+Either way, a sample read on the high range under that limit is marked under range. An `auto`
+capture marks the ones it reads after the current falls, before it switches down.
 
 Use `high` to see the shape of a load that stays above the limit. Use `auto` for a target that
 sleeps under it, which only the low range reads reliably.
@@ -93,12 +93,12 @@ if you give them `--range`.
 verge energy watch
 ```
 
-`watch` shows a capture live. The screen shows the newest pair, the total and the mean power, over
-two graphs: current and power. Its title says when the capture holds the high range, and the total's
-line counts the pairs marked under range since the watch began.
+`watch` shows a capture live. The screen shows the newest sample, the total and the mean power,
+over two graphs: current and power. Its title says when the capture holds the high range, and the
+total's line counts the samples marked under range since the watch began.
 
-The current graph shows every pair, as the lowest and highest in each column. The power graph plots
-each interval's mean from the total, which counts every pair.
+The current graph shows every sample, as the lowest and highest in each column. The power graph
+plots each interval's mean from the total, which counts every sample.
 
 `watch` starts a capture if none runs, and stops only a capture it started. Over a capture that a
 fault stopped, it shows that capture's total, then starts a new one, which clears it. Q, Esc or
@@ -112,10 +112,10 @@ terminal, it prints a line for each read instead.
 verge energy record --out run.tickwave --for 10s
 ```
 
-`record` saves every pair of a capture. Like `watch`, it starts a capture if none runs, and stops
+`record` saves every sample of a capture. Like `watch`, it starts a capture if none runs, and stops
 only a capture it started. It records until Ctrl-C, or for as long as `--for` says. It reads the
-pairs through Verge Aux, so it works while a debugger holds the probe. As it starts, it says where
-it records and at what rate. On a terminal, a line then counts the pairs and the energy as they
+samples through Verge Aux, so it works while a debugger holds the probe. As it starts, it says where
+it records and at what rate. On a terminal, a line then counts the samples and the energy as they
 come. Its own lines go to stderr.
 
 The file's name picks the format:
@@ -134,7 +134,7 @@ differently on each range.
 
 ### A tickwave recording
 
-A tickwave recording holds the voltage, the current and the power, each pair's current range and
+A tickwave recording holds the voltage, the current and the power, each sample's current range and
 its under-range mark, each DIO pin recorded, and the markers. verge closes a block of the file at
 least every second, so a crash loses at most that. Once recording ends, it rewrites the file with
 full-size blocks.
@@ -145,33 +145,33 @@ A sigrok session has two analog channels: `V` in volts and `mA` in milliamps. A 
 no units, so sigrok shows both as volts; the channel names give the units.
 
 The probe measures nothing for a moment while it reads the target's supply, or while it measures how
-quickly the target answers a debugger. There the last pair repeats and a logic channel, `GAP`, is
-high, so the time axis stays true. A pair taken as the current range switched carries the current
-the probe's total gives it, worked out from the pairs either side, so the recording adds up to the
-total. Pairs marked under range are high on a logic channel of their own, `UNDER`.
+quickly the target answers a debugger. There the last sample repeats and a logic channel, `GAP`, is
+high, so the time axis stays true. A sample taken as the current range switched carries the current
+the probe's total gives it, worked out from the samples either side, so the recording adds up to the
+total. Samples marked under range are high on a logic channel of their own, `UNDER`.
 
-A sigrok session shows each DIO pin recorded as a logic channel at the pair rate, with a pulse
-shorter than a pair stretched to one. Where the probe lost DIO edges, the pins' levels are unknown,
-and a logic channel `DIO_GAP` is high.
+A sigrok session shows each DIO pin recorded as a logic channel at the sample rate, with a pulse
+shorter than a sample stretched to one sample. Where the probe lost DIO edges, the pins' levels are
+unknown, and a logic channel `DIO_GAP` is high.
 
 ### CSV
 
-CSV has one line per pair: its sequence number, its time in ns since the capture started,
-millivolts, nanoamps, and the current range it was read on: `low`, `high`, or `under` for a pair
+CSV has one line per sample: its sequence number, its time in ns since the capture started,
+millivolts, nanoamps, and the current range it was read on: `low`, `high`, or `under` for a sample
 marked under range. Then come the levels of the DIO pins recorded, and `dio_gap`. Each edge of
 those pins is a line of its own, in time order, with its time and the levels after it. Where the
 probe lost DIO edges, `dio_gap` is 1 and the levels are empty; a line at each end of the loss marks
 where it starts and where the levels are known again.
 
-`--out - --csv` writes the CSV to stdout, for a pipe. verge's own lines go to stderr, so stdout holds
-the CSV and nothing else.
+`--out - --csv` writes the CSV to stdout, for a pipe. verge's own lines go to stderr, so stdout
+holds the CSV and nothing else.
 
 ### Markers
 
 A debug session can mark moments in a capture ([Host
 interface](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/docs/host-interface.md#markers-0x94)
 has the command). Markers keep their own times. CSV gives each marker a row of its own, with its
-number and label, in time order among the pairs and edges. A sigrok session carries them in a
+number and label, in time order among the samples and edges. A sigrok session carries them in a
 `markers.csv` inside it. That file also gives each marker's `session_time_ns`: its time from the
 session's first sample, negative for a marker before it. PulseView does not draw the markers as an
 annotation track. Resaving with sigrok drops the extra file, so keep the original session to keep
@@ -181,8 +181,8 @@ Labels keep UTF-8 text. Backslashes, control characters and other bytes are esca
 reports markers the probe lost; an empty time means the probe reported a loss without a marker to
 place it. A report without a time applies to the whole capture, including an export of part of it.
 
-CSV writes pairs and edges as they arrive. When recording ends, verge adds the markers by writing a
-new copy beside the file and swapping it in, so it needs to be able to write in the file's
+CSV writes samples and edges as they arrive. When recording ends, verge adds the markers by writing
+a new copy beside the file and swapping it in, so it needs to be able to write in the file's
 directory. A recording with no markers and no marker loss has no marker columns. CSV to a pipe or a
 terminal has none either: verge warns at the first marker and leaves the markers out.
 

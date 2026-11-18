@@ -229,7 +229,7 @@ port. The last one is listed without blinking, because the batch has ended. Each
 line, and a tally ends the batch:
 
 ```text
-1-1      QK7RM2VTX8D41 -> CJ3E7A91C2  NXP's firmware V3.172 -> Verge, build v0.3.0  UPDATED in 4.7 s
+1-1      QK7RM2VTX8D41 → CJ3E7A91C2  NXP's firmware V3.172 → Verge, build v0.3.0  UPDATED in 4.7 s
 1-1      blinking: unplug it when you like
 1-3      CJ3E7AC4F5      Verge, build v0.3.0  CURRENT
 1-3      blinking: unplug it when you like
@@ -276,8 +276,8 @@ another tool left.
 verge allows 15 seconds to connect, 30 seconds for GitHub to answer and 60 seconds to download a
 file. A timeout says which of them ran out.
 
-verge's release key is not set yet, so verge refuses every release for now, and `verge release`
-says so. Local files and NXP's firmware still install.
+verge's release key is not set, so verge refuses every release, and `verge release` says so. Local
+files and NXP's firmware still install.
 
 ### The cache
 
