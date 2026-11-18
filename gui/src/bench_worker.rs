@@ -1,9 +1,8 @@
 //! Probe controls and continuous acquisition; called only by the USB worker.
 
 use anyhow::{Context, Result, bail};
-use escapement_verge_probe::aux::Aux;
-use escapement_verge_probe::stream::{EndReason, Message};
-use escapement_verge_probe::tickwave::{Context as Recording, Recorder, Snapshots};
+use escapement_verge_probe::stream::{EndReason, EnergyStream, Message, Reader, ReaderError};
+use escapement_verge_probe::tickwave::{Recorder, Snapshots};
 use escapement_verge_probe::{
     BoardKind, Bus, CalibrationRange, CommandError, DioState, EnergyCalibration,
     EnergyCaptureSample, EnergyError, EnergyTotal, Refused, Unit, VergeControl,
@@ -174,20 +173,11 @@ enum File {
 }
 
 pub struct Session<L: escapement_verge_probe::aux::AuxLink> {
-    aux: Aux<L>,
+    /// The unit's Verge Aux, and the stream on it while a recording runs.
+    reader: Reader<L>,
     status: Status,
     file: Option<File>,
-    owned: bool,
-    capture_id: Option<escapement_verge_probe::CaptureId>,
-    stopping: Option<Instant>,
-    synced: bool,
     poll_at: Instant,
-    stream_mask: u8,
-    stream_levels: u8,
-    /// The firmware's version, which a recording names.
-    software: Option<String>,
-    /// The recording under way is of the DIO pins alone.
-    dio_only: bool,
     /// A capture started since the calibration points were read, which calibrates again.
     calibration_stale: bool,
 }
@@ -213,7 +203,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
             pro::check_offered(name, &mut VergeControl::new(&mut aux), pro::Feature::Supply)
                 .is_ok();
         let mut session = Self {
-            aux,
+            reader: Reader::new(aux),
             status: Status {
                 instance: unit.device.instance.clone(),
                 connected: true,
@@ -224,26 +214,15 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 ..Status::default()
             },
             file: None,
-            owned: false,
-            capture_id: None,
-            stopping: None,
-            synced: false,
             poll_at: Instant::now(),
-            stream_mask: 0,
-            stream_levels: 0,
-            software: unit.verge().map(|ours| ours.firmware.clone()),
-            dio_only: false,
             calibration_stale: true,
         };
         // Opening a standalone unit's Aux has checked DIO already.
         if pro_board {
-            session.status.dio_reason = pro::check_offered(
-                name,
-                &mut VergeControl::new(&mut session.aux),
-                pro::Feature::Dio,
-            )
-            .err()
-            .map(|e| DioUnavailable::Feature(e.to_string()));
+            session.status.dio_reason =
+                pro::check_offered(name, &mut session.reader.control(), pro::Feature::Dio)
+                    .err()
+                    .map(|e| DioUnavailable::Feature(e.to_string()));
         }
         session.poll()?;
         Ok(session)
@@ -274,7 +253,9 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
         Ok(closed?)
     }
     fn poll(&mut self) -> Result<()> {
-        let mut control = VergeControl::new(&mut self.aux);
+        let streaming = self.recording();
+        let counts = self.reader.counts().clone();
+        let mut control = self.reader.control();
         if self.status.target_power {
             self.status.supply = control.read_target_power()?;
         }
@@ -310,7 +291,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
             }
             // A firmware without the total, or without capture identities, leaves these unread.
             self.status.total = control.read_energy_accumulator().ok();
-            if !self.status.capturing || matches!(self.file, Some(File::Recording(_))) {
+            if !self.status.capturing || streaming {
                 self.status.running_rate = None;
             } else if self.status.running_rate.is_none() {
                 self.status.running_rate = control
@@ -322,9 +303,8 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
         }
         if self.status.dio_reason.is_none() {
             let mut state = control.access_dio(0, 0, 0)?;
-            if self.recording() {
-                state.read =
-                    (state.read & !self.stream_mask) | (self.stream_levels & self.stream_mask);
+            if streaming {
+                state.read = (state.read & !counts.pins) | (counts.levels & counts.pins);
             }
             self.status.dio = Some(state);
         }
@@ -355,7 +335,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 if let Some(reason) = &self.status.dio_reason {
                     bail!("{reason}");
                 }
-                let mut control = VergeControl::new(&mut self.aux);
+                let mut control = self.reader.control();
                 let state = control.access_dio(0, 0, 0)?;
                 if let Some(group) = state.split(change.mask, change.outputs) {
                     self.status.dio = Some(state);
@@ -386,7 +366,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                     return Ok(());
                 }
                 self.status.confirm_off = false;
-                self.status.supply = VergeControl::new(&mut self.aux).set_target_power(on)?;
+                self.status.supply = self.reader.control().set_target_power(on)?;
             }
             Command::Start { rate, ranges, path } => {
                 if self.recording() {
@@ -396,59 +376,14 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                     bail!("the last recording's file is still being written");
                 }
                 self.poll()?;
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                let recorder = Recorder::create(
-                    &path,
-                    Recording {
-                        instrument: Some("MCU-Link Pro".into()),
-                        software: self.software.clone(),
-                        started_utc: Some(
-                            humantime::format_rfc3339_millis(std::time::SystemTime::now())
-                                .to_string(),
-                        ),
-                    },
-                )?;
-                let mut control = VergeControl::new(&mut self.aux);
-                let mask = if self.status.dio_reason.is_none() {
+                let pins = if self.status.dio_reason.is_none() {
                     0x0f
                 } else {
                     0
                 };
-                let started = if self.status.capturing {
-                    control
-                        .stream_energy_capture_identified(mask)
-                        .map(|()| None)
-                } else {
-                    control.set_energy_ranges(ranges).and_then(|()| {
-                        control
-                            .start_energy_stream_identified(rate, mask)
-                            .map(|start| start.capture_id)
-                    })
-                };
-                if let Err(error) = started {
-                    // Nothing was recorded: leave no empty capture among those kept.
-                    drop(recorder);
-                    if let Err(removing) = std::fs::remove_file(&path)
-                        && removing.kind() != std::io::ErrorKind::NotFound
-                    {
-                        tracing::warn!("removing {}: {removing}", path.display());
-                    }
-                    return Err(error.into());
-                }
-                self.capture_id = started.expect("start/attach succeeded");
-                self.owned = !self.status.capturing;
-                self.calibration_stale |= self.owned;
-                self.status.snapshots = Some(recorder.snapshots());
-                self.file = Some(File::Recording(recorder));
-                self.status.path = Some(path);
-                self.status.recording = true;
-                self.synced = false;
-                self.stream_mask = 0;
-                self.status.edge_losses = 0;
-                self.status.marker_losses = 0;
-                self.status.rate = None;
+                let stream = EnergyStream::new(rate).ranges(ranges).dio(pins);
+                self.record_to(path, |reader| reader.start_energy(&stream).map(|_| ()))?;
+                self.calibration_stale |= self.reader.owns_capture();
                 self.status.capturing = true;
             }
             Command::StartDio { path } => {
@@ -461,46 +396,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 if !self.status.dio_stream {
                     bail!("this unit records its DIO pins beside its energy capture");
                 }
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                // The probe answers before the file is made, so a refused start leaves none.
-                VergeControl::new(&mut self.aux).start_dio_stream(0x0f)?;
-                let instrument = match self.status.board {
-                    Some(BoardKind::Pro) => "MCU-Link Pro",
-                    _ => "MCU-Link",
-                };
-                let recorder = match Recorder::create(
-                    &path,
-                    Recording {
-                        instrument: Some(instrument.into()),
-                        software: self.software.clone(),
-                        started_utc: Some(
-                            humantime::format_rfc3339_millis(std::time::SystemTime::now())
-                                .to_string(),
-                        ),
-                    },
-                ) {
-                    Ok(recorder) => recorder,
-                    Err(error) => {
-                        if let Err(ended) = VergeControl::new(&mut self.aux).end_dio_stream() {
-                            tracing::warn!("ending the DIO stream: {ended}");
-                        }
-                        return Err(error.into());
-                    }
-                };
-                self.dio_only = true;
-                self.owned = false;
-                self.capture_id = None;
-                self.status.snapshots = Some(recorder.snapshots());
-                self.file = Some(File::Recording(recorder));
-                self.status.path = Some(path);
-                self.status.recording = true;
-                self.synced = false;
-                self.stream_mask = 0;
-                self.status.edge_losses = 0;
-                self.status.marker_losses = 0;
-                self.status.rate = None;
+                self.record_to(path, |reader| reader.start_dio(0x0f))?;
             }
             Command::Stop => self.ask_stop()?,
             Command::CancelSupply => self.status.confirm_off = false,
@@ -508,47 +404,53 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
         }
         Ok(())
     }
+    /// Makes the recording's file at `path`, then starts the stream into it with `start`. The
+    /// probe is not touched when the file cannot be made, and a refused start removes the file.
+    fn record_to(
+        &mut self,
+        path: PathBuf,
+        start: impl FnOnce(&mut Reader<L>) -> Result<(), ReaderError>,
+    ) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        self.reader.info()?;
+        let recorder = Recorder::create(&path, self.reader.context())?;
+        if let Err(error) = start(&mut self.reader) {
+            // Nothing was recorded: leave no empty capture among those kept.
+            drop(recorder);
+            if let Err(removing) = std::fs::remove_file(&path)
+                && removing.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!("removing {}: {removing}", path.display());
+            }
+            return Err(error.into());
+        }
+        self.status.snapshots = Some(recorder.snapshots());
+        self.file = Some(File::Recording(recorder));
+        self.status.path = Some(path);
+        self.status.recording = true;
+        self.status.edge_losses = 0;
+        self.status.marker_losses = 0;
+        self.status.rate = None;
+        Ok(())
+    }
+    /// Shows the stream's levels of the pins it reports, which it has newer than a poll.
     fn update_levels(&mut self) {
+        let counts = self.reader.counts();
         if let Some(state) = &mut self.status.dio {
-            state.read = (state.read & !self.stream_mask) | (self.stream_levels & self.stream_mask);
+            state.read = (state.read & !counts.pins) | (counts.levels & counts.pins);
         }
     }
     fn ask_stop(&mut self) -> Result<()> {
-        if !self.recording() || self.stopping.is_some() {
+        if !self.recording() || self.reader.ending() {
             return Ok(());
         }
         self.tick()?;
         if !self.recording() {
             return Ok(());
         }
-        if self.dio_only {
-            VergeControl::new(&mut self.aux).end_dio_stream()?;
-            self.stopping = Some(Instant::now());
-            return Ok(());
-        }
-        let header_until = Instant::now() + Duration::from_secs(2);
-        while self.capture_id.is_none() && self.recording() && Instant::now() < header_until {
-            self.tick()?;
-        }
-        if !self.recording() {
-            return Ok(());
-        }
-        let id = self
-            .capture_id
-            .ok_or_else(|| anyhow::anyhow!("capture identity has not arrived"))?;
-        let mut control = VergeControl::new(&mut self.aux);
-        let stopped = if self.owned {
-            control.stop_energy_capture_if(id)
-        } else {
-            control.end_energy_stream_if(id)
-        };
-        match stopped {
-            Ok(()) | Err(CommandError::Firmware(EnergyError::DmaError)) => {}
-            Err(CommandError::Firmware(EnergyError::StaleCapture)) => self.owned = false,
-            Err(error) => return Err(error.into()),
-        }
-        self.stopping = Some(Instant::now());
-        Ok(())
+        Ok(self.reader.end()?)
     }
     /// Drain in short slices so controls stay responsive even at low sample rates.
     pub fn tick(&mut self) -> Result<bool> {
@@ -563,68 +465,31 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
         if let Some(recorder) = self.recorder() {
             recorder.check()?;
             for _ in 0..64 {
-                let Some(message) = self.aux.message(Duration::from_millis(5))? else {
+                let Some(message) = self.reader.read(Duration::from_millis(5))? else {
                     break;
                 };
-                if let Message::Header(header) = &message {
-                    let id = header
-                        .capture_id
-                        .ok_or_else(|| anyhow::anyhow!("stream header has no capture identity"))?;
-                    if self.capture_id.is_some_and(|expected| expected != id) {
-                        bail!("stream header names another capture");
+                match &message {
+                    Message::Header(header) => {
+                        self.status.rate = Some(header.whole_rate());
+                        changed = true;
                     }
-                    self.capture_id = Some(id);
-                    self.synced = true;
-                    self.status.rate = Some(header.whole_rate());
-                    self.stream_mask = header.dio_mask;
-                    self.stream_levels = header.dio_levels;
-                    self.update_levels();
-                    changed = true;
-                }
-                if let Message::DioHeader(header) = &message {
-                    self.synced = true;
-                    self.stream_mask = header.dio_mask;
-                    self.stream_levels = header.dio_levels;
-                    self.update_levels();
-                    changed = true;
-                }
-                if let Message::DioLost(lost) = &message {
-                    self.status.edge_losses += 1;
-                    self.stream_levels = lost.levels;
-                    self.update_levels();
-                    changed = true;
-                }
-                if let Message::Edges(edges) = &message {
-                    if let Some(edge) = edges.edges.last() {
-                        self.stream_levels = edge.levels;
+                    Message::DioHeader(_) | Message::DioLost(_) | Message::Edges(_) => {
+                        changed = true;
                     }
-                    self.update_levels();
-                    changed = true;
+                    Message::Markers(markers) => changed |= markers.lost(),
+                    _ => {}
                 }
-                if !self.synced {
-                    continue;
-                }
-                // Counted as the recording takes them in: one before the header isn't in it.
-                if let Message::Markers(markers) = &message
-                    && markers.lost()
-                {
-                    self.status.marker_losses += 1;
-                    changed = true;
-                }
+                let counts = self.reader.counts();
+                self.status.edge_losses = counts.edge_losses;
+                self.status.marker_losses = counts.marker_losses;
+                self.update_levels();
                 let end = if let Message::End(end) = &message {
                     Some(end.reason)
                 } else {
                     None
                 };
-                if end.is_some() {
-                    self.owned = false;
-                }
                 self.recorder().expect("recording").send(message)?;
                 if let Some(reason) = end {
-                    self.owned = false;
-                    self.capture_id = None;
-                    self.stopping = None;
-                    self.dio_only = false;
                     // The window opens the file once `recording` turns false, so that waits for
                     // the writer, on its own thread, while this one goes on serving the unit.
                     if let Some(File::Recording(mut recorder)) = self.file.take() {
@@ -640,12 +505,6 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                     break;
                 }
             }
-            if self
-                .stopping
-                .is_some_and(|at| at.elapsed() > Duration::from_secs(2))
-            {
-                bail!("probe did not end its stream when asked");
-            }
         }
         if Instant::now() >= self.poll_at {
             self.poll()?;
@@ -654,48 +513,8 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
         Ok(changed)
     }
     pub fn fail(&mut self, error: anyhow::Error) {
-        // A restart may already be queued behind the pair whose disk write failed.
-        let pending_attach =
-            self.recording() && !self.synced && self.capture_id.is_none() && !self.owned;
-        let drain_until = Instant::now()
-            + if pending_attach {
-                Duration::from_secs(2)
-            } else {
-                Duration::from_millis(50)
-            };
-        while Instant::now() < drain_until {
-            match self.aux.message(Duration::from_millis(1)) {
-                Ok(Some(Message::Header(header)))
-                    if self.recording()
-                        && !self.synced
-                        && self.capture_id.is_none()
-                        && !self.owned =>
-                {
-                    self.capture_id = header.capture_id;
-                }
-                Ok(Some(Message::End(_))) => {
-                    self.owned = false;
-                    break;
-                }
-                Ok(Some(_)) => {}
-                Ok(None) if pending_attach && self.capture_id.is_none() => {}
-                _ => break,
-            }
-        }
-        let owned = self.owned;
-        self.owned = false;
-        self.stopping = None;
         // The probe first: a disk that failed may also be slow to let the writer finish.
-        let mut control = VergeControl::new(&mut self.aux);
-        let dio_only = std::mem::take(&mut self.dio_only);
-        let cleanup = match self.capture_id.take() {
-            _ if dio_only && matches!(self.file, Some(File::Recording(_))) => {
-                control.end_dio_stream()
-            }
-            Some(id) if owned => control.stop_energy_capture_if(id),
-            Some(id) => control.end_energy_stream_if(id),
-            None => Ok(()),
-        };
+        let cleanup = self.reader.abandon();
         let written = self.close_file();
         self.status.connected = false;
         self.status.error = Some(format!(
@@ -768,9 +587,7 @@ mod tests {
             on: true,
             confirmed: false,
         }));
-        VergeControl::new(&mut s.aux)
-            .start_energy_capture(1000)
-            .unwrap();
+        s.reader.control().start_energy_capture(1000).unwrap();
         assert!(s.command(Command::Supply {
             on: false,
             confirmed: false,
@@ -793,7 +610,7 @@ mod tests {
             path: path.clone(),
             ranges: Default::default(),
         }));
-        assert!(!s.owned);
+        assert!(!s.reader.owns_capture());
         for _ in 0..3 {
             s.tick().unwrap();
         }
@@ -848,7 +665,7 @@ mod tests {
             path: path.clone(),
             ranges: Default::default(),
         }));
-        assert!(s.owned);
+        assert!(s.reader.owns_capture());
         for _ in 0..3 {
             s.tick().unwrap();
         }
@@ -930,13 +747,11 @@ mod tests {
         for _ in 0..2 {
             s.tick().unwrap();
         }
-        VergeControl::new(&mut s.aux)
-            .start_energy_capture(2000)
-            .unwrap();
+        s.reader.control().start_energy_capture(2000).unwrap();
         while s.status().recording {
             s.tick().unwrap();
         }
-        assert!(!s.owned);
+        assert!(!s.reader.owns_capture());
         assert!(s.status().capturing);
     }
     #[test]
@@ -972,6 +787,9 @@ mod tests {
                 }
                 Ok(message)
             }
+            fn now(&self) -> Duration {
+                self.bus.now()
+            }
         }
         for failure in [false, true] {
             let (bus, original) = session("ours-pro-energy");
@@ -979,23 +797,17 @@ mod tests {
             drop(original);
             let device = detect(&bus).unwrap().remove(0).device;
             let mut s = Session {
-                aux: Aux::open(DelayedHeader {
-                    link: bus.open_aux(&device).unwrap(),
-                    bus: bus.clone(),
-                    pending: None,
-                })
-                .unwrap(),
+                reader: Reader::new(
+                    escapement_verge_probe::aux::Aux::open(DelayedHeader {
+                        link: bus.open_aux(&device).unwrap(),
+                        bus: bus.clone(),
+                        pending: None,
+                    })
+                    .unwrap(),
+                ),
                 status,
                 file: None,
-                owned: false,
-                capture_id: None,
-                stopping: None,
-                synced: false,
                 poll_at: Instant::now(),
-                stream_mask: 0,
-                stream_levels: 0,
-                software: None,
-                dio_only: false,
                 calibration_stale: true,
             };
             let dir = tempfile::tempdir().unwrap();
@@ -1004,7 +816,7 @@ mod tests {
                 path: dir.path().join("capture.tickwave"),
                 ranges: Default::default(),
             }));
-            assert!(s.capture_id.is_none());
+            assert!(s.reader.capture_id().is_none());
             if failure {
                 s.fail(anyhow::anyhow!("disk failure"));
             } else {
@@ -1013,8 +825,7 @@ mod tests {
             let log = bus.log();
             assert!(log.iter().any(|line| line.contains("AUX 900d")), "{log:?}");
             assert!(!log.iter().any(|line| line.contains("AUX 900b")), "{log:?}");
-            let mut control = VergeControl::new(&mut s.aux);
-            assert!(control.energy_capture_status().unwrap().running);
+            assert!(s.reader.control().energy_capture_status().unwrap().running);
         }
     }
 
@@ -1027,14 +838,18 @@ mod tests {
             path: dir.path().join("capture.tickwave"),
             ranges: Default::default(),
         }));
-        assert!(s.capture_id.is_none());
+        assert!(s.reader.capture_id().is_none());
         s.fail(anyhow::anyhow!("disk failure before first tick"));
-        let mut control = VergeControl::new(&mut s.aux);
+        let mut control = s.reader.control();
         assert!(control.energy_capture_status().unwrap().running);
         // What the stream sent before the probe took the end request comes ahead of the end.
         let mut before = Vec::new();
         loop {
-            match s.aux.message(Duration::from_millis(50)).unwrap() {
+            match control
+                .transport()
+                .message(Duration::from_millis(50))
+                .unwrap()
+            {
                 Some(Message::End(_)) => break,
                 Some(
                     data @ (Message::Pairs(_)
@@ -1045,7 +860,13 @@ mod tests {
                 other => panic!("{other:?} after {before:?}"),
             }
         }
-        assert!(s.aux.message(Duration::from_millis(50)).unwrap().is_none());
+        assert!(
+            control
+                .transport()
+                .message(Duration::from_millis(50))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

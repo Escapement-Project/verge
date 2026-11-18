@@ -612,13 +612,7 @@ fn run_batch<B: Bus + Sync, H: Http + Clone + Send + 'static>(
         tracing::info!("stopped before the batch was armed");
         return Ok(Tally::default());
     };
-    let armed = Armed {
-        image: loaded.image,
-        name: loaded.name,
-        version: loaded.version,
-        source: source.clone(),
-        repo: github.repo().clone(),
-    };
+    let armed = Armed::new(loaded, source.clone(), github.repo().clone());
     armed.check(&filter).map_err(|error| arm_error(&error))?;
     // The default record directory, the user's data directory, need not exist yet.
     if let Some(dir) = record.parent().filter(|dir| !dir.as_os_str().is_empty()) {
