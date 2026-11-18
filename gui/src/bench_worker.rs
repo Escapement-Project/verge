@@ -135,6 +135,9 @@ pub struct Status {
     pub supply: bool,
     pub capturing: bool,
     pub recording: bool,
+    /// The recording's stream has ended and its file is still being written and synced, which
+    /// can take seconds on a busy disk. `recording` stays true until the file is whole.
+    pub finishing: bool,
     pub millivolts: Option<u32>,
     pub nanoamps: Option<i32>,
     pub rate: Option<u32>,
@@ -162,10 +165,18 @@ pub struct Status {
     pub snapshots: Option<Snapshots>,
 }
 
+/// A session's recording file.
+enum File {
+    /// The unit's stream goes to it.
+    Recording(Recorder),
+    /// The stream has ended, and the writer is still finishing the file on its own thread.
+    Finishing(Recorder),
+}
+
 pub struct Session<L: escapement_verge_probe::aux::AuxLink> {
     aux: Aux<L>,
     status: Status,
-    recorder: Option<Recorder>,
+    file: Option<File>,
     owned: bool,
     capture_id: Option<escapement_verge_probe::CaptureId>,
     stopping: Option<Instant>,
@@ -212,7 +223,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 dio_stream: !energy && unit.verge().is_some_and(|ours| ours.supports_dio_stream()),
                 ..Status::default()
             },
-            recorder: None,
+            file: None,
             owned: false,
             capture_id: None,
             stopping: None,
@@ -240,8 +251,27 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
     pub fn status(&self) -> Status {
         self.status.clone()
     }
+    /// The unit's stream is being read into a recording. `status.recording` stays true after it
+    /// ends, until the file is whole.
     pub fn recording(&self) -> bool {
-        self.recorder.is_some()
+        matches!(self.file, Some(File::Recording(_)))
+    }
+    fn recorder(&mut self) -> Option<&mut Recorder> {
+        match &mut self.file {
+            Some(File::Recording(recorder)) => Some(recorder),
+            _ => None,
+        }
+    }
+    /// Waits for the recording's file to be whole, and ends the recording in the status.
+    fn close_file(&mut self) -> Result<()> {
+        let closed = match self.file.take() {
+            Some(File::Recording(recorder) | File::Finishing(recorder)) => recorder.close(),
+            None => Ok(()),
+        };
+        self.status.recording = false;
+        self.status.finishing = false;
+        self.status.snapshots = None;
+        Ok(closed?)
     }
     fn poll(&mut self) -> Result<()> {
         let mut control = VergeControl::new(&mut self.aux);
@@ -280,7 +310,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
             }
             // A firmware without the total, or without capture identities, leaves these unread.
             self.status.total = control.read_energy_accumulator().ok();
-            if !self.status.capturing || self.recorder.is_some() {
+            if !self.status.capturing || matches!(self.file, Some(File::Recording(_))) {
                 self.status.running_rate = None;
             } else if self.status.running_rate.is_none() {
                 self.status.running_rate = control
@@ -292,7 +322,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
         }
         if self.status.dio_reason.is_none() {
             let mut state = control.access_dio(0, 0, 0)?;
-            if self.recorder.is_some() {
+            if self.recording() {
                 state.read =
                     (state.read & !self.stream_mask) | (self.stream_levels & self.stream_mask);
             }
@@ -362,6 +392,9 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 if self.recording() {
                     bail!("a recording is already running");
                 }
+                if self.file.is_some() {
+                    bail!("the last recording's file is still being written");
+                }
                 self.poll()?;
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
@@ -408,7 +441,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 self.owned = !self.status.capturing;
                 self.calibration_stale |= self.owned;
                 self.status.snapshots = Some(recorder.snapshots());
-                self.recorder = Some(recorder);
+                self.file = Some(File::Recording(recorder));
                 self.status.path = Some(path);
                 self.status.recording = true;
                 self.synced = false;
@@ -421,6 +454,9 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
             Command::StartDio { path } => {
                 if self.recording() {
                     bail!("a recording is already running");
+                }
+                if self.file.is_some() {
+                    bail!("the last recording's file is still being written");
                 }
                 if !self.status.dio_stream {
                     bail!("this unit records its DIO pins beside its energy capture");
@@ -457,7 +493,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 self.owned = false;
                 self.capture_id = None;
                 self.status.snapshots = Some(recorder.snapshots());
-                self.recorder = Some(recorder);
+                self.file = Some(File::Recording(recorder));
                 self.status.path = Some(path);
                 self.status.recording = true;
                 self.synced = false;
@@ -517,7 +553,14 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
     /// Drain in short slices so controls stay responsive even at low sample rates.
     pub fn tick(&mut self) -> Result<bool> {
         let mut changed = false;
-        if let Some(recorder) = self.recorder.as_mut() {
+        if let Some(File::Finishing(recorder)) = &self.file
+            && recorder.is_finished()
+        {
+            self.close_file()
+                .context("finishing the recording's file")?;
+            changed = true;
+        }
+        if let Some(recorder) = self.recorder() {
             recorder.check()?;
             for _ in 0..64 {
                 let Some(message) = self.aux.message(Duration::from_millis(5))? else {
@@ -576,15 +619,19 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 if end.is_some() {
                     self.owned = false;
                 }
-                self.recorder.as_mut().expect("recorder").send(message)?;
+                self.recorder().expect("recording").send(message)?;
                 if let Some(reason) = end {
                     self.owned = false;
                     self.capture_id = None;
                     self.stopping = None;
                     self.dio_only = false;
-                    self.status.recording = false;
-                    self.status.snapshots = None;
-                    self.recorder.take().expect("recorder").close()?;
+                    // The window opens the file once `recording` turns false, so that waits for
+                    // the writer, on its own thread, while this one goes on serving the unit.
+                    if let Some(File::Recording(mut recorder)) = self.file.take() {
+                        recorder.end();
+                        self.file = Some(File::Finishing(recorder));
+                    }
+                    self.status.finishing = true;
                     if matches!(reason, EndReason::Failed) {
                         self.status.error = Some(CAPTURE_FAILED.into());
                     }
@@ -609,7 +656,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
     pub fn fail(&mut self, error: anyhow::Error) {
         // A restart may already be queued behind the pair whose disk write failed.
         let pending_attach =
-            self.recorder.is_some() && !self.synced && self.capture_id.is_none() && !self.owned;
+            self.recording() && !self.synced && self.capture_id.is_none() && !self.owned;
         let drain_until = Instant::now()
             + if pending_attach {
                 Duration::from_secs(2)
@@ -619,7 +666,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
         while Instant::now() < drain_until {
             match self.aux.message(Duration::from_millis(1)) {
                 Ok(Some(Message::Header(header)))
-                    if self.recorder.is_some()
+                    if self.recording()
                         && !self.synced
                         && self.capture_id.is_none()
                         && !self.owned =>
@@ -638,18 +685,18 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
         let owned = self.owned;
         self.owned = false;
         self.stopping = None;
-        self.status.recording = false;
-        self.status.snapshots = None;
         // The probe first: a disk that failed may also be slow to let the writer finish.
         let mut control = VergeControl::new(&mut self.aux);
         let dio_only = std::mem::take(&mut self.dio_only);
         let cleanup = match self.capture_id.take() {
-            _ if dio_only && self.recorder.is_some() => control.end_dio_stream(),
+            _ if dio_only && matches!(self.file, Some(File::Recording(_))) => {
+                control.end_dio_stream()
+            }
             Some(id) if owned => control.stop_energy_capture_if(id),
             Some(id) => control.end_energy_stream_if(id),
             None => Ok(()),
         };
-        let written = self.recorder.take().map(Recorder::close).transpose();
+        let written = self.close_file();
         self.status.connected = false;
         self.status.error = Some(format!(
             "{error:#}{}{}",
@@ -662,15 +709,14 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
         ));
     }
     pub fn close(&mut self) -> Result<()> {
-        if self.recorder.is_none() {
-            return Ok(());
+        if self.recording() {
+            self.ask_stop()?;
+            while self.recording() {
+                self.tick().context("ending the recording")?;
+            }
         }
-        self.ask_stop()?;
-        while self.recorder.is_some() {
-            self.tick().context("ending the recording")?;
-        }
-        self.status.recording = false;
-        Ok(())
+        // Dropping the session waits for the file to be whole.
+        self.close_file().context("finishing the recording's file")
     }
 }
 
@@ -752,7 +798,7 @@ mod tests {
             s.tick().unwrap();
         }
         assert!(s.command(Command::Stop));
-        while s.recording() {
+        while s.status().recording {
             s.tick().unwrap();
         }
         assert!(s.status().capturing);
@@ -810,6 +856,68 @@ mod tests {
         assert!(!s.status().capturing);
         assert_eq!(read::header(&read::open(&path)).whole_rate(), 100_000);
     }
+    /// The stream's end leaves the session serving the unit while the writer finishes the file:
+    /// the status says so, a new recording is refused, and `recording` turns false only once the
+    /// file is whole.
+    #[test]
+    fn a_stopped_recording_is_finished_off_the_usb_thread() {
+        let (_bus, mut s) = session("ours-plain");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dio.tickwave");
+        assert!(s.command(Command::StartDio { path: path.clone() }));
+        for _ in 0..5 {
+            s.tick().unwrap();
+        }
+        assert!(s.command(Command::Stop));
+        // The tick that takes the stream's end hands the file to its writer and returns.
+        while !s.status().finishing {
+            assert!(s.status().recording, "ended without a finishing state");
+            s.tick().unwrap();
+        }
+        assert!(s.status().recording);
+        assert!(s.command(Command::StartDio {
+            path: dir.path().join("next.tickwave"),
+        }));
+        assert!(
+            s.status()
+                .error
+                .is_some_and(|e| e.contains("still being written"))
+        );
+        while s.status().recording {
+            s.tick().unwrap();
+        }
+        assert!(!s.status().finishing);
+        assert!(escapement_verge_probe::tickwave::finished(&path).unwrap());
+    }
+    /// A session closed or failed while its writer finishes the file waits for the file and
+    /// leaves nothing of the recording in the status.
+    #[test]
+    fn a_session_ended_while_its_file_finishes_waits_for_the_file() {
+        for failed in [false, true] {
+            let (_bus, mut s) = session("ours-plain");
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("dio.tickwave");
+            assert!(s.command(Command::StartDio { path: path.clone() }));
+            assert!(s.command(Command::Stop));
+            while !s.status().finishing {
+                s.tick().unwrap();
+            }
+            if failed {
+                s.fail(anyhow::anyhow!("the unit went away"));
+                assert!(
+                    s.status()
+                        .error
+                        .is_some_and(|e| e.starts_with("the unit went away"))
+                );
+            } else {
+                s.close().unwrap();
+            }
+            assert!(s.file.is_none(), "failed: {failed}");
+            let status = s.status();
+            assert!(!status.recording && !status.finishing && status.snapshots.is_none());
+            assert!(escapement_verge_probe::tickwave::finished(&path).unwrap());
+        }
+    }
     #[test]
     fn restart_ends_recording_without_stopping_replacement_capture() {
         let (_bus, mut s) = session("ours-pro");
@@ -825,7 +933,7 @@ mod tests {
         VergeControl::new(&mut s.aux)
             .start_energy_capture(2000)
             .unwrap();
-        while s.recording() {
+        while s.status().recording {
             s.tick().unwrap();
         }
         assert!(!s.owned);
@@ -878,7 +986,7 @@ mod tests {
                 })
                 .unwrap(),
                 status,
-                recorder: None,
+                file: None,
                 owned: false,
                 capture_id: None,
                 stopping: None,

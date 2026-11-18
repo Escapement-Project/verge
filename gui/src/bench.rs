@@ -259,6 +259,10 @@ impl Bench {
     pub fn recording(&self) -> bool {
         self.status.as_ref().is_some_and(|s| s.recording)
     }
+    /// The recording's stream has ended and its file is still being written.
+    pub fn finishing(&self) -> bool {
+        self.status.as_ref().is_some_and(|s| s.finishing)
+    }
     pub fn busy(&self) -> bool {
         self.recording() || self.io.is_some() || !self.compactions.is_empty()
     }
@@ -864,6 +868,10 @@ impl Bench {
         let face = style::face(ui.ctx());
         ui.add_space(space::L);
         label(ui, "Recording");
+        if status.finishing {
+            ui.label(text(Role::Body, "Finishing the file…").color(face.ink_2));
+            return;
+        }
         if status.recording {
             ui.label(text(Role::Body, "Recording the DIO pins").color(face.ink));
             if outline(ui, "Stop recording", true).clicked() {
@@ -1285,6 +1293,10 @@ impl Bench {
         let face = style::face(ui.ctx());
         ui.add_space(space::L);
         label(ui, "Acquisition");
+        if status.finishing {
+            ui.label(text(Role::Body, "Finishing the file…").color(face.ink_2));
+            return;
+        }
         if status.recording {
             ui.label(
                 match status.rate {
@@ -2928,6 +2940,59 @@ mod tests {
         settle(&mut h);
         assert_compacted(&path);
         assert_eq!(h.state().0.notice, None);
+    }
+
+    /// A recording whose stream has ended waits for its file to be written: the panel says so in
+    /// place of Stop, keeps the file's buttons off, and takes the file once it is whole.
+    #[test]
+    fn a_stopped_recording_says_its_file_is_being_finished() {
+        for energy in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("captures").join("live.tickwave");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut writer = FileWriter::create(&path, Context::default()).unwrap();
+            for message in &messages(1000, 2_000, pulses, false, &[]) {
+                writer.ingest(message).unwrap();
+            }
+            let (mut h, instance) = rig(Bench::new(dir.path()));
+            let status = |slot: Option<Snapshots>, finishing: bool| Status {
+                energy,
+                board: Some(if energy {
+                    BoardKind::Pro
+                } else {
+                    BoardKind::Plain
+                }),
+                dio_stream: !energy,
+                finishing,
+                ..recording_status(&instance, &path, slot)
+            };
+            // The recording runs, then its stream ends: the panel still has the file being written.
+            h.state_mut()
+                .0
+                .receive(status(Some(writer.snapshots()), false));
+            h.step();
+            h.state_mut()
+                .0
+                .receive(status(Some(writer.snapshots()), true));
+            h.step();
+            h.step();
+            assert!(
+                h.state().0.writing,
+                "energy {energy}: ended before the file was whole"
+            );
+            assert!(
+                h.query_by_label("Finishing the file…").is_some(),
+                "energy {energy}"
+            );
+            assert!(h.query_by_label("Stop recording").is_none());
+            assert!(h.get_by_label("Save as…").accesskit_node().is_disabled());
+            assert!(writer.close().unwrap());
+            h.state_mut().0.receive(status(None, false));
+            until(&mut h, "the compaction", |b| !b.busy());
+            settle(&mut h);
+            assert!(h.query_by_label("Finishing the file…").is_none());
+            assert!(!h.get_by_label("Save as…").accesskit_node().is_disabled());
+        }
     }
 
     #[test]

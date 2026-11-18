@@ -1401,6 +1401,8 @@ impl VergeApp {
                 Status::Attention,
                 if matches!(self.operation, Operation::Batch(_)) {
                     "The window closes when the batch's unit under way finishes. The batch takes no new units."
+                } else if self.bench.finishing() {
+                    "Closing once the file is written."
                 } else if self.bench.recording() {
                     "Closing after the recording stops."
                 } else if self.bench.dialog_open() {
