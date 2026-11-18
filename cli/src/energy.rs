@@ -11,13 +11,15 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use escapement_verge_probe::aux::Aux;
 use escapement_verge_probe::bus::BusError;
-use escapement_verge_probe::detect::{Unit, detect_named};
-use escapement_verge_probe::pro::{Feature, ProLink, check_offered};
-use escapement_verge_probe::stream::EndReason;
+use escapement_verge_probe::detect::Unit;
+use escapement_verge_probe::dio;
+use escapement_verge_probe::pro::{self, Feature, FindError, ProLink, check_offered};
+use escapement_verge_probe::record::Format;
+use escapement_verge_probe::stream::{EndReason, Reader};
 use escapement_verge_probe::{
     Bus, CalibrationRange, Cancel, CommandError, EnergyAccumulator, EnergyCalibration,
-    EnergyCaptureSample, EnergyError, EnergyRanges, EnergyTotal, VergeControl, VergeInfo,
-    VergeTransport,
+    EnergyCaptureSample, EnergyError, EnergyRanges, EnergyStop, EnergyTotal, SensePath,
+    VergeControl, VergeInfo, VergeTransport,
 };
 
 /// Pairs a second for a capture the command starts. verge-gui starts at the same rate.
@@ -181,7 +183,7 @@ pub enum EnergyCommand {
         /// or `all`. A tickwave recording gives each a digital channel with its edges' times; a
         /// sigrok session shows each as a logic channel at the pair rate, a pulse shorter than a
         /// pair stretched to one; CSV gives each edge's time.
-        #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = crate::parse_dio_pins)]
+        #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = dio::parse_pin)]
         dio: Vec<u8>,
         #[command(flatten)]
         range: RangeArg,
@@ -192,16 +194,8 @@ pub enum EnergyCommand {
 /// CMSIS-DAP.
 type Pro<'a> = VergeControl<'a, dyn ProLink + 'a>;
 
-/// A unit running Verge on a board with `feature`, whether its CMSIS-DAP is free or a debugger
-/// holds it.
-fn running_verge_with(unit: &Unit, feature: Feature) -> bool {
-    unit.verge()
-        .and_then(|ours| ours.board)
-        .is_some_and(|board| feature.on(board))
-}
-
-/// The unit `serial` names, or the one [`crate::pick_unit`] finds with `feature`, refusing anything
-/// else in a sentence that says why.
+/// The unit `serial` names, or the only one with `feature`, as [`pro::find`] picks it, refusing
+/// anything else in a sentence that says why.
 pub(crate) fn find_pro<B: Bus>(bus: &B, serial: Option<&str>, feature: Feature) -> Result<Unit> {
     let (does, needs) = match feature {
         Feature::Energy => (
@@ -230,14 +224,21 @@ pub(crate) fn find_pro_where<B: Bus>(
     does: &'static str,
     needs: &'static str,
 ) -> Result<Unit> {
-    let units = detect_named(bus, serial).context("looking for MCU-Links")?;
-    let wants = crate::Wants {
-        fits: |unit: &Unit| running_verge_with(unit, feature) && fits(unit),
-        does,
-        needs,
+    let several = match pro::find_where(bus, serial, feature, fits) {
+        Ok(unit) => return Ok(unit),
+        Err(FindError::Several { units, .. }) => units,
+        Err(FindError::NoneFits { units, .. }) => bail!(
+            "no attached unit {does}: {}. {needs}",
+            crate::clause_list(&units.iter().map(crate::described).collect::<Vec<_>>())
+        ),
+        Err(error) => return Err(error.into()),
     };
-    let unit = crate::pick_unit(&units, serial, &wants)?;
-    escapement_verge_probe::pro::validate(unit, feature)?;
+    let several: Vec<&Unit> = several.iter().collect();
+    if !crate::question::interactive() {
+        bail!("{}", crate::several(&several));
+    }
+    let unit = crate::choose(&several)?;
+    pro::validate(unit, feature)?;
     Ok(unit.clone())
 }
 
@@ -435,32 +436,14 @@ pub fn energy<B: Bus>(
             Ok(())
         }),
         EnergyCommand::Stop => with_pro(bus, serial, energy, |name, pro| {
-            // After a fault the stop still stops, and answers with the fault.
-            let state = match pro.energy_capture_status() {
-                Ok(state) => state,
+            let what = match pro.stop_running_energy_capture() {
+                Ok(EnergyStop::Stopped) => format!("{name} stopped"),
+                Ok(EnergyStop::AlreadyFailed) => format!("{name}'s capture had stopped already"),
+                Ok(_) => format!("{name} was not capturing"),
                 Err(CommandError::Unsupported(_)) => return Err(old_build(pro, name)),
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("asking {name} whether it captures"));
-                }
-            };
-            let stopped = match state.capture_id {
-                Some(id) => pro.stop_energy_capture_if(id),
-                None if !state.running => Ok(()),
-                None => bail!("{name} gave no identity for its running capture"),
-            };
-            match stopped {
-                Ok(()) | Err(CommandError::Firmware(EnergyError::DmaError)) => {}
                 Err(error) => {
                     return Err(error).with_context(|| format!("stopping {name}'s capture"));
                 }
-            }
-            let what = match (state.running, state.result) {
-                (true, _) => format!("{name} stopped"),
-                (false, Some(EnergyError::DmaError)) => {
-                    format!("{name}'s capture had stopped already")
-                }
-                (false, _) => format!("{name} was not capturing"),
             };
             if !keeps_totals(pro) {
                 outputln!("{what}.");
@@ -540,16 +523,15 @@ pub fn energy<B: Bus>(
             range,
         } => {
             let flag = match (csv, tickwave) {
-                (true, _) => Some((record::Format::Csv, "--csv")),
-                (_, true) => Some((record::Format::Tickwave, "--tickwave")),
+                (true, _) => Some((Format::Csv, "--csv")),
+                (_, true) => Some((Format::Tickwave, "--tickwave")),
                 _ => None,
             };
             let options = record::Options {
                 out: out.clone(),
                 rate: *rate,
                 limit: *limit,
-                format: record::Format::for_file(out, flag)?,
-                software: None,
+                format: record::format_for(out, flag)?,
                 dio: dio.iter().fold(0, |mask, pin| mask | pin),
                 range: range.range,
             };
@@ -578,17 +560,13 @@ fn record<B: Bus>(
         }
         Err(error) => return Err(error).with_context(|| format!("opening {name}'s Verge Aux")),
     };
-    let mut aux = Aux::open(link).with_context(|| format!("opening {name}'s Verge Aux"))?;
-    let mut pro = VergeControl::new(&mut aux);
-    check_offered(name, &mut pro, Feature::Energy)?;
-    let options = &record::Options {
-        software: unit.verge().map(|ours| ours.firmware.clone()),
-        ..options.clone()
-    };
-    let recorded = record::record(bus, name, &mut pro, options, cancel)?;
+    let aux = Aux::open(link).with_context(|| format!("opening {name}'s Verge Aux"))?;
+    let mut reader = Reader::new(aux);
+    check_offered(name, &mut reader.control(), Feature::Energy)?;
+    let recorded = record::record(bus, name, &mut reader, options, cancel)?;
     // On stderr: stdout may be the CSV itself.
     let file = record::shown(&options.out);
-    let format = match record::Format::named_by(&options.out) {
+    let format = match Format::named_by(&options.out) {
         None if !record::is_stdout(&options.out) => format!(" ({})", options.format.name()),
         _ => String::new(),
     };
@@ -604,7 +582,7 @@ fn record<B: Bus>(
     };
     say(&format!(
         "{name}: {} pairs to {file}{format}, {energy}; {why}.",
-        recorded.pairs
+        recorded.total.pairs
     ));
     if recorded.high_range_only {
         say("The capture held the high range.");
@@ -625,7 +603,7 @@ fn record<B: Bus>(
     if unreported != 0 {
         say(&format!(
             "{name} reported no edges on {}: J15 turns the DIO pins off, and SPI takes them.",
-            crate::dio_names(unreported)
+            dio::names(unreported)
         ));
     }
     if recorded.dio != 0 {
@@ -662,7 +640,7 @@ fn edge_counts(pins: u8, edges: [u64; 4]) -> String {
         sentences.push(format!("{}.", moved.join(", ")));
     }
     if still != 0 {
-        sentences.push(format!("{} did not change.", crate::dio_names(still)));
+        sentences.push(format!("{} did not change.", dio::names(still)));
     }
     sentences.join(" ")
 }
@@ -688,16 +666,9 @@ fn describe_total(name: &str, total: EnergyTotal) -> Result<String> {
     })
 }
 
-/// The firmware's range IDs, which name the current range and the jumper setting
-/// (host-interface.md, "The range is 1 for the low range in the 350 mA setting").
-pub(crate) fn range_name(id: u8) -> &'static str {
-    match id {
-        1 => "low range, 350 mA setting",
-        2 => "high range, 350 mA setting",
-        3 => "low range, 50 mA setting",
-        4 => "high range, 50 mA setting",
-        _ => "range unknown",
-    }
+/// A firmware range ID by name, as "low range, 350 mA setting".
+pub(crate) fn range_name(id: u8) -> String {
+    SensePath::from_id(id).map_or_else(|| "range unknown".to_owned(), |path| path.to_string())
 }
 
 /// `value` in `unit` with an SI prefix and three significant figures, as 20.0 µA or 1.71 mJ.

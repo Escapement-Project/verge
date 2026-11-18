@@ -2,77 +2,38 @@
 //! tickwave recording, a sigrok session or a CSV file, with the edges of the DIO pins it asks for.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::thread;
 use std::time::Duration;
 
 use crate::progress::Spinner;
 use crate::question::say;
-use anyhow::{Context, Result, anyhow, bail};
-use escapement_verge_probe::aux::{Aux, AuxLink};
-use escapement_verge_probe::record::{RecordError, Sink};
+use anyhow::{Context, Result, bail};
+use escapement_verge_probe::aux::AuxLink;
+use escapement_verge_probe::record::{Format, Writer};
 use escapement_verge_probe::stream::{
-    Converter, DioLost, Edge, EndReason, Markers, Message, Sample, Total,
+    Began, EndReason, EnergyStream, Message, Reader, ReaderError, Total,
 };
-use escapement_verge_probe::tickwave::{Context as Recording, FileWriter};
-use escapement_verge_probe::{
-    Bus, Cancel, CommandError, EnergyCaptureSample, EnergyError, VergeControl,
-};
+use escapement_verge_probe::{Bus, Cancel};
 
-/// What a recording writes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Format {
-    Tickwave,
-    Sigrok,
-    Csv,
-}
-
-impl Format {
-    pub fn name(self) -> &'static str {
-        match self {
-            Format::Tickwave => "a tickwave recording",
-            Format::Sigrok => "a sigrok session",
-            Format::Csv => "CSV",
-        }
+/// What a recording to `out` writes: what its extension names, else what `flag` asks for, else a
+/// tickwave recording. `flag` is the format option given, by its name. A flag the extension
+/// contradicts is refused, and so is anything but CSV to stdout.
+pub fn format_for(out: &Path, flag: Option<(Format, &str)>) -> Result<Format> {
+    let format = match (Format::named_by(out), flag) {
+        (Some(named), Some((asked, flag))) if named != asked => bail!(
+            "{flag} writes {}, and {} names {}: name the file .{}, or leave {flag} out",
+            asked.name(),
+            out.display(),
+            named.name(),
+            asked.extension()
+        ),
+        (Some(named), _) => named,
+        (None, Some((asked, _))) => asked,
+        (None, None) => Format::Tickwave,
+    };
+    if is_stdout(out) && format != Format::Csv {
+        bail!("--out - writes to stdout, which takes CSV only: add --csv");
     }
-
-    fn extension(self) -> &'static str {
-        match self {
-            Format::Tickwave => "tickwave",
-            Format::Sigrok => "sr",
-            Format::Csv => "csv",
-        }
-    }
-
-    /// The format `out`'s extension names, where it names one.
-    pub fn named_by(out: &Path) -> Option<Format> {
-        let extension = out.extension()?.to_str()?.to_ascii_lowercase();
-        [Format::Tickwave, Format::Sigrok, Format::Csv]
-            .into_iter()
-            .find(|format| format.extension() == extension)
-    }
-
-    /// What a recording to `out` writes: what its extension names, else what `flag` asks for,
-    /// else a tickwave recording. `flag` is the format option given, by its name. A flag the
-    /// extension contradicts is refused, and so is anything but CSV to stdout.
-    pub fn for_file(out: &Path, flag: Option<(Format, &str)>) -> Result<Format> {
-        let format = match (Format::named_by(out), flag) {
-            (Some(named), Some((asked, flag))) if named != asked => bail!(
-                "{flag} writes {}, and {} names {}: name the file .{}, or leave {flag} out",
-                asked.name(),
-                out.display(),
-                named.name(),
-                asked.extension()
-            ),
-            (Some(named), _) => named,
-            (None, Some((asked, _))) => asked,
-            (None, None) => Format::Tickwave,
-        };
-        if is_stdout(out) && format != Format::Csv {
-            bail!("--out - writes to stdout, which takes CSV only: add --csv");
-        }
-        Ok(format)
-    }
+    Ok(format)
 }
 
 /// Whether `out` names stdout.
@@ -105,21 +66,13 @@ pub struct Options {
     pub rate: u32,
     pub limit: Option<Duration>,
     pub format: Format,
-    /// The probe's firmware version, for a tickwave recording's source.
-    pub software: Option<String>,
     /// The DIO pins whose edges to record, bit `k` for DIO`k`.
     pub dio: u8,
     /// The current ranges for a capture this starts; automatic unless given.
     pub range: Option<super::Ranges>,
 }
 
-/// How long a read waits before the limit and Ctrl-C are checked again.
-const SLICE: Duration = Duration::from_millis(50);
-/// How long the end may take to come once this side asked for it.
-const END_WAIT: Duration = Duration::from_secs(2);
-
 pub struct Recorded {
-    pub pairs: u64,
     pub total: Total,
     /// Pairs the sequence skipped: messages the probe dropped because nobody read them in time.
     pub lost: u64,
@@ -135,105 +88,83 @@ pub struct Recorded {
     pub under_range: u64,
 }
 
+/// A reader's error, in the words of the other energy commands: an old build's refusal named as
+/// such, and a start whose reply was lost marked uncertain.
+pub(crate) fn reader_error<L: AuxLink>(
+    reader: &mut Reader<L>,
+    name: &str,
+    error: ReaderError,
+) -> anyhow::Error {
+    match error {
+        ReaderError::Start(error) => super::energy_error(
+            &mut reader.control(),
+            name,
+            &format!("starting {name}'s capture"),
+            error,
+        ),
+        ReaderError::Join(error) => super::energy_error(
+            &mut reader.control(),
+            name,
+            &format!("streaming {name}'s capture"),
+            error,
+        ),
+        error => anyhow::Error::new(error).context(format!("recording {name}")),
+    }
+}
+
 /// Records the capture that runs, or starts one at `options.rate`, until the limit, Ctrl-C or the
 /// capture's end. A capture this started is stopped at the end; one that ran before is left running.
 pub fn record<B: Bus, L: AuxLink>(
     bus: &B,
     name: &str,
-    pro: &mut VergeControl<'_, Aux<L>>,
+    reader: &mut Reader<L>,
     options: &Options,
     cancel: &Cancel,
 ) -> Result<Recorded> {
-    let fault = |error: &CommandError<EnergyError>| {
-        matches!(error, CommandError::Firmware(EnergyError::DmaError))
-    };
-    let running = match pro.latest_energy_sample() {
-        Err(ref error) if fault(error) => {
-            // The start below clears what the failed capture kept, so show it first.
-            let kept = pro
-                .read_energy_accumulator()
-                .with_context(|| format!("reading {name}'s total"))?;
-            say(&format!(
-                "{name}: {}. A new capture replaces it.",
-                super::describe_total(name, kept)?
-            ));
-            false
-        }
-        Ok(EnergyCaptureSample::Stopped) => false,
-        Ok(_) => true,
-        Err(error) => return Err(error).with_context(|| format!("reading {name}'s capture")),
-    };
+    let asked = EnergyStream::new(options.rate)
+        .ranges(options.range.unwrap_or_default().into())
+        .dio(options.dio);
     // The probe answers before the file is touched, so a refused start leaves an earlier
     // recording there as it was.
-    if running {
-        if options.range.is_some() {
-            tracing::warn!(
-                "{name} already runs a capture, which keeps its current ranges: --range is for a capture this starts"
-            );
-        }
-        if let Err(error) = pro.stream_energy_capture_identified(options.dio) {
-            return Err(super::energy_error(
-                pro,
-                name,
-                &format!("streaming {name}'s capture"),
-                error,
-            ));
-        }
-    } else {
-        pro.set_energy_ranges(options.range.unwrap_or_default().into())
-            .with_context(|| format!("setting {name}'s current ranges"))?;
-        if let Err(error) = pro.start_energy_stream_identified(options.rate, options.dio) {
-            return Err(super::energy_error(
-                pro,
-                name,
-                &format!("starting {name}'s capture"),
-                error,
-            ));
-        }
+    let began = reader
+        .start_energy(&asked)
+        .map_err(|error| reader_error(reader, name, error))?;
+    match began {
+        Began::Joined if options.range.is_some() => tracing::warn!(
+            "{name} already runs a capture, which keeps its current ranges: --range is for a capture this starts"
+        ),
+        // Only a capture that failed is replaced: a running one is joined.
+        Began::Started {
+            replaced: Some(total),
+            ..
+        } => say(&format!(
+            "{name}: {}. A new capture replaces it.",
+            super::describe_total(name, total)?
+        )),
+        _ => {}
     }
-    let started = !running;
-    let csv = options.format == Format::Csv;
-    let created = match options.format {
-        Format::Tickwave => {
-            let recording = Recording {
-                instrument: Some("MCU-Link Pro".into()),
-                software: options.software.clone(),
-                started_utc: Some(
-                    humantime::format_rfc3339_millis(std::time::SystemTime::now()).to_string(),
-                ),
-            };
-            FileWriter::create(&options.out, recording)
-                .map(Writer::tickwave)
-                .map_err(anyhow::Error::from)
-        }
-        // Markers are merged into a file by rewriting it, which stdout is not.
-        Format::Csv if is_stdout(&options.out) => stdout_file()
+    let created = if options.format == Format::Csv && is_stdout(&options.out) {
+        stdout_file()
             .context("opening stdout")
-            .and_then(|file| Ok(Sink::from_file(file, &options.out, true)?))
-            .map(|sink| Writer::spawn(sink, false)),
-        Format::Sigrok | Format::Csv => Sink::create(&options.out, csv)
-            .map(|sink| Writer::spawn(sink, true))
-            .map_err(anyhow::Error::from),
+            .and_then(|file| Ok(Writer::csv(file, &options.out)?))
+    } else {
+        Writer::create(&options.out, options.format, reader.context()).map_err(Into::into)
     };
-    let writer = match created {
+    let mut writer = match created {
         Ok(writer) => writer,
         Err(error) => {
-            leave(name, pro, started);
+            leave(name, reader);
             return Err(error);
         }
     };
-    let streamed = stream(bus, name, pro, &writer, started, options, cancel);
+    let streamed = stream(bus, name, reader, &mut writer, options, cancel);
     let written = writer.finish();
     // A reader that closes the pipe early ends a recording to stdout, as it ends any other output.
     if is_stdout(&options.out)
         && let Err(error) = &written
-        && error.chain().any(|cause| {
-            cause
-                .downcast_ref::<RecordError>()
-                .is_some_and(RecordError::is_broken_pipe)
-        })
+        && error.is_broken_pipe()
     {
-        leave(name, pro, started);
+        leave(name, reader);
         let closed = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
         return Err(crate::output::Error::from(closed).into());
     }
@@ -242,7 +173,7 @@ pub fn record<B: Bus, L: AuxLink>(
         (Ok(recorded), Ok(())) => Ok(recorded),
         // The writer's own error says why the stream could not hand it pairs.
         (_, Err(error)) | (Err(error), Ok(())) => {
-            leave(name, pro, started);
+            leave(name, reader);
             Err(error)
         }
     }
@@ -250,24 +181,10 @@ pub fn record<B: Bus, L: AuxLink>(
 
 /// Leaves the probe as a recording found it: a capture the recording started stops, and the
 /// stream of a capture that ran before ends.
-fn leave<L: AuxLink>(name: &str, pro: &mut VergeControl<'_, Aux<L>>, started: bool) {
-    if !started && let Err(error) = super::bind_attached_capture(pro) {
-        tracing::warn!("could not identify {name}'s attached stream: {error}");
-        return;
+fn leave<L: AuxLink>(name: &str, reader: &mut Reader<L>) {
+    if let Err(error) = reader.abandon() {
+        tracing::warn!("could not leave {name} as it was: {error}");
     }
-    let left = if started {
-        pro.stop_tracked_energy_capture()
-    } else {
-        pro.end_tracked_energy_stream()
-    };
-    if let Err(left) = left {
-        tracing::warn!("could not leave {name} as it was: {left}");
-    }
-}
-
-/// Pairs between the one expected next and `first`, as the sequence counts them.
-fn skipped(next: u32, first: u32) -> u64 {
-    u64::try_from(first.wrapping_sub(next).cast_signed()).unwrap_or(0)
 }
 
 /// What a recording says as it starts, once the probe has said its rate.
@@ -289,773 +206,72 @@ pub(crate) fn starting(name: &str, out: &Path, rate: u32, limit: Option<Duration
 fn stream<B: Bus, L: AuxLink>(
     bus: &B,
     name: &str,
-    pro: &mut VergeControl<'_, Aux<L>>,
-    writer: &Writer,
-    started: bool,
+    reader: &mut Reader<L>,
+    writer: &mut Writer,
     options: &Options,
     cancel: &Cancel,
 ) -> Result<Recorded> {
-    let limit = options.limit;
-    let began = bus.now();
-    let deadline = limit.map(|limit| began + limit);
+    let deadline = options.limit.map(|limit| bus.now() + limit);
     let mut spinner: Option<Spinner> = None;
-    let mut converter: Option<Converter> = None;
-    let mut next_sequence = None;
-    let mut lost = 0u64;
-    let mut asked_at = None;
-    // A pairs message's samples wait for the next one: every edge up to them has come by then.
-    let mut held: Vec<Sample> = Vec::new();
-    let (mut dio, mut edges, mut edges_lost) = (0u8, [0u64; 4], 0u64);
-    // The levels the last edge or loss report left, to tell which pin each edge moved.
-    let mut levels = 0u8;
-    let (mut high_range_only, mut under_range) = (false, 0u64);
-    let mut count = |samples: Vec<Sample>| {
-        under_range += samples.iter().filter(|s| s.under_range).count() as u64;
-        samples
-    };
-    loop {
-        if converter.is_none() && bus.now().saturating_sub(began) >= END_WAIT {
-            bail!("{name} did not provide its capture header");
-        }
-        if asked_at.is_none()
-            && converter.is_some()
-            && (cancel.is_cancelled() || deadline.is_some_and(|deadline| bus.now() >= deadline))
-        {
-            if started {
-                pro.stop_tracked_energy_capture()
-                    .with_context(|| format!("stopping {name}'s capture"))?;
-            } else {
-                pro.end_tracked_energy_stream()
-                    .with_context(|| format!("ending {name}'s stream"))?;
-            }
-            asked_at = Some(bus.now());
-        }
-        let message = pro
-            .transport()
-            .message(SLICE)
-            .with_context(|| format!("reading {name}'s stream"))?;
-        let Some(message) = message else {
-            if asked_at.is_some_and(|asked| bus.now().saturating_sub(asked) > END_WAIT) {
-                bail!("{name} did not end the stream when asked");
-            }
-            continue;
-        };
-        writer.message(&message)?;
-        match message {
-            Message::DioHeader(_) => bail!("{name} began a DIO stream, which has no energy"),
-            // Only a DIO stream's: one this stream replaced.
-            Message::DioTime(_) => {}
+    let mut messages =
+        reader.messages(|| cancel.is_cancelled() || deadline.is_some_and(|at| bus.now() >= at));
+    while let Some(message) = messages.next() {
+        let message = message
+            .map_err(|error| anyhow::Error::new(error).context(format!("recording {name}")))?;
+        match &message {
             Message::Header(header) => {
-                if converter.is_some() {
-                    bail!("{name} began a second stream before ending the first");
-                }
-                pro.accept_energy_header(&header)?;
-                say(&starting(name, &options.out, header.whole_rate(), limit));
+                say(&starting(
+                    name,
+                    &options.out,
+                    header.whole_rate(),
+                    options.limit,
+                ));
                 spinner = Some(Spinner::new("recording"));
-                writer.send(Output::Begin {
-                    rate: header.whole_rate(),
-                    pins: header.dio_mask,
-                    levels: header.dio_levels,
-                })?;
-                dio = header.dio_mask;
-                levels = header.dio_levels;
-                high_range_only = header.high_range_only;
-                next_sequence = Some(header.first_sequence);
-                converter = Some(Converter::new(&header));
             }
-            // Pairs and an end before the header are a stream this one replaced.
-            Message::Pairs(pairs) => {
-                let Some(converter) = converter.as_mut() else {
-                    continue;
-                };
-                if let Some(next) = next_sequence {
-                    let missing = skipped(next, pairs.first_sequence);
-                    lost += missing;
-                    if missing > 0
-                        && let Some(pair) = pairs.pairs.first()
-                    {
-                        converter.discontinuity(pair.low);
-                    }
-                }
-                next_sequence = Some(pairs.first_sequence.wrapping_add(pairs.pairs.len() as u32));
-                converter.add_message(&pairs);
+            Message::Pairs(_) => {
                 if let Some(spinner) = &spinner {
-                    let total = converter.total();
+                    let total = messages.reader().counts().total;
                     spinner.set(&format!(
                         "recording  {} pairs  {}",
                         total.pairs,
                         super::si(total.nanojoules() as f64 * 1e-9, "J")
                     ));
                 }
-                writer.send(Output::Pairs(std::mem::replace(
-                    &mut held,
-                    count(converter.take_samples()),
-                )))?;
             }
-            Message::End(end) => {
-                let Some(mut converter) = converter else {
-                    continue;
-                };
-                // The probe keeps room for the end when it drops pairs, so pairs lost just before
-                // it show only in its last sequence.
-                if let Some(next) = next_sequence {
-                    lost += skipped(next, end.last_sequence.wrapping_add(1));
-                }
-                converter.end();
-                held.extend(count(converter.take_samples()));
-                writer.send(Output::Pairs(held))?;
-                let total = converter.total();
-                return Ok(Recorded {
-                    pairs: total.pairs,
-                    total,
-                    lost,
-                    reason: end.reason,
-                    dio,
-                    edges,
-                    edges_lost,
-                    high_range_only,
-                    under_range,
-                });
-            }
-            Message::Edges(message) => {
-                if converter.is_none() {
-                    continue;
-                }
-                for edge in &message.edges {
-                    let moved = (levels ^ edge.levels) & dio;
-                    for (pin, count) in edges.iter_mut().enumerate() {
-                        *count += u64::from(moved >> pin & 1);
-                    }
-                    levels = edge.levels;
-                }
-                writer.send(Output::Edges(message.edges))?;
-            }
-            Message::DioLost(lost) => {
-                if converter.is_none() {
-                    continue;
-                }
-                edges_lost += 1;
-                levels = lost.levels;
-                writer.send(Output::DioLost(lost))?;
-            }
-            Message::Markers(markers) => {
-                if converter.is_some() {
-                    writer.send(Output::Markers(markers))?;
-                }
-            }
+            _ => {}
         }
+        writer.send(message)?;
     }
-}
-
-/// What the read loop hands the writer. Every edge up to a batch of pairs comes before it.
-pub(crate) enum Output {
-    Begin { rate: u32, pins: u8, levels: u8 },
-    Pairs(Vec<Sample>),
-    Edges(Vec<Edge>),
-    DioLost(DioLost),
-    Markers(Markers),
-}
-
-/// The file, written on a thread of its own. Writing a sigrok chunk takes long enough that the
-/// probe's 16 messages would fill meanwhile and pairs be lost.
-pub(crate) enum Writer {
-    Sink {
-        send: mpsc::Sender<Output>,
-        thread: thread::JoinHandle<Result<()>>,
-    },
-    /// A tickwave recording takes the stream's messages as they come.
-    Tickwave {
-        send: mpsc::Sender<Message>,
-        thread: thread::JoinHandle<Result<()>>,
-    },
-}
-
-/// How long the tickwave writer waits for a message before its clock runs: it closes a block at
-/// least every second.
-const TICK: Duration = Duration::from_millis(200);
-
-impl Writer {
-    pub(crate) fn tickwave(mut file: FileWriter) -> Writer {
-        let (send, receive) = mpsc::channel::<Message>();
-        let thread = thread::spawn(move || {
-            loop {
-                match receive.recv_timeout(TICK) {
-                    Ok(message) => {
-                        file.ingest(&message)?;
-                    }
-                    Err(RecvTimeoutError::Timeout) => file.flush()?,
-                    Err(RecvTimeoutError::Disconnected) => break,
-                }
-            }
-            Ok(file.finish()?)
-        });
-        Writer::Tickwave { send, thread }
-    }
-
-    /// `markers` says whether the file can take markers: stdout cannot.
-    fn spawn(mut sink: Sink, markers: bool) -> Writer {
-        let (send, receive) = mpsc::channel();
-        let thread = thread::spawn(move || {
-            let mut dropped_markers = false;
-            for output in receive {
-                match output {
-                    Output::Begin { rate, pins, levels } => {
-                        if markers {
-                            sink.include_markers()?;
-                        }
-                        sink.begin_with_dio_gaps(rate, pins, levels)?;
-                    }
-                    Output::Pairs(samples) => sink.samples(&samples)?,
-                    Output::Edges(edges) => sink.edges(edges),
-                    Output::DioLost(lost) => sink.dio_lost(&lost),
-                    Output::Markers(markers) => {
-                        if !sink.markers(&markers)? && !dropped_markers {
-                            dropped_markers = true;
-                            tracing::warn!(
-                                "markers are not recorded: the output is not a regular file"
-                            );
-                        }
-                    }
-                }
-            }
-            Ok(sink.finish()?)
-        });
-        Writer::Sink { send, thread }
-    }
-
-    /// A sigrok session's or CSV file's next piece. Fails once the writer has stopped on an
-    /// error, which [`Writer::finish`] returns.
-    fn send(&self, output: Output) -> Result<()> {
-        match self {
-            Writer::Sink { send, .. } => send
-                .send(output)
-                .map_err(|_| anyhow!("the file stopped taking pairs")),
-            Writer::Tickwave { .. } => Ok(()),
-        }
-    }
-
-    /// A stream message, for a tickwave recording.
-    pub(crate) fn message(&self, message: &Message) -> Result<()> {
-        match self {
-            Writer::Tickwave { send, .. } => send
-                .send(message.clone())
-                .map_err(|_| anyhow!("the file stopped taking the stream")),
-            Writer::Sink { .. } => Ok(()),
-        }
-    }
-
-    /// Waits for everything sent to be written, and the file finished.
-    pub(crate) fn finish(self) -> Result<()> {
-        let thread = match self {
-            Writer::Sink { send, thread } => {
-                drop(send);
-                thread
-            }
-            Writer::Tickwave { send, thread } => {
-                drop(send);
-                thread
-            }
-        };
-        thread
-            .join()
-            .map_err(|_| anyhow!("the file's writer panicked"))?
-    }
+    drop(spinner);
+    let counts = reader.counts();
+    let end = counts
+        .end
+        .with_context(|| format!("{name}'s stream stopped before its end"))?;
+    Ok(Recorded {
+        total: counts.total,
+        lost: counts.lost,
+        reason: end.reason,
+        dio: counts.pins,
+        edges: counts.edges,
+        edges_lost: counts.edge_losses,
+        high_range_only: reader.header().is_some_and(|header| header.high_range_only),
+        under_range: counts.under_range,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use escapement_verge_probe::record::samplerate;
-    use std::fs::File;
-    use std::io::Read;
-    use std::path::Path;
-    const CHUNK: usize = 1 << 20;
-
     use super::*;
-
-    fn sample(sequence: u32, time_ms: u64, millivolts: u32, nanoamps: u32) -> Sample {
-        Sample {
-            sequence,
-            time_ns: time_ms * 1_000_000,
-            millivolts,
-            nanoamps,
-            range: escapement_verge_probe::stream::CurrentRange::Low,
-            under_range: false,
-        }
-    }
-
-    fn read(zip: &mut zip::ZipArchive<File>, name: &str) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        zip.by_name(name).unwrap().read_to_end(&mut bytes).unwrap();
-        bytes
-    }
-
-    fn floats(bytes: &[u8]) -> Vec<f32> {
-        bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|b| f32::from_le_bytes(*b))
-            .collect()
-    }
-
-    /// A pause between pairs 3 and 4 repeats pair 3 across it with GAP high, so the time axis
-    /// stays true.
-    #[test]
-    fn a_gap_repeats_the_last_pair_with_gap_high() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("gap.sr");
-        let mut sink = Sink::create(&path, false).unwrap();
-        sink.begin(1000, 0, 0).unwrap();
-        sink.samples(&[
-            sample(1, 0, 3300, 20_000),
-            sample(2, 1, 3300, 5_000_000),
-            sample(3, 2, 3290, 1_000),
-            sample(4, 5, 3280, 2_000),
-            sample(5, 6, 3280, 3_000),
-        ])
-        .unwrap();
-        sink.finish().unwrap();
-
-        let mut zip = zip::ZipArchive::new(File::open(&path).unwrap()).unwrap();
-        assert_eq!(read(&mut zip, "version"), b"2");
-        assert_eq!(read(&mut zip, "logic-1-1"), [0, 0, 0, 1, 1, 0, 0]);
-        assert_eq!(
-            floats(&read(&mut zip, "analog-1-3-1")),
-            [3.3, 3.3, 3.29, 3.29, 3.29, 3.28, 3.28]
-        );
-        assert_eq!(
-            floats(&read(&mut zip, "analog-1-4-1")),
-            [0.02, 5.0, 0.001, 0.001, 0.001, 0.002, 0.003]
-        );
-        let metadata = String::from_utf8(read(&mut zip, "metadata")).unwrap();
-        assert!(metadata.contains("samplerate=1 kHz\n"), "{metadata}");
-    }
-
-    /// A pair read under the high range's floor is high on UNDER, the last logic channel; CSV
-    /// names its range `under`.
-    #[test]
-    fn a_pair_under_the_high_range_is_marked() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut samples = [sample(1, 0, 3300, 20_000), sample(2, 1, 3300, 5_000_000)];
-        for s in &mut samples {
-            s.range = escapement_verge_probe::stream::CurrentRange::High;
-        }
-        samples[0].under_range = true;
-        let path = dir.path().join("under.sr");
-        let mut sink = Sink::create(&path, false).unwrap();
-        sink.begin(1000, 0, 0).unwrap();
-        sink.samples(&samples).unwrap();
-        sink.finish().unwrap();
-        let mut zip = zip::ZipArchive::new(File::open(&path).unwrap()).unwrap();
-        assert_eq!(read(&mut zip, "logic-1-1"), [2, 0]);
-        let metadata = String::from_utf8(read(&mut zip, "metadata")).unwrap();
-        assert!(metadata.contains("probe2=UNDER\n"), "{metadata}");
-        let path = dir.path().join("under.csv");
-        let mut sink = Sink::create(&path, true).unwrap();
-        sink.begin(1000, 0, 0).unwrap();
-        sink.samples(&samples).unwrap();
-        sink.finish().unwrap();
-        let csv = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            csv.contains("1,0,3300,20000,under\n") && csv.contains("2,1000000,3300,5000000,high\n"),
-            "{csv}"
-        );
-    }
-
-    fn edge(time_ns: u64, levels: u8) -> Edge {
-        Edge { time_ns, levels }
-    }
-
-    /// Each pin reported is a logic channel after GAP, its level at each sample, the analog
-    /// channels numbered on after them. A pulse between two samples shows in the second; a gap's
-    /// repeated samples take the levels at their own times.
-    #[test]
-    fn dio_pins_are_logic_channels_at_each_sample() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dio.sr");
-        let mut sink = Sink::create(&path, false).unwrap();
-        sink.begin(1000, 0x09, 0x0F).unwrap();
-        sink.edges(vec![
-            // DIO0 falls just after the sample at 1 ms.
-            edge(1_000_100, 0x08),
-            // DIO3 pulses low and back between 2 and 3 ms, so reads low at 3.
-            edge(2_000_300, 0x00),
-            edge(2_000_400, 0x08),
-            // DIO0 rises in the gap, at 3.5 ms.
-            edge(3_500_000, 0x09),
-        ]);
-        sink.samples(&[
-            sample(1, 0, 3300, 1),
-            sample(2, 1, 3300, 1),
-            sample(3, 2, 3300, 1),
-            sample(4, 3, 3300, 1),
-            sample(5, 6, 3300, 1),
-        ])
-        .unwrap();
-        sink.finish().unwrap();
-
-        let mut zip = zip::ZipArchive::new(File::open(&path).unwrap()).unwrap();
-        // Bit 0 GAP, bit 1 DIO0, bit 2 DIO3, bit 3 UNDER.
-        assert_eq!(read(&mut zip, "logic-1-1"), [6, 6, 4, 0, 7, 7, 6]);
-        assert_eq!(floats(&read(&mut zip, "analog-1-5-1")).len(), 7);
-        assert_eq!(floats(&read(&mut zip, "analog-1-6-1")).len(), 7);
-        let metadata = String::from_utf8(read(&mut zip, "metadata")).unwrap();
-        assert!(
-            metadata.contains(
-                "total probes=4\nsamplerate=1 kHz\ntotal analog=2\nprobe1=GAP\nprobe2=DIO0\n\
-                 probe3=DIO3\nprobe4=UNDER\nanalog5=V\nanalog6=mA\nunitsize=1\n"
-            ),
-            "{metadata}"
-        );
-    }
-
-    /// CSV puts each edge on a line of its own, among the pairs by time, and each pair's levels
-    /// after it; edges after the last pair come last.
-    #[test]
-    fn csv_lines_up_edges_and_pairs_by_time() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dio.csv");
-        let mut sink = Sink::create(&path, true).unwrap();
-        sink.begin(1000, 0x0A, 0x02).unwrap();
-        sink.edges(vec![edge(1_000_000, 0x0A), edge(1_500_000, 0x08)]);
-        sink.samples(&[sample(1, 0, 3300, 7), sample(2, 1, 3300, 8)])
-            .unwrap();
-        sink.edges(vec![edge(2_200_000, 0x00)]);
-        sink.samples(&[sample(3, 2, 3300, 9)]).unwrap();
-        sink.finish().unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "sequence,time_ns,millivolts,nanoamps,range,dio1,dio3\n\
-             1,0,3300,7,low,1,0\n\
-             ,1000000,,,,1,1\n\
-             2,1000000,3300,8,low,1,1\n\
-             ,1500000,,,,0,1\n\
-             3,2000000,3300,9,low,0,1\n\
-             ,2200000,,,,0,0\n"
-        );
-    }
-
-    /// Past a chunk's worth, the samples go on in the next chunk file of each channel.
-    #[test]
-    fn a_long_recording_is_written_in_chunks() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("long.sr");
-        let mut sink = Sink::create(&path, false).unwrap();
-        sink.begin(100_000, 0, 0).unwrap();
-        let samples: Vec<Sample> = (0..CHUNK as u32 + 3)
-            .map(|n| Sample {
-                sequence: n,
-                time_ns: u64::from(n) * 10_000,
-                millivolts: 1800,
-                nanoamps: n,
-                range: escapement_verge_probe::stream::CurrentRange::High,
-                under_range: false,
-            })
-            .collect();
-        sink.samples(&samples).unwrap();
-        sink.finish().unwrap();
-
-        let mut zip = zip::ZipArchive::new(File::open(&path).unwrap()).unwrap();
-        assert_eq!(read(&mut zip, "logic-1-1").len(), CHUNK);
-        assert_eq!(read(&mut zip, "logic-1-2").len(), 3);
-        assert_eq!(
-            floats(&read(&mut zip, "analog-1-4-2")),
-            [
-                CHUNK as f32 / 1e6,
-                (CHUNK + 1) as f32 / 1e6,
-                (CHUNK + 2) as f32 / 1e6
-            ]
-        );
-        assert!(zip.by_name("logic-1-3").is_err());
-    }
-
-    /// Plays back stream messages, as a probe whose stream ends by itself would send them. `None`
-    /// is a read that times out, as the ones that end the drains on opening. Writes go nowhere.
-    struct Playback(std::collections::VecDeque<Option<Vec<u8>>>);
-
-    impl AuxLink for Playback {
-        fn write(&mut self, request: &[u8]) -> Result<(), escapement_verge_probe::dap::LinkError> {
-            if request == [0x82] {
-                let mut info = b"\x82CJTAG\x06\x00\x00\x01".to_vec();
-                info.extend_from_slice(&0u32.to_le_bytes());
-                info.extend_from_slice(&257u32.to_le_bytes());
-                self.0.push_front(Some(info));
-            } else if request == [0x90, 10, 0] {
-                self.0.push_front(Some(vec![0x90, 0, 0]));
-            }
-            Ok(())
-        }
-
-        fn read(&mut self, _: Duration) -> Result<Vec<u8>, escapement_verge_probe::dap::LinkError> {
-            self.0
-                .pop_front()
-                .flatten()
-                .ok_or(escapement_verge_probe::dap::LinkError::Timeout)
-        }
-    }
-
-    fn playback_control(aux: &mut Aux<Playback>) -> VergeControl<'_, Aux<Playback>> {
-        let mut control = VergeControl::new(aux);
-        control.stream_energy_capture_identified(0).unwrap();
-        control
-    }
-
-    fn header() -> Vec<u8> {
-        // Format 4: the clock and the period of 1,000 pairs a second.
-        let mut header = vec![0xA1, 4];
-        header.extend_from_slice(&96_000_000u32.to_le_bytes());
-        header.extend_from_slice(&96_000u32.to_le_bytes());
-        header.push(1);
-        header.extend_from_slice(&3300u16.to_le_bytes());
-        header.extend_from_slice(&1u32.to_le_bytes());
-        header.push(1);
-        // Both ranges: two points, then two empty slots.
-        let mut table = vec![2];
-        for (code, nanoamps) in [(0u16, 0u32), (60_000, 60_000), (0, 0), (0, 0)] {
-            table.extend_from_slice(&code.to_le_bytes());
-            table.extend_from_slice(&nanoamps.to_le_bytes());
-        }
-        header.extend_from_slice(&table);
-        header.extend_from_slice(&table);
-        header.extend_from_slice(&[0; 4]);
-        header.extend_from_slice(&[0; 16]);
-        header.extend_from_slice(&1u64.to_le_bytes());
-        // Step 5's fields, zero.
-        header.extend_from_slice(&[0; 7]);
-        header
-    }
-
-    fn pairs(first_sequence: u32, count: u16) -> Vec<u8> {
-        let mut message = vec![0xA0, 0];
-        message.extend_from_slice(&first_sequence.to_le_bytes());
-        message.extend_from_slice(&(u64::from(first_sequence - 1) * 1_000_000).to_le_bytes());
-        message.extend_from_slice(&count.to_le_bytes());
-        for _ in 0..count {
-            message.extend_from_slice(&[0x00, 0x80, 0x10, 0x00, 1]);
-        }
-        message
-    }
-
-    /// Pairs the sequence skips are counted as lost, and the file still gets the rest. What comes
-    /// before the header belongs to a stream this one replaced.
-    #[test]
-    fn a_skipped_sequence_counts_as_lost() {
-        let mut end = vec![0xA2, 2];
-        end.extend_from_slice(&7u32.to_le_bytes());
-        let mut replaced = vec![0xA2, 1];
-        replaced.extend_from_slice(&40u32.to_le_bytes());
-        // Opening drains until a read times out, asks for mode 7, then drains again.
-        let messages = [
-            None,
-            Some(vec![0x90, 0, 0]),
-            None,
-            Some(pairs(30, 2)),
-            Some(replaced),
-            Some(header()),
-            Some(pairs(1, 3)),
-            Some(pairs(6, 2)),
-            Some(end),
-        ];
-        let mut aux = Aux::open(Playback(messages.into_iter().collect())).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("lost.csv");
-        let writer = Writer::spawn(Sink::create(&path, true).unwrap(), true);
-        let bus = escapement_verge_probe::sim::SimBus::default();
-        let recorded = stream(
-            &bus,
-            "the unit",
-            &mut playback_control(&mut aux),
-            &writer,
-            false,
-            &unlimited(),
-            &Cancel::new(),
-        )
-        .unwrap();
-        writer.finish().unwrap();
-        assert_eq!((recorded.pairs, recorded.lost), (5, 2));
-        assert_eq!(recorded.reason, EndReason::Stopped);
-        let sequences: Vec<String> = std::fs::read_to_string(&path)
-            .unwrap()
-            .lines()
-            .skip(1)
-            .map(|line| line.split(',').next().unwrap().to_owned())
-            .collect();
-        assert_eq!(sequences, ["1", "2", "3", "6", "7"]);
-    }
-
-    #[test]
-    fn late_stream_markers_are_exported_in_time_order() {
-        let mut marker = vec![0xa4, 1, 1];
-        marker.extend_from_slice(&500_000u64.to_le_bytes());
-        marker.extend_from_slice(&42u32.to_le_bytes());
-        marker.push(8);
-        marker.extend_from_slice(b"step,one");
-        let mut end = vec![0xa2, 2];
-        end.extend_from_slice(&6u32.to_le_bytes());
-        let messages = [
-            None,
-            Some(vec![0x90, 0, 0]),
-            None,
-            Some(header()),
-            Some(pairs(1, 3)),
-            Some(pairs(4, 3)),
-            Some(marker),
-            Some(end),
-        ];
-        let mut aux = Aux::open(Playback(messages.into_iter().collect())).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("markers.csv");
-        let writer = Writer::spawn(Sink::create(&path, true).unwrap(), true);
-        stream(
-            &escapement_verge_probe::sim::SimBus::default(),
-            "unit",
-            &mut playback_control(&mut aux),
-            &writer,
-            false,
-            &unlimited(),
-            &Cancel::new(),
-        )
-        .unwrap();
-        writer.finish().unwrap();
-        let csv = std::fs::read_to_string(path).unwrap();
-        assert!(csv.contains("marker_number,marker_label,marker_lost"));
-        assert!(csv.contains(",500000,,,,42,\"step,one\",1"), "{csv}");
-        let times: Vec<u64> = csv
-            .lines()
-            .skip(1)
-            .map(|row| row.split(',').nth(1).unwrap().parse().unwrap())
-            .collect();
-        assert!(times.windows(2).all(|pair| pair[0] <= pair[1]), "{csv}");
-    }
-
-    fn header_with_dio(pins: u8, levels: u8) -> Vec<u8> {
-        let mut header = header();
-        header[68] = pins;
-        header[69] = levels;
-        header[70] = 11;
-        header
-    }
-
-    fn edges(edges: &[(u64, u8)]) -> Vec<u8> {
-        escapement_verge_probe::stream::Edges::new(
-            0,
-            edges
-                .iter()
-                .map(|&(time_ns, levels)| edge(time_ns, levels))
-                .collect(),
-        )
-        .to_bytes()
-    }
-
-    /// A pairs message's samples wait for the next message, so an edge inside them that comes
-    /// after them still lands among them; edges count, and so do messages that lost some.
-    #[test]
-    fn edges_after_their_pairs_land_among_them() {
-        let mut end = vec![0xA2, 2];
-        end.extend_from_slice(&5u32.to_le_bytes());
-        let messages = [
-            None,
-            Some(vec![0x90, 0, 0]),
-            None,
-            Some(header_with_dio(0x01, 0x00)),
-            Some(pairs(1, 3)),
-            Some(edges(&[(1_500_000, 0x01)])),
-            Some(pairs(4, 2)),
-            // Edges lost after 3.1 ms, the levels known again at 3.2 ms.
-            Some(
-                escapement_verge_probe::stream::DioLost {
-                    from_ns: 3_100_000,
-                    to_ns: 3_200_000,
-                    levels: 0x00,
-                }
-                .to_bytes(),
-            ),
-            Some(edges(&[(4_000_000, 0x01)])),
-            Some(end),
-        ];
-        let mut aux = Aux::open(Playback(messages.into_iter().collect())).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("held.csv");
-        let writer = Writer::spawn(Sink::create(&path, true).unwrap(), true);
-        let recorded = stream(
-            &escapement_verge_probe::sim::SimBus::default(),
-            "the unit",
-            &mut playback_control(&mut aux),
-            &writer,
-            false,
-            &unlimited(),
-            &Cancel::new(),
-        )
-        .unwrap();
-        writer.finish().unwrap();
-        assert_eq!(
-            (recorded.dio, recorded.edges, recorded.edges_lost),
-            (0x01, [2, 0, 0, 0], 1)
-        );
-        let lines: Vec<String> = std::fs::read_to_string(&path)
-            .unwrap()
-            .lines()
-            .map(|line| {
-                let fields: Vec<&str> = line.split(',').collect();
-                format!("{}@{}={}/{}", fields[0], fields[1], fields[5], fields[6])
-            })
-            .collect();
-        assert_eq!(
-            lines,
-            [
-                "sequence@time_ns=dio0/dio_gap",
-                "1@0=0/0",
-                "2@1000000=0/0",
-                "@1500000=1/0",
-                "3@2000000=1/0",
-                "4@3000000=1/0",
-                "@3100000=/1",
-                "@3200000=0/0",
-                "@4000000=1/0",
-                "5@4000000=1/0",
-            ]
-        );
-    }
-
-    /// The probe keeps room for the end when it drops pairs, so its last sequence counts pairs
-    /// lost just before it.
-    #[test]
-    fn pairs_lost_before_the_end_are_counted() {
-        let mut end = vec![0xA2, 2];
-        end.extend_from_slice(&10u32.to_le_bytes());
-        let messages = [
-            None,
-            Some(vec![0x90, 0, 0]),
-            None,
-            Some(header()),
-            Some(pairs(1, 3)),
-            Some(end),
-        ];
-        let mut aux = Aux::open(Playback(messages.into_iter().collect())).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let writer = Writer::spawn(
-            Sink::create(&dir.path().join("tail.csv"), true).unwrap(),
-            true,
-        );
-        let recorded = stream(
-            &escapement_verge_probe::sim::SimBus::default(),
-            "the unit",
-            &mut playback_control(&mut aux),
-            &writer,
-            false,
-            &unlimited(),
-            &Cancel::new(),
-        )
-        .unwrap();
-        writer.finish().unwrap();
-        assert_eq!((recorded.pairs, recorded.lost), (3, 7));
-    }
+    use escapement_verge_probe::aux::Aux;
+    use escapement_verge_probe::dap::LinkError;
+    use escapement_verge_probe::sim::{SimAux, SimBus};
+    use escapement_verge_probe::{EnergyCaptureSample, UsbDevice};
 
     /// A probe that turns the start down, as one whose calibration failed would.
-    struct RefuseStart(escapement_verge_probe::sim::SimAux);
+    struct RefuseStart(SimAux);
 
     impl AuxLink for RefuseStart {
-        fn write(&mut self, request: &[u8]) -> Result<(), escapement_verge_probe::dap::LinkError> {
+        fn write(&mut self, request: &[u8]) -> Result<(), LinkError> {
             let mut request = request.to_vec();
             if request.starts_with(&[0x90, 9]) {
                 request[2..6].fill(0);
@@ -1063,32 +279,22 @@ mod tests {
             self.0.write(&request)
         }
 
-        fn read(
-            &mut self,
-            timeout: Duration,
-        ) -> Result<Vec<u8>, escapement_verge_probe::dap::LinkError> {
+        fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, LinkError> {
             self.0.read(timeout)
+        }
+
+        fn now(&self) -> Duration {
+            self.0.now()
         }
     }
 
-    fn pro_link() -> (
-        escapement_verge_probe::sim::SimBus,
-        escapement_verge_probe::UsbDevice,
-    ) {
-        let bus = escapement_verge_probe::sim::SimBus::scenario("ours-pro").unwrap();
+    fn unit(scenario: &str) -> (SimBus, UsbDevice) {
+        let bus = SimBus::scenario(scenario).unwrap();
         let device = escapement_verge_probe::detect(&bus)
             .unwrap()
             .remove(0)
             .device;
         (bus, device)
-    }
-
-    /// Options for a stream read with no limit, into a file the test makes itself.
-    fn unlimited() -> Options {
-        Options {
-            limit: None,
-            ..options(Path::new("unused.csv"), true)
-        }
     }
 
     fn options(out: &Path, csv: bool) -> Options {
@@ -1097,84 +303,35 @@ mod tests {
             rate: 1000,
             limit: Some(Duration::from_millis(300)),
             format: if csv { Format::Csv } else { Format::Sigrok },
-            software: None,
             dio: 0,
             range: Default::default(),
         }
     }
 
-    #[test]
-    fn missing_header_times_out_even_while_pairs_keep_arriving() {
-        struct Headerless {
-            inner: escapement_verge_probe::sim::SimAux,
-            bus: escapement_verge_probe::sim::SimBus,
-        }
-        impl AuxLink for Headerless {
-            fn write(
-                &mut self,
-                request: &[u8],
-            ) -> Result<(), escapement_verge_probe::dap::LinkError> {
-                self.inner.write(request)
-            }
-            fn read(
-                &mut self,
-                timeout: Duration,
-            ) -> Result<Vec<u8>, escapement_verge_probe::dap::LinkError> {
-                self.bus.sleep(Duration::from_millis(100));
-                let message = self.inner.read(timeout)?;
-                Ok(if message.first() == Some(&0xa1) {
-                    pairs(1, 1)
-                } else {
-                    message
-                })
-            }
-        }
-        let (bus, device) = pro_link();
-        let mut aux = Aux::open(Headerless {
-            inner: bus.open_aux(&device).unwrap(),
-            bus: bus.clone(),
-        })
-        .unwrap();
-        let opened = bus.now();
-        let mut pro = VergeControl::new(&mut aux);
-        let dir = tempfile::tempdir().unwrap();
-        let result = record(
-            &bus,
-            "unit",
-            &mut pro,
-            &Options {
-                limit: Some(Duration::ZERO),
-                ..options(&dir.path().join("headerless.csv"), true)
-            },
-            &Cancel::new(),
-        )
-        .err()
-        .unwrap();
-        assert!(result.to_string().contains("capture header"), "{result:#}");
-        assert!(bus.now() - opened < Duration::from_secs(4));
-        assert!(bus.log().iter().any(|line| line.contains("AUX 900b")));
+    fn aux_log(bus: &SimBus) -> Vec<String> {
+        bus.log()
+            .into_iter()
+            .filter_map(|line| line.split_once("AUX ").map(|(_, hex)| hex.to_owned()))
+            .collect()
     }
 
+    /// A recording of a capture that ran before it ends only its own stream, whether it ran its
+    /// course or its file could not be made.
     #[test]
     fn zero_duration_and_file_failure_end_an_attached_stream() {
         for file_failure in [false, true] {
-            let bus = escapement_verge_probe::sim::SimBus::scenario("ours-pro-energy").unwrap();
-            let device = escapement_verge_probe::detect(&bus)
-                .unwrap()
-                .remove(0)
-                .device;
+            let (bus, device) = unit("ours-pro-energy");
             let dir = tempfile::tempdir().unwrap();
             let out = if file_failure {
                 dir.path().to_owned()
             } else {
                 dir.path().join("empty.csv")
             };
-            let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
-            let mut pro = VergeControl::new(&mut aux);
+            let mut reader = Reader::new(Aux::open(bus.open_aux(&device).unwrap()).unwrap());
             let result = record(
                 &bus,
                 "unit",
-                &mut pro,
+                &mut reader,
                 &Options {
                     limit: Some(Duration::ZERO),
                     ..options(&out, true)
@@ -1183,67 +340,31 @@ mod tests {
             );
             assert_eq!(result.is_err(), file_failure);
             assert!(matches!(
-                pro.latest_energy_sample().unwrap(),
+                reader.control().latest_energy_sample().unwrap(),
                 EnergyCaptureSample::Sample(_)
             ));
-            let log = bus.log();
-            assert!(log.iter().any(|line| line.contains("AUX 900d")), "{log:?}");
+            let log = aux_log(&bus);
+            assert!(log.iter().any(|hex| hex.starts_with("900d")), "{log:?}");
             assert!(
                 !log.iter()
-                    .any(|line| line.contains("AUX 900b") || line.ends_with("AUX 9002")),
+                    .any(|hex| hex.starts_with("900b") || hex == "9002"),
                 "{log:?}"
             );
         }
     }
 
     #[test]
-    fn a_tickwave_recording_holds_every_pair_and_its_header() {
-        use escapement_verge_probe::tickwave::format::decode::Footer;
-        use escapement_verge_probe::tickwave::format::header::ChannelKind;
-        let (bus, device) = pro_link();
-        let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("run.tickwave");
-        let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
-        let mut pro = VergeControl::new(&mut aux);
-        let options = Options {
-            format: Format::Tickwave,
-            software: Some("test".into()),
-            dio: 0b0101,
-            ..options(&out, false)
-        };
-        let recorded = record(&bus, "the unit", &mut pro, &options, &Cancel::new()).unwrap();
-        assert!(recorded.pairs > 100, "{}", recorded.pairs);
-        let file = std::fs::read(&out).unwrap();
-        let header = Footer::parse_file(&file).unwrap().header;
-        let ChannelKind::Analog { count, .. } = header.channels[0].data else {
-            panic!("V is analog");
-        };
-        assert_eq!(count, recorded.pairs);
-        let names: Vec<&str> = header.channels.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(
-            names,
-            ["V", "I", "low_range", "under_range", "DIO0", "DIO2"]
-        );
-        let source = &header.sources[0];
-        assert_eq!(source.software.as_deref(), Some("test"));
-        assert!(escapement_verge_probe::tickwave::header_from(&source.extra).is_some());
-        assert_eq!(source.extra["end_reason"], "stopped");
-        // Compacted in place: nothing left beside it.
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
-    }
-
-    #[test]
     fn a_refused_start_leaves_an_earlier_recording_alone() {
-        let (bus, device) = pro_link();
+        let (bus, device) = unit("ours-pro");
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("run.sr");
         std::fs::write(&out, b"an earlier recording").unwrap();
-        let mut aux = Aux::open(RefuseStart(bus.open_aux(&device).unwrap())).unwrap();
-        let mut pro = VergeControl::new(&mut aux);
+        let mut reader =
+            Reader::new(Aux::open(RefuseStart(bus.open_aux(&device).unwrap())).unwrap());
         let refused = record(
             &bus,
             "the unit",
-            &mut pro,
+            &mut reader,
             &options(&out, false),
             &Cancel::new(),
         );
@@ -1256,22 +377,17 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_full_disk_ends_the_recording_and_its_capture() {
-        let (bus, device) = pro_link();
-        let mut aux = Aux::open(bus.open_aux(&device).unwrap()).unwrap();
-        let mut pro = VergeControl::new(&mut aux);
+        let (bus, device) = unit("ours-pro");
+        let mut reader = Reader::new(Aux::open(bus.open_aux(&device).unwrap()).unwrap());
         let options = Options {
             limit: Some(Duration::from_secs(2)),
             ..options(Path::new("/dev/full"), true)
         };
-        let error = record(&bus, "the unit", &mut pro, &options, &Cancel::new())
+        let error = record(&bus, "the unit", &mut reader, &options, &Cancel::new())
             .err()
             .expect("the disk is full");
         assert!(format!("{error:#}").contains("No space left"), "{error:#}");
-        let log: Vec<String> = bus
-            .log()
-            .into_iter()
-            .filter_map(|line| line.split_once("AUX ").map(|(_, hex)| hex.to_owned()))
-            .collect();
+        let log = aux_log(&bus);
         assert!(
             log.last()
                 .is_some_and(|hex| hex.starts_with("900b") && hex.len() == 52),
@@ -1279,11 +395,33 @@ mod tests {
         );
     }
 
+    /// A recording names what it records in each pair: their count, the range held, and the pins.
     #[test]
-    fn rates_read_as_libsigrok_writes_them() {
-        assert_eq!(samplerate(1), "1 Hz");
-        assert_eq!(samplerate(1000), "1 kHz");
-        assert_eq!(samplerate(1500), "1500 Hz");
-        assert_eq!(samplerate(100_000), "100 kHz");
+    fn a_recording_counts_what_it_wrote() {
+        let (bus, device) = unit("ours-pro");
+        let dir = tempfile::tempdir().unwrap();
+        let mut reader = Reader::new(Aux::open(bus.open_aux(&device).unwrap()).unwrap());
+        let recorded = record(
+            &bus,
+            "the unit",
+            &mut reader,
+            &Options {
+                dio: 0b0101,
+                range: Some(super::super::Ranges::High),
+                ..options(&dir.path().join("run.csv"), true)
+            },
+            &Cancel::new(),
+        )
+        .unwrap();
+        assert!(recorded.total.pairs > 100, "{}", recorded.total.pairs);
+        assert_eq!(recorded.reason, EndReason::Stopped);
+        assert!(recorded.high_range_only);
+        assert_eq!(recorded.dio, 0b0101);
+        let lines = std::fs::read_to_string(dir.path().join("run.csv"))
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with(','))
+            .count();
+        assert_eq!(lines as u64, recorded.total.pairs + 1);
     }
 }

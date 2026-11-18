@@ -19,7 +19,8 @@ use escapement_verge_probe::batch::{
 };
 use escapement_verge_probe::board;
 use escapement_verge_probe::cache::Cache;
-use escapement_verge_probe::detect::{Guess, Hardware, State, detect_named};
+use escapement_verge_probe::detect::{Guess, Hardware, PickError, State, detect_named};
+use escapement_verge_probe::dio::{self, DioChange, DioError};
 use escapement_verge_probe::ids::Role;
 use escapement_verge_probe::image::{Image, PAGE};
 use escapement_verge_probe::paths::{ISP_IDENTITY_WARNING, USB_PERMISSIONS};
@@ -237,43 +238,14 @@ enum DioAction {
 #[derive(Args)]
 struct DioArgs {
     /// Drive these pins high: 0 to 3, as `--high 0,1,2`, or `dio0` to `dio3`, or `all`.
-    #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = parse_dio_pins)]
+    #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = dio::parse_pin)]
     high: Vec<u8>,
     /// Drive these pins low.
-    #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = parse_dio_pins)]
+    #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = dio::parse_pin)]
     low: Vec<u8>,
     /// Make these pins inputs.
-    #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = parse_dio_pins)]
+    #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = dio::parse_pin)]
     input: Vec<u8>,
-}
-
-/// A DIO pin as a mask: `2`, `dio2` in any case, or `all`.
-fn parse_dio_pins(text: &str) -> Result<u8, String> {
-    if text.is_empty() {
-        return Err("an empty pin name: name pins as 0 to 3, dio0 to dio3, or all".into());
-    }
-    if text.eq_ignore_ascii_case("all") {
-        return Ok(0x0F);
-    }
-    let digits = text
-        .get(..3)
-        .filter(|prefix| prefix.eq_ignore_ascii_case("dio"))
-        .map_or(text, |_| &text[3..]);
-    match digits.parse::<u8>() {
-        Ok(n) if n < 4 && digits.bytes().all(|b| b.is_ascii_digit()) => Ok(1 << n),
-        _ => Err(format!(
-            "{text} is not a DIO pin: name one as 0 to 3, dio0 to dio3, or all"
-        )),
-    }
-}
-
-/// DIO pins by name, as `DIO0, DIO1`.
-fn dio_names(mask: u8) -> String {
-    (0..8)
-        .filter(|n| mask >> n & 1 != 0)
-        .map(|n| format!("DIO{n}"))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 #[derive(Subcommand)]
@@ -698,22 +670,28 @@ fn pick_unit<'a>(
     serial: Option<&str>,
     wants: &Wants<impl Fn(&Unit) -> bool>,
 ) -> Result<&'a Unit> {
-    if serial.is_some() {
-        return Ok(update::select(units, serial)?);
-    }
-    let fitting: Vec<&Unit> = units.iter().filter(|unit| (wants.fits)(unit)).collect();
-    match (fitting.as_slice(), units) {
-        ([only], _) => Ok(only),
-        ([_, _, ..], _) if interactive() => choose(&fitting),
-        ([_, _, ..], _) => bail!("{}", several(&fitting)),
-        ([], []) => bail!("no MCU-Link is attached"),
-        ([], [only]) => Ok(only),
-        ([], _) => bail!(
+    let listed = |listed: &[Unit]| -> Vec<&'a Unit> {
+        units
+            .iter()
+            .filter(|unit| {
+                listed
+                    .iter()
+                    .any(|l| l.device.instance == unit.device.instance)
+            })
+            .collect()
+    };
+    match detect::pick(units, serial, &wants.fits) {
+        Ok(unit) => Ok(unit),
+        Err(PickError::NoneFits(_)) if units.len() == 1 => Ok(&units[0]),
+        Err(PickError::Several(several)) if interactive() => choose(&listed(&several)),
+        Err(PickError::Several(several)) => bail!("{}", self::several(&listed(&several))),
+        Err(PickError::NoneFits(units)) => bail!(
             "no attached unit {}: {}. {}",
             wants.does,
             clause_list(&units.iter().map(described).collect::<Vec<_>>()),
             wants.needs
         ),
+        Err(error) => Err(anyhow::anyhow!("{error}")),
     }
 }
 
@@ -1465,12 +1443,7 @@ fn batch<B: Bus + Sync, H: Http>(
     lead.push("The batch flashes each unit it takes without asking again.".to_owned());
     let question = |what: &str| format!("{what} onto {}?", filter.describe());
     let mut asked = false;
-    let Loaded {
-        image,
-        name,
-        version,
-        ..
-    } = load(&args.source, github, None, true, |what| {
+    let loaded = load(&args.source, github, None, true, |what| {
         asked = true;
         confirm(
             &lead,
@@ -1482,13 +1455,7 @@ fn batch<B: Bus + Sync, H: Http>(
         outputln!("Stopped before the batch was armed. Nothing was flashed.");
         return Ok(());
     }
-    let armed = Armed {
-        image,
-        name,
-        version,
-        source: core_source,
-        repo: github.repo().clone(),
-    };
+    let armed = Armed::new(loaded, core_source, github.repo().clone());
     armed.check(&filter).map_err(|error| arm_refusal(&error))?;
     let Armed { image, name, .. } = &armed;
     log_image(image);
@@ -1581,9 +1548,10 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
         (low, input, "--low and --input"),
     ] {
         if a & b != 0 {
-            bail!("{} named in both {names}", dio_names(a & b));
+            bail!("{} named in both {names}", dio::names(a & b));
         }
     }
+    let change = DioChange::default().high(high).low(low).input(input);
     energy::with_pro(bus, serial, Feature::Dio, |serial, pro| {
         let pro_board = pro
             .info()
@@ -1591,49 +1559,35 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
             .flatten()
             .and_then(|info| info.board)
             .is_none_or(|board| board == BoardKind::Pro);
-        let before = pro
-            .access_dio(0, 0, 0)
-            .with_context(|| format!("reading {serial}'s DIO pins"))?;
-        if before.pins == 0 && pro_board {
-            bail!(
+        let after = match pro.change_dio(&change) {
+            Ok(after) => after,
+            Err(DioError::Off) => bail!(
                 "{serial} started with its USB-SIO jumper, J15, fitted, which turns the DIO pins off. Remove the jumper and replug the unit"
-            );
-        }
-        let mask = high | low | input;
-        // On the standalone MCU-Link, a pin left out is one a bench tool's command marker holds.
-        let held = if before.pins == 0 {
-            0x0F
-        } else {
-            mask & !before.pins
-        };
-        if held != 0 {
-            bail!(
+            ),
+            Err(DioError::Held(held)) => bail!(
                 "a bench tool has given {serial}'s {} to its command marker. Run `verge restart` to give {} back",
-                if held == 0x0F {
+                if held == dio::ALL {
                     "J8 pins".into()
                 } else {
-                    dio_names(held)
+                    dio::names(held)
                 },
                 if held.count_ones() == 1 { "it" } else { "them" }
-            );
-        }
-        let after = if mask == 0 {
-            before
-        } else {
-            if let Some(group) = before.split(mask, high | low) {
+            ),
+            Err(DioError::Split(group)) => bail!(
+                "{} change direction together, so make them all outputs or all inputs",
+                dio::names(group)
+            ),
+            Err(DioError::Command(CommandError::Firmware(_))) => {
                 bail!(
-                    "{} change direction together, so make them all outputs or all inputs",
-                    dio_names(group)
-                );
+                    "{serial} refused the change to {}",
+                    dio::names(change.pins())
+                )
             }
-            match pro.access_dio(mask, high | low, high) {
-                Ok(after) => after,
-                Err(CommandError::Firmware(_)) => {
-                    bail!("{serial} refused the change to {}", dio_names(mask))
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| format!("setting {serial}'s DIO pins"));
-                }
+            Err(error) if change.pins() == 0 => {
+                return Err(error).with_context(|| format!("reading {serial}'s DIO pins"));
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("setting {serial}'s DIO pins"));
             }
         };
         let header = if pro_board {
@@ -1657,11 +1611,11 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
                 outputln!("  DIO{n}  input   reads {}", level(after.read & bit != 0));
             }
         }
-        let held = if pro_board { 0 } else { 0x0F & !after.pins };
+        let held = if pro_board { 0 } else { dio::ALL & !after.pins };
         if held != 0 {
             outputln!(
                 "A bench tool's command marker holds {} until the unit restarts.",
-                dio_names(held)
+                dio::names(held)
             );
         }
         let groups: Vec<String> = after
@@ -1669,7 +1623,7 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
             .iter()
             .map(|&g| g & after.pins)
             .filter(|&g| g != 0)
-            .map(dio_names)
+            .map(dio::names)
             .collect();
         outputln!("Direction groups: {}.", groups.join("; "));
         Ok(())

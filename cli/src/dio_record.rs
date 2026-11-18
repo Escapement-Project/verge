@@ -6,16 +6,17 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::energy::record::{Format, Writer};
+use crate::energy::record::is_stdout;
 use crate::progress::Spinner;
 use crate::question::say;
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use escapement_verge_probe::aux::{Aux, AuxLink};
+use escapement_verge_probe::aux::AuxLink;
+use escapement_verge_probe::dio;
 use escapement_verge_probe::pro::{self, Feature};
-use escapement_verge_probe::stream::{EndReason, Message};
-use escapement_verge_probe::tickwave::{Context as Recording, FileWriter};
-use escapement_verge_probe::{BoardKind, Bus, Cancel, VergeControl};
+use escapement_verge_probe::record::{Format, Writer};
+use escapement_verge_probe::stream::{EndReason, Message, Reader};
+use escapement_verge_probe::{BoardKind, Bus, Cancel};
 
 #[derive(Args)]
 pub struct RecordArgs {
@@ -26,14 +27,9 @@ pub struct RecordArgs {
     #[arg(long = "for", value_name = "DURATION", value_parser = humantime::parse_duration)]
     limit: Option<Duration>,
     /// The pins to record: 0 to 3, as `--pins 0,3`, or `dio0` to `dio3`, or `all`, the default.
-    #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = crate::parse_dio_pins)]
+    #[arg(long, value_name = "PINS", value_delimiter = ',', value_parser = dio::parse_pin)]
     pins: Vec<u8>,
 }
-
-/// How long a read waits before the limit and Ctrl-C are checked again.
-const SLICE: Duration = Duration::from_millis(50);
-/// How long the header, and the end once asked for, may take to come.
-const WAIT: Duration = Duration::from_secs(2);
 
 pub fn record<B: Bus>(
     bus: &B,
@@ -43,7 +39,7 @@ pub fn record<B: Bus>(
 ) -> Result<()> {
     // Before any unit is touched. It writes only tickwave, which a name may not contradict.
     match Format::named_by(&args.out) {
-        Some(Format::Tickwave) | None if !crate::energy::record::is_stdout(&args.out) => {}
+        Some(Format::Tickwave) | None if !is_stdout(&args.out) => {}
         Some(named) => bail!(
             "{} names {}, and `dio record` writes a tickwave recording: name it .tickwave",
             args.out.display(),
@@ -63,9 +59,9 @@ pub fn record<B: Bus>(
         "`verge dio record` needs a standalone MCU-Link, or a Pro without its energy circuit, running Verge.",
     )?;
     let name = unit.serial().unwrap_or("the unit");
-    let mut aux = pro::open_aux(bus, &unit, Feature::Dio)?;
-    let mut probe = VergeControl::new(&mut aux);
-    let info = probe
+    let mut reader = Reader::new(pro::open_aux(bus, &unit, Feature::Dio)?);
+    let info = reader
+        .control()
         .info()
         .with_context(|| format!("asking {name} what it runs"))?
         .with_context(|| format!("{name} no longer answers as Verge"))?
@@ -87,40 +83,33 @@ pub fn record<B: Bus>(
     };
     // The probe answers before the file is touched, so a refused start leaves an earlier recording
     // there as it was.
-    probe
-        .start_dio_stream(asked)
+    reader
+        .start_dio(asked)
         .with_context(|| format!("starting {name}'s DIO stream"))?;
-    let instrument = match info.board {
-        Some(BoardKind::Pro) => "MCU-Link Pro",
-        _ => "MCU-Link",
-    };
-    let recording = Recording {
-        instrument: Some(instrument.into()),
-        software: Some(info.firmware.clone()),
-        started_utc: Some(
-            humantime::format_rfc3339_millis(std::time::SystemTime::now()).to_string(),
-        ),
-    };
-    let writer = match FileWriter::create(&args.out, recording) {
-        Ok(file) => Writer::tickwave(file),
+    let mut writer = match Writer::create(&args.out, Format::Tickwave, reader.context()) {
+        Ok(writer) => writer,
         Err(error) => {
-            if let Err(ended) = probe.end_dio_stream() {
-                tracing::warn!("could not end {name}'s DIO stream: {ended}");
-            }
+            leave(name, &mut reader);
             return Err(error).with_context(|| format!("creating {}", args.out.display()));
         }
     };
-    let board = info.board;
-    let streamed = stream(bus, name, board, &mut probe, &writer, asked, args, cancel);
+    let streamed = stream(
+        bus,
+        name,
+        info.board,
+        &mut reader,
+        &mut writer,
+        asked,
+        args,
+        cancel,
+    );
     let written = writer
         .finish()
         .with_context(|| format!("writing {}", args.out.display()));
     let recorded = match (streamed, written) {
         (Ok(recorded), Ok(())) => recorded,
         (_, Err(error)) | (Err(error), Ok(())) => {
-            if let Err(ended) = probe.end_dio_stream() {
-                tracing::warn!("could not end {name}'s DIO stream: {ended}");
-            }
+            leave(name, &mut reader);
             return Err(error);
         }
     };
@@ -150,6 +139,13 @@ pub fn record<B: Bus>(
     Ok(())
 }
 
+/// Ends the DIO stream, as the recording found the probe without one.
+fn leave<L: AuxLink>(name: &str, reader: &mut Reader<L>) {
+    if let Err(error) = reader.abandon() {
+        tracing::warn!("could not end {name}'s DIO stream: {error}");
+    }
+}
+
 fn count(n: u64, what: &str) -> String {
     crate::count(usize::try_from(n).unwrap_or(usize::MAX), what)
 }
@@ -170,125 +166,80 @@ fn stream<B: Bus, L: AuxLink>(
     bus: &B,
     name: &str,
     board: Option<BoardKind>,
-    probe: &mut VergeControl<'_, Aux<L>>,
-    writer: &Writer,
+    reader: &mut Reader<L>,
+    writer: &mut Writer,
     asked: u8,
     args: &RecordArgs,
     cancel: &Cancel,
 ) -> Result<Recorded> {
     let limit = args.limit;
-    let began = bus.now();
-    let deadline = limit.map(|limit| began + limit);
+    let deadline = limit.map(|limit| bus.now() + limit);
     let mut spinner: Option<Spinner> = None;
-    let mut header = None;
-    let mut asked_at = None;
-    let (mut levels, mut edges, mut losses) = (0u8, [0u64; 4], 0u64);
-    loop {
-        if header.is_none() && bus.now().saturating_sub(began) >= WAIT {
-            bail!("{name} did not send its DIO stream's header");
-        }
-        if asked_at.is_none()
-            && header.is_some()
-            && (cancel.is_cancelled() || deadline.is_some_and(|deadline| bus.now() >= deadline))
-        {
-            probe
-                .end_dio_stream()
-                .with_context(|| format!("ending {name}'s DIO stream"))?;
-            asked_at = Some(bus.now());
-        }
-        let message = probe
-            .transport()
-            .message(SLICE)
-            .with_context(|| format!("reading {name}'s DIO stream"))?;
-        let Some(message) = message else {
-            if asked_at.is_some_and(|asked| bus.now().saturating_sub(asked) > WAIT) {
-                bail!("{name} did not end its DIO stream when asked");
-            }
-            continue;
-        };
-        // What came before the header was a stream this one replaced.
-        if header.is_none() && !matches!(message, Message::DioHeader(_)) {
-            continue;
-        }
-        // Before the writer sees it: a message the recording can't take ends it with this reason,
-        // and with no header written the writer leaves no file.
-        if let Message::Header(_) | Message::Pairs(_) = message {
-            bail!("{name} streamed energy pairs, not its DIO pins");
-        }
-        if let Message::DioHeader(started) = &message {
-            if header.is_some() {
-                bail!("{name} began a second DIO stream before ending the first");
-            }
-            if started.dio_mask == 0 {
-                // A Pro reports none while an SPI transfer has them; the standalone MCU-Link's
-                // only take is a bench tool's command marker.
-                if board == Some(BoardKind::Pro) {
+    let mut messages =
+        reader.messages(|| cancel.is_cancelled() || deadline.is_some_and(|at| bus.now() >= at));
+    while let Some(message) = messages.next() {
+        let message = message.map_err(|error| {
+            anyhow::Error::new(error).context(format!("recording {name}'s DIO pins"))
+        })?;
+        match &message {
+            // Before the writer sees it: with no header written, the writer leaves no file.
+            Message::DioHeader(started) => {
+                if started.dio_mask == 0 {
+                    // A Pro reports none while an SPI transfer has them; the standalone MCU-Link's
+                    // only take is a bench tool's command marker.
+                    if board == Some(BoardKind::Pro) {
+                        bail!(
+                            "{name} reports none of the pins asked for: an SPI transfer had them as the stream started. Record again once nothing is using SPI"
+                        );
+                    }
                     bail!(
-                        "{name} reports none of the pins asked for: an SPI transfer had them as the stream started. Record again once nothing is using SPI"
+                        "{name} reports none of the pins asked for: a bench tool has given them to its command marker. Run `verge restart` to give them back"
                     );
                 }
-                bail!(
-                    "{name} reports none of the pins asked for: a bench tool has given them to its command marker. Run `verge restart` to give them back"
-                );
-            }
-            if started.dio_mask != asked {
-                tracing::warn!(
-                    "{name} reports {} of the pins asked for: a bench tool holds the rest",
-                    crate::dio_names(started.dio_mask)
-                );
-            }
-            levels = started.dio_levels;
-            header = Some(*started);
-            let ends = match limit {
-                Some(limit) => format!(
-                    ", for {}. Ctrl-C ends it sooner",
-                    humantime::format_duration(limit)
-                ),
-                None => ". Ctrl-C ends it".to_owned(),
-            };
-            say(&format!(
-                "Recording {name}'s {} to {}{ends}.",
-                crate::dio_names(started.dio_mask),
-                args.out.display()
-            ));
-            spinner = Some(Spinner::new("recording"));
-        }
-        writer.message(&message)?;
-        match message {
-            Message::DioHeader(_) => {}
-            Message::Edges(message) => {
-                let mask = header.map_or(0, |header| header.dio_mask);
-                for edge in &message.edges {
-                    let moved = (levels ^ edge.levels) & mask;
-                    for (pin, count) in edges.iter_mut().enumerate() {
-                        *count += u64::from(moved >> pin & 1);
-                    }
-                    levels = edge.levels;
+                if started.dio_mask != asked {
+                    tracing::warn!(
+                        "{name} reports {} of the pins asked for: a bench tool holds the rest",
+                        dio::names(started.dio_mask)
+                    );
                 }
+                let ends = match limit {
+                    Some(limit) => format!(
+                        ", for {}. Ctrl-C ends it sooner",
+                        humantime::format_duration(limit)
+                    ),
+                    None => ". Ctrl-C ends it".to_owned(),
+                };
+                say(&format!(
+                    "Recording {name}'s {} to {}{ends}.",
+                    dio::names(started.dio_mask),
+                    args.out.display()
+                ));
+                spinner = Some(Spinner::new("recording"));
+            }
+            Message::Edges(_) => {
                 if let Some(spinner) = &spinner {
-                    let counts: Vec<String> = (0..4)
-                        .filter(|pin| mask >> pin & 1 != 0)
-                        .map(|pin| format!("DIO{pin} {}", count(edges[pin], "edge")))
+                    let counts = messages.reader().counts();
+                    let shown: Vec<String> = (0..4)
+                        .filter(|pin| counts.pins >> pin & 1 != 0)
+                        .map(|pin| format!("DIO{pin} {}", count(counts.edges[pin], "edge")))
                         .collect();
-                    spinner.set(&format!("recording  {}", counts.join("  ")));
+                    spinner.set(&format!("recording  {}", shown.join("  ")));
                 }
             }
-            Message::DioLost(lost) => {
-                losses += 1;
-                levels = lost.levels;
-            }
-            Message::End(end) => {
-                return Ok(Recorded {
-                    pins: header.map_or(0, |header| header.dio_mask),
-                    edges,
-                    losses,
-                    seconds: end.time_ns.unwrap_or(0) as f64 * 1e-9,
-                    reason: end.reason,
-                });
-            }
-            // A DIO stream carries no markers: 0x94 records them beside energy capture alone.
-            // Pairs were refused above. A DIO time tells the writer how far the stream has got.
-            Message::Markers(_) | Message::Header(_) | Message::Pairs(_) | Message::DioTime(_) => {}
+            _ => {}
         }
+        writer.send(message)?;
     }
+    drop(spinner);
+    let counts = reader.counts();
+    let end = counts
+        .end
+        .with_context(|| format!("{name}'s DIO stream stopped before its end"))?;
+    Ok(Recorded {
+        pins: counts.pins,
+        edges: counts.edges,
+        losses: counts.edge_losses,
+        seconds: end.time_ns.unwrap_or(0) as f64 * 1e-9,
+        reason: end.reason,
+    })
 }
