@@ -438,7 +438,7 @@ mod tests {
             time_ns: time_ms * 1_000_000,
             millivolts,
             nanoamps,
-            range: Some(escapement_verge_probe::stream::CurrentRange::Low),
+            range: escapement_verge_probe::stream::CurrentRange::Low,
             under_range: false,
         }
     }
@@ -498,7 +498,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut samples = [sample(1, 0, 3300, 20_000), sample(2, 1, 3300, 5_000_000)];
         for s in &mut samples {
-            s.range = Some(escapement_verge_probe::stream::CurrentRange::High);
+            s.range = escapement_verge_probe::stream::CurrentRange::High;
         }
         samples[0].under_range = true;
         let path = dir.path().join("under.sr");
@@ -608,7 +608,7 @@ mod tests {
                 time_ns: u64::from(n) * 10_000,
                 millivolts: 1800,
                 nanoamps: n,
-                range: None,
+                range: escapement_verge_probe::stream::CurrentRange::High,
                 under_range: false,
             })
             .collect();

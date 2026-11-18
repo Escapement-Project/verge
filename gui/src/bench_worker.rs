@@ -2,9 +2,8 @@
 
 use anyhow::{Context, Result, bail};
 use escapement_verge_probe::aux::Aux;
-use escapement_verge_probe::capture::Recorder;
 use escapement_verge_probe::stream::{EndReason, Message};
-use escapement_verge_probe::tickwave::{Context as Recording, Snapshots};
+use escapement_verge_probe::tickwave::{Context as Recording, Recorder, Snapshots};
 use escapement_verge_probe::{
     BoardKind, Bus, CommandError, DioState, EnergyCaptureSample, EnergyError, Refused, Unit,
     VergeControl,
@@ -291,7 +290,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                let (recorder, snapshots) = Recorder::tickwave(
+                let recorder = Recorder::create(
                     &path,
                     Recording {
                         instrument: Some("MCU-Link Pro".into()),
@@ -331,9 +330,9 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                 }
                 self.capture_id = started.expect("start/attach succeeded");
                 self.owned = !self.status.capturing;
+                self.status.snapshots = Some(recorder.snapshots());
                 self.recorder = Some(recorder);
                 self.status.path = Some(path);
-                self.status.snapshots = Some(snapshots);
                 self.status.recording = true;
                 self.synced = false;
                 self.stream_mask = 0;
@@ -447,7 +446,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
                     self.stopping = None;
                     self.status.recording = false;
                     self.status.snapshots = None;
-                    self.recorder.take().expect("recorder").finish()?;
+                    self.recorder.take().expect("recorder").close()?;
                     if matches!(reason, EndReason::Failed) {
                         self.status.error =
                             Some("Capture failed: ADC overrun or DMA error.".into());
@@ -511,7 +510,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
             Some(id) => control.end_energy_stream_if(id),
             None => Ok(()),
         };
-        let written = self.recorder.take().map(Recorder::finish).transpose();
+        let written = self.recorder.take().map(Recorder::close).transpose();
         self.status.connected = false;
         self.status.error = Some(format!(
             "{error:#}{}{}",

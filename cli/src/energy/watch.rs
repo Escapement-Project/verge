@@ -867,7 +867,7 @@ mod tests {
                 time_ns: u64::from(n) * 1_000_000,
                 millivolts: 3300,
                 nanoamps: if n == 437 { 5_000_000 } else { 20_000 },
-                range: None,
+                range: escapement_verge_probe::stream::CurrentRange::High,
                 under_range: false,
             })
             .collect();
@@ -1054,7 +1054,7 @@ mod tests {
                 time_ns: u64::from(n) * 1_000_000,
                 millivolts: 3300,
                 nanoamps: 200_000,
-                range: Some(escapement_verge_probe::stream::CurrentRange::High),
+                range: escapement_verge_probe::stream::CurrentRange::High,
                 under_range: n < 3,
             })
             .collect();
