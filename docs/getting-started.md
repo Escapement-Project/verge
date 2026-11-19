@@ -7,10 +7,9 @@ You install it with verge, a command-line tool. verge also updates Verge, puts N
 and drives the DIO pins of both probes. On a Pro it also switches the target supply and measures
 energy. Its desktop app, verge-gui, does the same in a window.
 
-Verge has no release yet. Until the first, there are no archives to download, and verge refuses
-every release because its release key isn't set. Build both yourself instead: verge as
-[Building](../README.md#building) in its README describes, and the firmware as [Building the
-firmware](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/README.md) does. Then
+Verge has no release yet, so there are no archives to download. Build both yourself instead:
+verge as [Building](../README.md#building) in its README describes, and the firmware as [Building
+the firmware](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/README.md) does. Then
 install the firmware with `verge update --file`.
 
 ## What you need
@@ -31,11 +30,11 @@ Each verge release has one archive per system:
 Each archive holds both programs: `verge`, and the desktop app `verge-gui` (`Verge.app` on macOS).
 Each also holds `LICENSE` and `THIRD-PARTY-LICENSES.html`, the licence of every crate inside.
 Beside each archive are a `.sha256` checksum and a minisign signature, made with the same key that
-signs the firmware. To check an archive before you unpack it, put that public key in place of
-`KEY`:
+signs the firmware. To check an archive before you unpack it:
 
 ```
-minisign -V -P KEY -m verge-v0.1.0-x86_64-linux.tar.gz
+minisign -V -m verge-v0.1.0-x86_64-linux.tar.gz \
+    -P RWRMeVBkfEs9OaKwx3TuHvAtEsmPjKFgKkqGmHxmqqPm/Lj5Uup2/eQX
 ```
 
 To build verge from source instead, see [Building](../README.md#building) in its README.

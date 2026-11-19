@@ -1962,7 +1962,7 @@ dependencies = [
 [[package]]
 name = "escapement-verge-probe"
 version = "0.1.0"
-source = "git+https://github.com/Escapement-Project/verge-probe#cc65a18272e4e4e26302c9b27605243b29c2d316"
+source = "git+https://github.com/Escapement-Project/verge-probe#beeb60282e5f7a3f8fae0dd70947f4ade2c99e92"
 dependencies = [
  "csv",
  "dirs",

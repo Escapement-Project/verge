@@ -276,9 +276,6 @@ another tool left.
 verge allows 15 seconds to connect, 30 seconds for GitHub to answer and 60 seconds to download a
 file. A timeout says which of them ran out.
 
-verge's release key is not set, so verge refuses every release, and `verge release` says so. Local
-files and NXP's firmware still install.
-
 ### The cache
 
 verge keeps downloaded releases in `~/.cache/verge` on Linux, `~/Library/Caches/verge` on macOS and
