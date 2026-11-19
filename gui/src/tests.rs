@@ -4110,6 +4110,15 @@ fn bench_records_a_standalone_units_dio_pins() {
     press(&mut h, "Stop recording");
     until(&mut h, "Start recording");
     until_contains(&mut h, "DIO3 edges");
+    // A stopped recording is compacted into a copy beside it, which then replaces it.
+    for _ in 0..400 {
+        if !h.state_mut().bench_mut().compacting() {
+            break;
+        }
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!h.state_mut().bench_mut().compacting());
     let kept: Vec<_> = std::fs::read_dir(dir.join("captures"))
         .unwrap()
         .map(|e| e.unwrap().path())
