@@ -625,9 +625,9 @@ fn sim_stock_dir(name: &str, version: &str) -> PathBuf {
     dir
 }
 
-/// The second review's proof, at the command line: `verge isp enter` on a Pro, then `verge
-/// flash` as it advised, put ours on the Pro, since a unit in ISP mode cannot say which board it
-/// is. The check is made before the unit goes into ISP mode.
+/// At the command line, `verge isp enter` on a Pro and then the `verge flash` it advises must not
+/// put ours on the Pro. A unit in ISP mode cannot say which board it is, so the check is made
+/// before the unit goes into ISP mode.
 #[test]
 fn bootloader_sends_a_pro_into_isp_mode_only_for_stock() {
     tool("pro")
@@ -823,9 +823,9 @@ fn a_batch_for_the_pro_needs_an_image_built_for_it() {
     std::fs::remove_file(&image).unwrap();
 }
 
-/// The third review's proof: a Pro whose stock has no jumper-free update. The latest release
-/// declares nothing, so it is for the standalone MCU-Link only, and `update` refuses it as it would on
-/// the jumper-free path, rather than send the user to a plain `verge isp flash`.
+/// A Pro whose stock has no jumper-free update. The latest release declares nothing, so it is for
+/// the standalone MCU-Link only, and `update` refuses it as it would on the jumper-free path,
+/// rather than send the user to a plain `verge isp flash`.
 #[test]
 fn update_on_a_pro_needing_the_jumper_does_not_advise_a_plain_flash() {
     let output = tool("pro-old").args(["update", "--yes"]).output().unwrap();

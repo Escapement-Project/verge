@@ -2295,9 +2295,8 @@ fn the_worker_refuses_an_undatable_batch_before_loading() {
     assert!(!made);
 }
 
-/// The second review of the fixes: a file dropped while the question is up must not leave a
-/// question that names one file's boards and flashes another. The question goes, and the view
-/// offers the new file instead.
+/// A file dropped while the question is up must not leave a question that names one file's
+/// boards and flashes another. The question goes, and the view offers the new file instead.
 #[test]
 fn the_question_names_the_boards_of_the_file_it_flashes() {
     let mut h = harness(sim_app(SimBus::scenario("isp").unwrap(), vec![]));
@@ -2607,7 +2606,7 @@ fn republished_app(name: &str) -> (VergeApp, Arc<std::sync::atomic::AtomicBool>,
 /// The window's question judges the cache by the release the window looked up, and the worker by
 /// a lookup of its own. Where the release was published again since, the job ends asking to try
 /// again, and the worker looks the release up again for the window, so the next question names
-/// the download. (The F10/F11 review's proof.)
+/// the download.
 #[test]
 fn a_release_published_again_is_asked_about_after_try_again() {
     let (app, switched, cache) = republished_app("republished");
