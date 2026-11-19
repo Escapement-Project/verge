@@ -30,6 +30,9 @@ permissions:
 jobs:
   build:
     strategy:
+      # Every platform reports: a failure on one does not cancel the others. A failed build still
+      # stops the signing job, which needs all of them.
+      fail-fast: false
       matrix:
         include:
           - platform: x86_64-linux
