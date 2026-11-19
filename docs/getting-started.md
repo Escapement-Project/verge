@@ -7,11 +7,6 @@ You install it with verge, a command-line tool. verge also updates Verge, puts N
 and drives the DIO pins of both probes. On a Pro it also switches the target supply and measures
 energy. Its desktop app, verge-gui, does the same in a window.
 
-Verge has no release yet, so there are no archives to download. Build both yourself instead:
-verge as [Building](../README.md#building) in its README describes, and the firmware as [Building
-the firmware](https://github.com/Escapement-Project/mculink-verge/blob/HEAD/README.md) does. Then
-install the firmware with `verge update --file`.
-
 ## What you need
 
 - A standalone MCU-Link or MCU-Link Pro, and a USB cable.
