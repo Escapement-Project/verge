@@ -6,6 +6,13 @@
 
 use rexpect::session::{PtySession, spawn_command};
 
+/// Runs `command` under a pseudo-terminal. indicatif draws no progress when TERM is unset or
+/// `dumb`, as in a CI container, so the terminal names one.
+fn spawn(mut command: std::process::Command) -> PtySession {
+    command.env("TERM", "xterm-256color");
+    spawn_command(command, Some(20_000)).unwrap()
+}
+
 fn tool(scenario: &str, args: &[&str]) -> PtySession {
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_verge"));
     command
@@ -14,7 +21,7 @@ fn tool(scenario: &str, args: &[&str]) -> PtySession {
         .env_remove("VERGE_REPO")
         .env_remove("GITHUB_TOKEN")
         .env_remove("RUST_LOG");
-    spawn_command(command, Some(20_000)).unwrap()
+    spawn(command)
 }
 
 /// The download question's start: the rest may wrap onto the next row.
@@ -125,7 +132,7 @@ fn tool_status(scenario: &str, args: &[&str]) -> PtySession {
         .env_remove("VERGE_REPO")
         .env_remove("GITHUB_TOKEN")
         .env_remove("RUST_LOG");
-    spawn_command(command, Some(20_000)).unwrap()
+    spawn(command)
 }
 
 /// Ctrl-C at a question stops the run: the cursor dialoguer hid comes back, a line says nothing
@@ -232,7 +239,7 @@ fn ctrl_c_ends_a_recording_plainly() {
         .args(["energy", "record", "--out"])
         .arg(&out)
         .env_remove("RUST_LOG");
-    let mut p = spawn_command(command, Some(20_000)).unwrap();
+    let mut p = spawn(command);
     p.exp_string("Ctrl-C ends it.").unwrap();
     p.send_control('c').unwrap();
     let rest = p.exp_string("[exit 0]").unwrap();
@@ -254,7 +261,7 @@ fn no_color_is_honoured() {
         .args(["--simulate", "ours", "--simulate-pace", "0", "isp", "info"])
         .env("NO_COLOR", "1")
         .env_remove("RUST_LOG");
-    let mut p = spawn_command(command, Some(20_000)).unwrap();
+    let mut p = spawn(command);
     let rest = p.exp_eof().unwrap();
     assert!(rest.contains("ERROR no probe is in ISP mode"), "{rest}");
     assert!(!rest.contains('\u{1b}'), "{rest:?}");
