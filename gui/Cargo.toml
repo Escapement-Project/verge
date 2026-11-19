@@ -18,8 +18,8 @@ rfd = "0.17.2"
 serde_json = "1.0.154"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-escapement-verge-probe = { version = "0.1.0", path = "../../verge-probe", features = ["tickwave"] }
-escapement-tickwave-egui = { version = "0.1.0", path = "../../tickwave/crates/egui" }
+escapement-verge-probe = { version = "0.1.0", git = "https://github.com/Escapement-Project/verge-probe", features = ["tickwave"] }
+escapement-tickwave-egui = { version = "0.1.0", git = "https://github.com/Escapement-Project/tickwave", tag = "v0.1.0" }
 jiff = "1.0.1"
 
 [lints]
@@ -34,7 +34,7 @@ simulate = ["escapement-verge-probe/simulate"]
 egui_kittest = { version = "0.37.0", features = ["wgpu", "snapshot"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 tempfile = "3.27.0"
-escapement-verge-probe = { path = "../../verge-probe", features = ["simulate"] }
+escapement-verge-probe = { git = "https://github.com/Escapement-Project/verge-probe", features = ["simulate"] }
 
 [[bin]]
 name = "verge-gui"
