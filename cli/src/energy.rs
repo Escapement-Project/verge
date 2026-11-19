@@ -9,13 +9,13 @@ use crate::output::outputln;
 use crate::question::say;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
-use escapement_verge_probe::aux::Aux;
 use escapement_verge_probe::bus::BusError;
 use escapement_verge_probe::detect::Unit;
 use escapement_verge_probe::dio;
 use escapement_verge_probe::pro::{self, Feature, FindError, ProLink, check_offered};
 use escapement_verge_probe::record::Format;
 use escapement_verge_probe::stream::{EndReason, Reader};
+use escapement_verge_probe::verge_aux::Aux;
 use escapement_verge_probe::{
     Bus, CalibrationRange, Cancel, CommandError, EnergyAccumulator, EnergyCalibration,
     EnergyCaptureSample, EnergyError, EnergyRanges, EnergyStop, EnergyTotal, SensePath,
@@ -721,7 +721,7 @@ mod tests {
             .remove(0)
             .device;
         let mut aux =
-            escapement_verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+            escapement_verge_probe::verge_aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
         VergeControl::new(&mut aux)
             .set_energy_ranges(escapement_verge_probe::EnergyRanges::High)
             .unwrap();
@@ -732,7 +732,7 @@ mod tests {
         };
         energy(&bus, &command, None, &Cancel::new()).unwrap();
         let mut aux =
-            escapement_verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+            escapement_verge_probe::verge_aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
         VergeControl::new(&mut aux)
             .stream_energy_capture_identified(0)
             .unwrap();

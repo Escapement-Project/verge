@@ -11,11 +11,11 @@ use crate::progress::Spinner;
 use crate::question::say;
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use escapement_verge_probe::aux::AuxLink;
 use escapement_verge_probe::dio;
 use escapement_verge_probe::pro::{self, Feature};
 use escapement_verge_probe::record::{Format, Writer};
 use escapement_verge_probe::stream::{EndReason, Message, Reader};
+use escapement_verge_probe::verge_aux::AuxLink;
 use escapement_verge_probe::{BoardKind, Bus, Cancel};
 
 #[derive(Args)]

@@ -172,7 +172,7 @@ enum File {
     Finishing(Recorder),
 }
 
-pub struct Session<L: escapement_verge_probe::aux::AuxLink> {
+pub struct Session<L: escapement_verge_probe::verge_aux::AuxLink> {
     /// The unit's Verge Aux, and the stream on it while a recording runs.
     reader: Reader<L>,
     status: Status,
@@ -182,7 +182,7 @@ pub struct Session<L: escapement_verge_probe::aux::AuxLink> {
     calibration_stale: bool,
 }
 
-impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
+impl<L: escapement_verge_probe::verge_aux::AuxLink> Session<L> {
     pub fn open<B: Bus<Aux = L>>(bus: &B, unit: &Unit) -> Result<Self> {
         let pro_board = pro::validate(unit, pro::Feature::Energy).is_ok();
         let (mut aux, energy) = if pro_board {
@@ -539,7 +539,7 @@ impl<L: escapement_verge_probe::aux::AuxLink> Session<L> {
     }
 }
 
-impl<L: escapement_verge_probe::aux::AuxLink> Drop for Session<L> {
+impl<L: escapement_verge_probe::verge_aux::AuxLink> Drop for Session<L> {
     fn drop(&mut self) {
         if let Err(error) = self.close() {
             tracing::error!("closing bench: {error:#}");
@@ -761,7 +761,7 @@ mod tests {
             bus: SimBus,
             pending: Option<(Duration, Vec<u8>)>,
         }
-        impl escapement_verge_probe::aux::AuxLink for DelayedHeader {
+        impl escapement_verge_probe::verge_aux::AuxLink for DelayedHeader {
             fn write(
                 &mut self,
                 request: &[u8],
@@ -798,7 +798,7 @@ mod tests {
             let device = detect(&bus).unwrap().remove(0).device;
             let mut s = Session {
                 reader: Reader::new(
-                    escapement_verge_probe::aux::Aux::open(DelayedHeader {
+                    escapement_verge_probe::verge_aux::Aux::open(DelayedHeader {
                         link: bus.open_aux(&device).unwrap(),
                         bus: bus.clone(),
                         pending: None,

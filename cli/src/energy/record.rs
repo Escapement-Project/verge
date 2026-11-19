@@ -7,11 +7,11 @@ use std::time::Duration;
 use crate::progress::Spinner;
 use crate::question::say;
 use anyhow::{Context, Result, bail};
-use escapement_verge_probe::aux::AuxLink;
 use escapement_verge_probe::record::{Format, Writer};
 use escapement_verge_probe::stream::{
     Began, EndReason, EnergyStream, Message, Reader, ReaderError, Total,
 };
+use escapement_verge_probe::verge_aux::AuxLink;
 use escapement_verge_probe::{Bus, Cancel};
 
 /// What a recording to `out` writes: what its extension names, else what `flag` asks for, else a
@@ -262,9 +262,9 @@ fn stream<B: Bus, L: AuxLink>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use escapement_verge_probe::aux::Aux;
     use escapement_verge_probe::dap::LinkError;
     use escapement_verge_probe::sim::{SimAux, SimBus};
+    use escapement_verge_probe::verge_aux::Aux;
     use escapement_verge_probe::{EnergyCaptureSample, UsbDevice};
 
     /// A probe that turns the start down, as one whose calibration failed would.

@@ -936,7 +936,7 @@ mod tests {
     fn leaving_a_capture_found_running_ends_its_stream() {
         let (bus, device) = pro_with_a_capture();
         let mut aux =
-            escapement_verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+            escapement_verge_probe::verge_aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
         let mut pro: Pro<'_> = escapement_verge_probe::VergeControl::new(&mut aux);
         let options = Options {
             rate: 1000,
@@ -957,7 +957,7 @@ mod tests {
     fn zero_duration_attach_still_ends_its_stream() {
         let (bus, device) = pro_with_a_capture();
         let mut aux =
-            escapement_verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+            escapement_verge_probe::verge_aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
         let mut pro: Pro<'_> = escapement_verge_probe::VergeControl::new(&mut aux);
         let options = Options {
             rate: 1000,
@@ -984,7 +984,7 @@ mod tests {
     fn a_watch_over_verge_aux_plots_every_pair() {
         let (bus, device) = pro_with_a_capture();
         let mut aux =
-            escapement_verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+            escapement_verge_probe::verge_aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
         let mut pro: Pro<'_> = escapement_verge_probe::VergeControl::new(&mut aux);
         pro.stream_energy_capture_identified(0).unwrap();
         let mut model = Model::new("CJ3E7A91C2", None, Duration::from_secs(30));
@@ -1040,7 +1040,8 @@ mod tests {
                 (bus, device)
             };
             let mut aux =
-                escapement_verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+                escapement_verge_probe::verge_aux::Aux::open(bus.open_aux(&device).unwrap())
+                    .unwrap();
             let mut pro: Pro<'_> = escapement_verge_probe::VergeControl::new(&mut aux);
             let options = Options {
                 rate: 1000,
@@ -1102,7 +1103,7 @@ mod tests {
             at: Duration,
         }
 
-        impl escapement_verge_probe::aux::AuxLink for RestartAfter {
+        impl escapement_verge_probe::verge_aux::AuxLink for RestartAfter {
             fn write(
                 &mut self,
                 request: &[u8],
@@ -1136,7 +1137,7 @@ mod tests {
             device: device.clone(),
             at: bus.now() + Duration::from_millis(50),
         };
-        let mut aux = escapement_verge_probe::aux::Aux::open(link).unwrap();
+        let mut aux = escapement_verge_probe::verge_aux::Aux::open(link).unwrap();
         let mut pro: Pro<'_> = escapement_verge_probe::VergeControl::new(&mut aux);
         let options = Options {
             rate: 1000,
@@ -1161,7 +1162,7 @@ mod tests {
     fn an_end_before_the_header_changes_nothing() {
         let (bus, device) = pro_with_a_capture();
         let mut aux =
-            escapement_verge_probe::aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
+            escapement_verge_probe::verge_aux::Aux::open(bus.open_aux(&device).unwrap()).unwrap();
         let mut pro: Pro<'_> = escapement_verge_probe::VergeControl::new(&mut aux);
         let mut model = Model::new("CJ3E7A91C2", Some(1000), Duration::from_secs(30));
         let restarted = escapement_verge_probe::stream::parse(&[0xA2, 3, 9, 0, 0, 0]).unwrap();
