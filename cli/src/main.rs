@@ -54,7 +54,7 @@ const EXAMPLES: &str = "\
 Examples:
   verge list               what is attached, and how each probe can be updated
   verge update             install the latest Verge release on the only probe
-  verge --serial CJ3E7A91C2 update --release v0.3.0
+  verge --serial EV3E7A91C2 update --release v0.3.0
   verge update --stock     put NXP's firmware back, from your LinkServer install
   verge isp flash --file build/mculink_cjtag.elf
                            flash a probe you put into ISP mode with the jumper";
@@ -730,7 +730,7 @@ fn unit_name(unit: &Unit) -> String {
     }
 }
 
-/// What a unit is and runs, as a clause: "CJ3E7A91C2 is a standalone MCU-Link running Verge,
+/// What a unit is and runs, as a clause: "EV3E7A91C2 is a standalone MCU-Link running Verge,
 /// build 14d05d4".
 fn described(unit: &Unit) -> String {
     let port = unit.device.location.as_deref().unwrap_or("?");

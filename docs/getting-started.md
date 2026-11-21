@@ -97,7 +97,7 @@ tells you which case you have, and [Updating and recovery](updating.md) covers e
 With more than one probe attached, name the one you mean with its serial number:
 
 ```
-verge --serial CJ3E7A91C2 update
+verge --serial EV3E7A91C2 update
 ```
 
 At a terminal, verge asks which one instead.

@@ -229,9 +229,9 @@ port. The last one is listed without blinking, because the batch has ended. Each
 line, and a tally ends the batch:
 
 ```text
-1-1      QK7RM2VTX8D41 → CJ3E7A91C2  NXP's firmware V3.172 → Verge, build v0.3.0  UPDATED in 4.7 s
+1-1      QK7RM2VTX8D41 → EV3E7A91C2  NXP's firmware V3.172 → Verge, build v0.3.0  UPDATED in 4.7 s
 1-1      blinking: unplug it when you like
-1-3      CJ3E7AC4F5      Verge, build v0.3.0  CURRENT
+1-3      EV3E7AC4F5      Verge, build v0.3.0  CURRENT
 1-3      blinking: unplug it when you like
 1-4      QK7RM2VTX8D45   NXP's firmware V3.108  SKIPPED: needs the ISP jumper. NXP's firmware V3.108 has no jumper-free update. NXP added it in V3.122.
 Batch done: 1 updated, 1 current, 1 skipped, 0 failed, 0 waiting.
@@ -259,7 +259,7 @@ flushing the record fails, the update under way finishes, the batch stops, and t
 reported. A record line:
 
 ```text
-{"time":"2026-10-20T14:34:58Z","port":"1-1","serial_before":"QK7RM2VTX8D41","firmware_before":"NXP's firmware V3.172","serial_after":"CJ3E7A91C2","firmware_after":"Verge, build v0.3.0","result":"updated","reason":null,"seconds":4.6795}
+{"time":"2026-10-20T14:34:58Z","port":"1-1","serial_before":"QK7RM2VTX8D41","firmware_before":"NXP's firmware V3.172","serial_after":"EV3E7A91C2","firmware_after":"Verge, build v0.3.0","result":"updated","reason":null,"seconds":4.6795}
 ```
 
 `result` is one of `updated`, `jumper-fitted`, `not-restarted`, `current`, `skipped`, `failed` and
