@@ -1284,54 +1284,6 @@ fn dio_record_counts_the_probes_losses() {
         ));
 }
 
-/// `verge dio` lists only the pins a bench tool's command marker leaves, says which it holds, and
-/// refuses to drive a held one, naming it and the way to give it back.
-#[test]
-fn dio_names_the_pins_the_bench_marker_holds() {
-    tool("ours-plain-marked")
-        .arg("dio")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("DIO1  input"))
-        .stdout(predicate::str::contains("DIO2").count(1))
-        .stdout(predicate::str::contains(
-            "A bench tool's command marker holds DIO2, DIO3 until the probe restarts.",
-        ));
-    tool("ours-plain-marked")
-        .args(["dio", "--high", "0,2"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "'s DIO2 to its command marker. Run `verge restart` to give it back",
-        ));
-}
-
-/// Pins a bench tool's command marker holds are left out, with a warning, and a recording with
-/// none left fails with the way to give them back and leaves no file.
-#[test]
-fn dio_record_leaves_out_pins_the_bench_marker_holds() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("pins.tickwave");
-    tool("ours-plain-marked")
-        .args(["dio", "record", "--for", "100ms", "--pins", "2,3", "--out"])
-        .arg(&out)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "reports none of the pins asked for: a bench tool has given them to its command marker. Run `verge restart`",
-        ));
-    assert!(!out.exists());
-    tool("ours-plain-marked")
-        .args(["dio", "record", "--for", "100ms", "--out"])
-        .arg(&out)
-        .assert()
-        .success()
-        .stderr(predicate::str::contains(
-            "reports DIO0, DIO1 of the pins asked for: a bench tool holds the rest",
-        ))
-        .stderr(predicate::str::contains("DIO0 0 edges, DIO1 0 edges over"));
-}
-
 /// A Pro without its energy circuit streams its DIO pins as a standalone unit does, and the
 /// recording names the board.
 #[test]

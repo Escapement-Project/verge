@@ -917,40 +917,7 @@ impl Bench {
             ui.add_enabled(false, egui::Label::new(text(Role::Body, reason)));
             return;
         };
-        if state.pins == 0 {
-            ui.add(
-                egui::Label::new(
-                    text(
-                        Role::Body,
-                        "A bench tool has given the DIO pins to its command marker. Restart the \
-                         probe to give them back.",
-                    )
-                    .color(face.ink_2),
-                )
-                .wrap(),
-            );
-            return;
-        }
         ui.add_enabled_ui(!asking, |ui| self.dio_pins(ui, &state, backend));
-        // Pins the marker holds are not DIO pins, and are not listed.
-        let held = 0x0f & !state.pins;
-        if held != 0 {
-            ui.add(
-                egui::Label::new(
-                    text(
-                        Role::Body,
-                        format!(
-                            "{} {} held by a bench tool's command marker. Restart the probe to \
-                             give them back.",
-                            pin_list(held),
-                            if held.count_ones() == 1 { "is" } else { "are" }
-                        ),
-                    )
-                    .color(face.ink_2),
-                )
-                .wrap(),
-            );
-        }
         let place = match chosen.and_then(Unit::verge).and_then(|ours| ours.board) {
             Some(BoardKind::Plain) => {
                 "DIO0 to DIO3 are J8's pads, left to right with the USB connector on the left. \
@@ -2089,19 +2056,6 @@ fn refusal(unit: &Unit) -> Option<(String, bool)> {
         ),
         _ => (sentence(&error.to_string()), false),
     })
-}
-
-/// Pins by name, as "DIO2 and DIO3".
-fn pin_list(mask: u8) -> String {
-    let names: Vec<String> = (0..4)
-        .filter(|pin| mask >> pin & 1 != 0)
-        .map(|pin| format!("DIO{pin}"))
-        .collect();
-    match names.as_slice() {
-        [] => String::new(),
-        [one] => one.clone(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    }
 }
 
 /// A view that follows the recording's end, `span` ticks wide.
@@ -3300,58 +3254,6 @@ mod tests {
         assert!(!bench.recording());
         assert_eq!(bench.path.as_ref(), Some(&path));
         assert_eq!(bench.compactions.len(), 1);
-    }
-
-    /// A pin the bench marker holds is not offered, and the panel says which it holds.
-    #[test]
-    fn marker_held_pins_are_left_out() {
-        use escapement_verge_probe::sim::SimBus;
-        let bus = SimBus::scenario("ours-plain").unwrap();
-        let unit = escapement_verge_probe::detect(&bus).unwrap().remove(0);
-        let mut dio = pro::with_pro(&bus, &unit, pro::Feature::Dio, |_, pro| {
-            anyhow::Ok(pro.access_dio(0, 0, 0)?)
-        })
-        .unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let rig = (
-            Bench::new(dir.path()),
-            vec![unit.clone()],
-            Some(unit.device.instance.clone()),
-            crate::worker::Manual::default(),
-        );
-        let mut h = Harness::builder()
-            .with_size(egui::vec2(1080.0, 700.0))
-            .with_context_setup(style::install)
-            .build_ui_state(
-                |ui, (bench, units, selected, backend): &mut Rig| {
-                    bench.show(ui, units, selected, backend);
-                },
-                rig,
-            );
-        h.step();
-        for (pins, offered) in [(0x0f, 0x0f), (0x0a, 0x0a), (0, 0)] {
-            dio.pins = pins;
-            h.state_mut().0.receive(Status {
-                instance: unit.device.instance.clone(),
-                connected: true,
-                board: Some(BoardKind::Plain),
-                dio: Some(dio.clone()),
-                ..Status::default()
-            });
-            h.step();
-            for pin in 0..4 {
-                let shown = h.query_by_label(&format!("DIO{pin} output")).is_some();
-                assert_eq!(shown, offered & 1 << pin != 0, "pins {pins:#x}, DIO{pin}");
-            }
-            let told = h
-                .query_all_by_label_contains("command marker")
-                .next()
-                .is_some();
-            assert_eq!(told, pins != 0x0f, "pins {pins:#x}");
-            if pins == 0x0a {
-                h.get_by_label_contains("DIO0 and DIO2 are held by a bench tool's command marker.");
-            }
-        }
     }
 
     /// Frame time, data-to-screen latency and memory while a recording is written at 25,000 and at

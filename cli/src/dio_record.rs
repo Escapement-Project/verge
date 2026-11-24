@@ -16,7 +16,7 @@ use escapement_verge_probe::pro::{self, Feature};
 use escapement_verge_probe::record::{Format, Writer};
 use escapement_verge_probe::stream::{EndReason, Message, Reader};
 use escapement_verge_probe::verge_aux::AuxLink;
-use escapement_verge_probe::{BoardKind, Bus, Cancel};
+use escapement_verge_probe::{Bus, Cancel};
 
 #[derive(Args)]
 pub struct RecordArgs {
@@ -93,16 +93,7 @@ pub fn record<B: Bus>(
             return Err(error).with_context(|| format!("creating {}", args.out.display()));
         }
     };
-    let streamed = stream(
-        bus,
-        name,
-        info.board,
-        &mut reader,
-        &mut writer,
-        asked,
-        args,
-        cancel,
-    );
+    let streamed = stream(bus, name, &mut reader, &mut writer, args, cancel);
     let written = writer
         .finish()
         .with_context(|| format!("writing {}", args.out.display()));
@@ -165,10 +156,8 @@ struct Recorded {
 fn stream<B: Bus, L: AuxLink>(
     bus: &B,
     name: &str,
-    board: Option<BoardKind>,
     reader: &mut Reader<L>,
     writer: &mut Writer,
-    asked: u8,
     args: &RecordArgs,
     cancel: &Cancel,
 ) -> Result<Recorded> {
@@ -184,22 +173,10 @@ fn stream<B: Bus, L: AuxLink>(
         match &message {
             // Before the writer sees it: with no header written, the writer leaves no file.
             Message::DioHeader(started) => {
+                // Only a Pro's SPI transfer takes the pins from a stream.
                 if started.dio_mask == 0 {
-                    // A Pro reports none while an SPI transfer has them; the standalone MCU-Link's
-                    // only take is a bench tool's command marker.
-                    if board == Some(BoardKind::Pro) {
-                        bail!(
-                            "{name} reports none of the pins asked for: an SPI transfer had them as the stream started. Record again once nothing is using SPI"
-                        );
-                    }
                     bail!(
-                        "{name} reports none of the pins asked for: a bench tool has given them to its command marker. Run `verge restart` to give them back"
-                    );
-                }
-                if started.dio_mask != asked {
-                    tracing::warn!(
-                        "{name} reports {} of the pins asked for: a bench tool holds the rest",
-                        dio::names(started.dio_mask)
+                        "{name} reports none of the pins asked for: an SPI transfer had them as the stream started. Record again once nothing is using SPI"
                     );
                 }
                 let ends = match limit {

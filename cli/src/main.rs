@@ -1583,15 +1583,6 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
             Err(DioError::Off) => bail!(
                 "{serial} started with its USB-SIO jumper, J15, fitted, which turns the DIO pins off. Take J15 off, then unplug the probe and plug it back in"
             ),
-            Err(DioError::Held(held)) => bail!(
-                "a bench tool has given {serial}'s {} to its command marker. Run `verge restart` to give {} back",
-                if held == dio::ALL {
-                    "J8 pins".into()
-                } else {
-                    dio::names(held)
-                },
-                if held.count_ones() == 1 { "it" } else { "them" }
-            ),
             Err(DioError::Split(group)) => bail!(
                 "{} change direction together, so make them all outputs or all inputs",
                 dio::names(group)
@@ -1629,13 +1620,6 @@ fn dio<B: Bus>(bus: &B, args: &DioArgs, serial: Option<&str>) -> Result<()> {
             } else {
                 outputln!("  DIO{n}  input   reads {}", level(after.read & bit != 0));
             }
-        }
-        let held = if pro_board { 0 } else { dio::ALL & !after.pins };
-        if held != 0 {
-            outputln!(
-                "A bench tool's command marker holds {} until the probe restarts.",
-                dio::names(held)
-            );
         }
         let groups: Vec<String> = after
             .groups

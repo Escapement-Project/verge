@@ -1328,13 +1328,6 @@ fn pictures_of_the_fix_round(
     let mut h = bench("ours-plain", "DIO3 output");
     press(&mut h, "Restart");
     shoot(&mut h, "47g-bench-restart-question");
-    let bus = SimBus::scenario("ours-plain").unwrap();
-    bus.mark_dio(0, 0x0C);
-    let mut h = rendered_at(window_on(bus, work("marked"), false), size);
-    steps(&mut h, 40);
-    press(&mut h, "Bench");
-    until_contains(&mut h, "held by a bench tool's command marker");
-    shoot(&mut h, "47h-bench-two-pins-marked");
     let mut h = bench("ours-pro-and-plain", "Turn");
     h.get_by_role(Role::ComboBox).click();
     steps(&mut h, 5);
@@ -2895,22 +2888,6 @@ fn bench_switches_the_supply_of_a_pro_without_its_energy_circuit_or_dio() {
     until(&mut h, "Turn off");
 }
 
-/// A standalone MCU-Link whose J8 pins a bench tool's command marker holds says so, and how to
-/// give them back, in place of the pins.
-#[test]
-fn bench_says_when_the_bench_marker_holds_every_dio_pin() {
-    let bus = SimBus::scenario("ours-plain").unwrap();
-    bus.mark_dio(0, 0x0F);
-    let mut h = harness(sim_app(bus.clone(), vec![]));
-    until(&mut h, "Update to v0.3.0");
-    press(&mut h, "Bench");
-    until_contains(
-        &mut h,
-        "A bench tool has given the DIO pins to its command marker.",
-    );
-    assert!(h.query_by_label_contains("output").is_none());
-}
-
 /// A Pro without its energy circuit switches its target supply and drives its DIO pins as `verge
 /// power` and `verge dio` do, says why it measures nothing, and its question before driving a pin
 /// has no word of J8.
@@ -3522,16 +3499,14 @@ fn a_batch_paused_on_a_failed_unit_says_how_the_window_flashes_it() {
     panic!("the batch did not pause on the failed unit");
 }
 
-/// Bench restarts a unit running Verge after asking, as `verge restart` does, and gives a
-/// bench marker's pins back to DIO.
+/// Bench restarts a unit running Verge after asking, as `verge restart` does.
 #[test]
 fn bench_restarts_a_unit_after_asking() {
     let bus = SimBus::scenario("ours-plain").unwrap();
-    bus.mark_dio(0, 0x0F);
     let mut h = harness(sim_app(bus.clone(), vec![]));
     until(&mut h, "Update to v0.3.0");
     press(&mut h, "Bench");
-    until_contains(&mut h, "Restart the probe to give them back.");
+    until(&mut h, "DIO3 output");
     press(&mut h, "Restart");
     h.get_by_label_contains("Restart CJ3E7A91C2? Its DIO pins go back to inputs");
     assert!(!bus.log().iter().any(|l| l.contains("control 0x40 0x03")));
