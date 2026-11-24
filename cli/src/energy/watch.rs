@@ -930,8 +930,8 @@ mod tests {
             .collect()
     }
 
-    /// Over Verge Aux a watch follows a capture it found running with mode 6, and leaves it
-    /// running with mode 7, so no stream is left for nobody.
+    /// Over Verge Aux a watch follows a capture it found running with mode 10, and leaves it
+    /// running with mode 13, so no stream is left for nobody.
     #[test]
     fn leaving_a_capture_found_running_ends_its_stream() {
         let (bus, device) = pro_with_a_capture();

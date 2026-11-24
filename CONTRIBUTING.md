@@ -75,7 +75,7 @@ The scenarios are `bench`, `ours`, `stock`, `stock-old`, `stock-hid`, `daplink-r
 `arrivals`, `pro`, `ours-pro`, `ours-pro-old-aux`, `ours-pro-edge-loss`, `ours-pro-j15`,
 `ours-pro-debugger`, `ours-pro-aux-taken`, `ours-pro-energy`, `ours-pro-energy-failed`,
 `ours-pro-and-plain`, `ours-pro-held`, `ours-pro-unfitted`, `ours-pro-unfitted-j15`, `ours-plain`,
-`ours-plain-marked`, `ours-plain-busy`, `ours-plain-edge-loss`, `pro-old`, `fails-writes`,
+`ours-plain-busy`, `ours-plain-edge-loss`, `pro-old`, `fails-writes`,
 `unnamed-board`, `swd-jumper`, `pro-swd-jumper`, `stock-swd-jumper` and `denied`. Some of them:
 
 - `arrivals`: five probes are plugged in over the first eight seconds.

@@ -82,9 +82,7 @@ current range, as `verge energy calibration` shows them: each point's ADC code a
 stands for.
 
 DIO shows each pin's direction and level. Switching to output asks first: check that the target is
-not driving those pins. Inputs have pull-downs, and outputs read back their own drive. Pins that a
-bench tool's command marker holds are not listed, and the panel names them; Restart gives them
-back.
+not driving those pins. Inputs have pull-downs, and outputs read back their own drive.
 
 On a Pro, DIO0 to DIO2 change direction together, and DIO3 on its own. DIO needs the J15 jumper off
 when the probe started.
